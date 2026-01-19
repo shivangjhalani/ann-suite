@@ -1,0 +1,237 @@
+# ==============================================================================
+# ANN Benchmarking Suite - Complete Configuration Reference
+# ==============================================================================
+# This file documents ALL available configuration options.
+# Use this as a template for creating your own benchmark configurations.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# TOP-LEVEL CONFIGURATION
+# ------------------------------------------------------------------------------
+
+# Required: Human-readable benchmark name
+name: "Complete Configuration Example"
+
+# Optional: Description of this benchmark run
+description: "Demonstrates all available configuration options"
+
+# Directory paths (relative to where ann-suite is run, or absolute)
+data_dir: "./data"           # Base directory for datasets
+results_dir: "./results"     # Output directory for benchmark results
+index_dir: "./indices"       # Directory where algorithm indices are stored
+
+# Resource monitoring interval in milliseconds (50-1000)
+# Lower = more samples but higher overhead
+# Default: 100
+monitor_interval_ms: 50
+
+# ------------------------------------------------------------------------------
+# ALGORITHMS
+# ------------------------------------------------------------------------------
+# Each algorithm runs in a Docker container with build and search phases.
+# Search args support PARAMETER SWEEPS using list values:
+#   ef: [50, 100, 200]  # Expands to 3 separate benchmark runs
+# ------------------------------------------------------------------------------
+
+algorithms:
+
+  # ============================================================================
+  # HNSW - Hierarchical Navigable Small World (In-Memory)
+  # ============================================================================
+  - name: HNSW
+    
+    # Required: Docker image tag (must be built beforehand)
+    docker_image: ann-suite/hnsw:latest
+    
+    # Algorithm type: memory | disk | hybrid
+    # - memory: Pure in-memory algorithms (HNSW, Annoy, FAISS-IVF)
+    # - disk:   Disk-based algorithms (DiskANN, SPANN)
+    # - hybrid: Mixed approaches (cached disk indices)
+    algorithm_type: memory
+    
+    # Optional: Limit which datasets this algorithm runs on
+    # If omitted or empty, runs on ALL datasets speified below
+    # datasets: ["sift-10k", "glove-25-10k"]
+    
+    # Optional: Disable this algorithm temporarily
+    # disabled: true
+    
+    # Optional: CPU core affinity (pin to specific cores for consistent benchmarks)
+    # Examples: "0-3" (cores 0,1,2,3), "0,2,4" (specific cores)
+    cpu_limit: "0-3"
+    
+    # Optional: Memory limit for the container
+    # Examples: "8g", "4096m", "2g"
+    memory_limit: "8g"
+    
+    # Optional: Environment variables passed to the container
+    env_vars:
+      OMP_NUM_THREADS: "4"        # OpenMP thread count
+      # OPENBLAS_NUM_THREADS: "4" # OpenBLAS threads
+      # MKL_NUM_THREADS: "4"      # Intel MKL threads
+    
+    # BUILD PHASE configuration
+    build:
+      # Maximum time allowed for building the index (seconds, minimum 60)
+      timeout_seconds: 3600
+      
+      # Algorithm-specific build arguments (passed as JSON to container)
+      args:
+        # HNSW-specific parameters:
+        M: 16                 # Number of connections per layer (higher = better recall, more RAM)
+        ef_construction: 200  # Search depth during construction (higher = better quality)
+        num_threads: 4        # Threads for parallel construction
+    
+    # SEARCH PHASE configuration
+    search:
+      # Maximum time allowed for search phase (seconds, minimum 10)
+      timeout_seconds: 600
+      
+      # Number of nearest neighbors to retrieve (1-1000)
+      k: 10
+      
+      # Algorithm-specific search arguments
+      args:
+        # HNSW-specific parameters:
+        # Use lists for PARAMETER SWEEPS - each value creates a separate run
+        ef: [50, 100, 200]    # Search depth (higher = better recall, slower)
+        # ef: 100             # Or use scalar for single run
+
+  # ============================================================================
+  # DiskANN - Microsoft's Disk-Based Algorithm
+  # ============================================================================
+  - name: DiskANN
+    docker_image: ann-suite/diskann:latest
+    algorithm_type: disk
+    cpu_limit: "0-3"
+    memory_limit: "1g"
+    
+    env_vars:
+      OMP_NUM_THREADS: "4"
+    
+    build:
+      timeout_seconds: 7200   # Disk builds can take longer
+      args:
+        # DiskANN-specific build parameters:
+        R: 64                 # Graph degree (higher = better recall, larger index)
+        L: 100                # Build list size (higher = better quality)
+        alpha: 1.2            # Pruning parameter
+        num_threads: 4
+        # pq_disk_bytes: 0    # PQ compression (0 = disabled)
+        
+        # Memory Limits (CRITICAL for containerized environments)
+        build_memory_maximum: 2.0  # Max memory in GB to use during build
+        
+        # Note: search_memory_maximum is required at BUILD time to structure the
+        # index layout for the target search RAM limit.
+        search_memory_maximum: 0.5 # Max memory in GB for search index construction
+    
+    search:
+      timeout_seconds: 600
+      k: 10
+      args:
+        # DiskANN-specific search parameters:
+        Ls: [50, 100, 200]    # Search list size (parameter sweep)
+        beam_width: 2         # Beam search width
+        num_threads: 4
+        # num_nodes_to_cache: 0  # Nodes to cache in RAM
+
+# ------------------------------------------------------------------------------
+# DATASETS
+# ------------------------------------------------------------------------------
+# Define vector datasets for benchmarking. Download with:
+#   uv run python library/datasets/download.py --list
+#   uv run python library/datasets/download.py --dataset <name>
+# 
+# Supported file formats: .npy, .hdf5/.h5, .fvecs, .bvecs, .ivecs
+# ------------------------------------------------------------------------------
+
+datasets:
+
+  # ============================================================================
+  # SIFT-10K - Euclidean/L2 Distance
+  # ============================================================================
+  - name: sift-10k
+    
+    # Required: Path to base vectors (relative to data_dir)
+    base_path: sift-10k/base.npy
+    
+    # Optional: Path to query vectors (defaults to base_path if omitted)
+    query_path: sift-10k/queries.npy
+    
+    # Optional: Path to ground truth neighbors (required for recall calculation)
+    # Format: int32 array of shape (n_queries, k) with true neighbor indices
+    ground_truth_path: sift-10k/ground_truth.npy
+    
+    # Required: Vector dimension
+    dimension: 128
+    
+    # Optional: Distance metric
+    # L2 (Euclidean), IP (Inner Product), cosine, hamming
+    distance_metric: L2
+
+  # ============================================================================
+  # GloVe-25-10K - Cosine/Angular Distance
+  # ============================================================================
+  - name: glove-25-10k
+    base_path: glove-25-10k/base.npy
+    query_path: glove-25-10k/queries.npy
+    ground_truth_path: glove-25-10k/ground_truth.npy
+    dimension: 25
+    distance_metric: cosine
+
+# ==============================================================================
+# METRICS COLLECTED (Automatic - No Configuration Needed)
+# ==============================================================================
+# The suite automatically collects these structured metrics:
+#
+# CPUMetrics:
+#   - cpu_time_total_seconds   # Total CPU time from cgroups
+#   - avg_cpu_percent          # Average CPU utilization %
+#   - peak_cpu_percent         # Peak CPU utilization %
+#
+# MemoryMetrics:
+#   - peak_rss_mb              # Peak memory (RSS) in MB
+#   - avg_rss_mb               # Average memory in MB
+#
+# DiskIOMetrics (CRITICAL for disk-based algorithms):
+#   - avg_read_iops            # Read operations per second
+#   - avg_write_iops           # Write operations per second
+#   - avg_read_throughput_mbps # Read throughput MB/s
+#   - avg_write_throughput_mbps# Write throughput MB/s
+#   - total_pages_read         # Total 4KB pages read
+#   - total_pages_written      # Total 4KB pages written
+#   - pages_per_query          # Average pages per query
+#
+# LatencyMetrics:
+#   - mean_ms                  # Mean query latency
+#   - p50_ms                   # Median latency
+#   - p95_ms                   # 95th percentile
+#   - p99_ms                   # 99th percentile (tail latency)
+#
+# Quality Metrics:
+#   - recall                   # Recall@k (fraction of true neighbors found)
+#   - qps                      # Queries per second (throughput)
+#
+# ==============================================================================
+# OUTPUT EXAMPLE
+# ==============================================================================
+# ╭────────────────────────── HNSW on sift-10k ──────────────────────────╮
+# │   Algorithm                  HNSW                                    │
+# │   Recall@k                   0.9997                                  │
+# │   QPS                        19,594.7                                │
+# │                                                                      │
+# │   Latency                                                            │
+# │     Mean                     0.050 ms                                │
+# │     P50                      0.049 ms                                │
+# │     P95                      0.061 ms                                │
+# │     P99                      0.087 ms                                │
+# │                                                                      │
+# │   Resources                                                          │
+# │     Peak RAM                 35.4 MB                                 │
+# │                                                                      │
+# │   Hyperparameters                                                    │
+# │     build.M                  16                                      │
+# │     search.ef                100                                     │
+# ╰──────────────────────────────────────────────────────────────────────╯
+# ==============================================================================

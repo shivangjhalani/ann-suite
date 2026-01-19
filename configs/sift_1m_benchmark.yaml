@@ -1,0 +1,57 @@
+name: "HNSW vs DiskANN SIFT-1M Benchmark"
+description: "Benchmarking HNSW and DiskANN on full SIFT-1M dataset (128D, Euclidean)"
+
+data_dir: "./data"
+results_dir: "./results"
+index_dir: "./indices"
+
+monitor_interval_ms: 100
+
+algorithms:
+  - name: HNSW
+    disabled: true
+    docker_image: ann-suite/hnsw:latest
+    algorithm_type: memory
+    build:
+      timeout_seconds: 7200
+      args:
+        M: 16
+        ef_construction: 200
+        num_threads: 4
+    search:
+      timeout_seconds: 600
+      k: 10
+      args:
+        ef: 100
+
+  - name: DiskANN
+    docker_image: ann-suite/diskann:latest
+    algorithm_type: disk
+    build:
+      timeout_seconds: 14400
+      args:
+        R: 64
+        L: 100
+        alpha: 1.2
+        num_threads: 4
+        # Control build/search memory usage
+        build_memory_maximum: 0.6
+        # Note: search_memory_maximum is a BUILD argument because the index layout 
+        # must be optimized for the target search RAM limit during construction.
+        search_memory_maximum: 0.5
+    search:
+      timeout_seconds: 600
+      k: 10
+      args:
+        Ls: 100
+        beam_width: 2
+        num_threads: 4
+
+datasets:
+  - name: sift-128-euclidean
+    base_path: sift-128-euclidean/base.npy
+    query_path: sift-128-euclidean/queries.npy
+    ground_truth_path: sift-128-euclidean/ground_truth.npy
+    distance_metric: L2
+    dimension: 128
+    point_type: float32

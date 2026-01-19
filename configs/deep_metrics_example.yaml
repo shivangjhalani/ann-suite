@@ -1,0 +1,82 @@
+# ==============================================================================
+# ANN Benchmarking Suite - Deep Metrics Configuration Example
+# ==============================================================================
+# Demonstrates the new structured metrics system with parameter sweeps
+# ==============================================================================
+
+name: "Deep Metrics Benchmark"
+description: "Research-grade benchmark with structured metrics collection"
+
+# Directory configuration
+data_dir: "./data"
+results_dir: "./results"
+index_dir: "./indices"
+
+# Monitoring configuration (uses cgroups v2 when available)
+monitor_interval_ms: 50
+
+# ------------------------------------------------------------------------------
+# ALGORITHMS with Parameter Sweeps
+# ------------------------------------------------------------------------------
+algorithms:
+  - name: HNSW
+    docker_image: ann-suite/hnsw:latest
+    algorithm_type: memory
+    cpu_limit: "0-3"
+    memory_limit: "4g"
+    
+    build:
+      timeout_seconds: 1800
+      args:
+        M: 16
+        ef_construction: 200
+        num_threads: 4
+    
+    search:
+      timeout_seconds: 300
+      k: 10
+      args:
+        # Parameter sweep: test multiple ef values for recall vs QPS curves
+        ef: [50, 100, 200, 400]
+
+  - name: DiskANN
+    docker_image: ann-suite/diskann:latest
+    algorithm_type: disk
+    cpu_limit: "0-3"
+    memory_limit: "1g"
+    
+    build:
+      timeout_seconds: 3600
+      args:
+        R: 64
+        L: 100
+        num_threads: 4
+        pq_disk_bytes: 0
+        build_memory_maximum: 1.0
+    
+    search:
+      timeout_seconds: 600
+      k: 10
+      args:
+        # Parameter sweep: test multiple Ls values
+        Ls: [50, 100, 200]
+        beam_width: 2
+        num_threads: 4
+        num_nodes_to_cache: 0
+
+# ------------------------------------------------------------------------------
+# DATASETS
+# ------------------------------------------------------------------------------
+datasets:
+  - name: glove-25-angular
+    distance_metric: cosine
+    dimension: 25
+
+# ------------------------------------------------------------------------------
+# OUTPUT METRICS (for reference - these are collected automatically)
+# ------------------------------------------------------------------------------
+# CPU:     cpu_time_total_seconds, avg_cpu_percent, peak_cpu_percent
+# Memory:  peak_rss_mb, avg_rss_mb
+# Disk:    avg_read_iops, avg_write_iops, total_pages_read, pages_per_query (CRITICAL)
+# Latency: mean_ms, p50_ms, p95_ms, p99_ms
+# Quality: recall, qps

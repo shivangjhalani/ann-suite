@@ -1,0 +1,81 @@
+# Dataset Registry for ANN Benchmarking Suite
+#
+# This file defines all available datasets with their metadata.
+# Datasets are downloaded from ann-benchmarks.com and converted to NumPy format.
+#
+# To add a new dataset:
+# 1. Add an entry below with the required fields
+# 2. Run: uv run python library/datasets/download.py --dataset <name>
+
+datasets:
+  # ============================================================================
+  # Small Datasets (for quick testing)
+  # ============================================================================
+  
+  sift-128-euclidean:
+    description: "SIFT image descriptors - classic ANN benchmark (128D, Euclidean)"
+    url: "https://ann-benchmarks.com/sift-128-euclidean.hdf5"
+    format: hdf5
+    distance_metric: L2
+    dimension: 128
+    base_count: 1000000
+    query_count: 10000
+    point_type: float32
+    # For small tests, we'll use a subset
+    subsets:
+      sift-10k:
+        base_count: 10000
+        query_count: 1000
+
+  glove-25-angular:
+    description: "GloVe word embeddings - 25D angular/cosine distance"
+    url: "http://ann-benchmarks.com/glove-25-angular.hdf5"
+    format: hdf5
+    distance_metric: cosine
+    dimension: 25
+    base_count: 1183514
+    query_count: 10000
+    point_type: float32
+    # For small tests, we'll use a subset
+    subsets:
+      glove-25-10k:
+        base_count: 10000
+        query_count: 1000
+
+  # ============================================================================
+  # Medium Datasets
+  # ============================================================================
+  
+  fashion-mnist-784-euclidean:
+    description: "Fashion-MNIST images flattened to 784D vectors"
+    url: "http://ann-benchmarks.com/fashion-mnist-784-euclidean.hdf5"
+    format: hdf5
+    distance_metric: L2
+    dimension: 784
+    base_count: 60000
+    query_count: 10000
+    point_type: float32
+
+  glove-100-angular:
+    description: "GloVe word embeddings - 100D angular/cosine distance"
+    url: "http://ann-benchmarks.com/glove-100-angular.hdf5"
+    format: hdf5
+    distance_metric: cosine
+    dimension: 100
+    base_count: 1183514
+    query_count: 10000
+    point_type: float32
+
+  # ============================================================================
+  # Large Datasets (for production benchmarking)
+  # ============================================================================
+  
+  gist-960-euclidean:
+    description: "GIST image descriptors - high dimensional (960D)"
+    url: "http://ann-benchmarks.com/gist-960-euclidean.hdf5"
+    format: hdf5
+    distance_metric: L2
+    dimension: 960
+    base_count: 1000000
+    query_count: 1000
+    point_type: float32

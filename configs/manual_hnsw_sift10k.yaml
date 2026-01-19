@@ -1,0 +1,26 @@
+name: "Manual HNSW SIFT-10K"
+data_dir: "./data"
+results_dir: "./results"
+
+algorithms:
+  - name: HNSW
+    docker_image: ann-suite/hnsw:latest
+    algorithm_type: memory
+    build:
+      timeout_seconds: 600
+      args:
+        M: 16
+        ef_construction: 200
+    search:
+      timeout_seconds: 600
+      k: 10
+      args:
+        ef: 100
+
+datasets:
+  - name: sift-10k
+    base_path: sift-10k/base.npy
+    query_path: sift-10k/queries.npy
+    ground_truth_path: sift-10k/ground_truth.npy
+    distance_metric: L2
+    dimension: 128
