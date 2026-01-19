@@ -1,94 +1,112 @@
 # ANN Benchmarking Suite
 
-A production-grade **Approximate Nearest Neighbor (ANN) Benchmarking Suite** with:
+The new de-facto standard for production-grade Approximate Nearest Neighbor (ANN) benchmarking. 
 
-- 🐳 **Containerized Isolation**: Every algorithm runs in its own Docker container
-- 📊 **Deep Observability**: Structured metrics for CPU, Memory, Disk I/O, Latency, and Algorithm-specific data
-- 🔧 **cgroups v2 Integration**: Accurate IOPS and throughput from kernel-level metrics
-- 💾 **Storage Modes**: Evaluates both in-memory and disk-based algorithms
-- 📈 **Parameter Sweeps**: Test multiple parameter combinations in a single run
-- ⚙️ **Modular & Configurable**: YAML configs, pluggable algorithms and datasets, extensible metrics
+Designed for **Deep Observability**, **Containerized Isolation**, and **Real-World Fidelity**, this suite solves the "it works on my machine" problem in ANN research by running every algorithm in a strictly isolated container with kernel-level resource monitoring.
 
-## Quick Start
+## 🚀 Why Use This Suite?
+
+- **Strict Isolation**: Every algorithm runs in its own Docker container. No dependency conflicts, no pollution.
+- **Kernel-Level Observability**: Uses `cgroups v2` to measure **true** Disk I/O, Page Faults, and CPU usage, not just what the Python process reports.
+- **Disk & Memory Support**: First-class support for disk-based algorithms (like DiskANN) with accurate I/O metrics.
+- **Production Ready**: Configurable via YAML, supports parameter sweeps, and exports results to JSON/CSV for analysis.
+
+---
+
+## ⚡ Quick Start
+
+### 1. Installation
+We use `uv` for modern, fast Python management.
 
 ```bash
-# Install dependencies
-cd ann-suite && uv sync
+# Clone and sync dependencies
+cd ann-suite
+uv sync
+```
 
+### 2. Prepare Data
+Download standard datasets or bring your own.
+
+```bash
 # List available datasets
 uv run ann-suite download --list
 
-# Download test datasets
+# Download SIFT-10K (Small, good for testing)
 uv run ann-suite download --dataset sift-10k
+```
 
-# Build algorithm containers
+### 3. Build Algorithms
+Algorithms are containerized. You must build them before running.
+
+```bash
+# Build HNSW (In-Memory)
 uv run ann-suite build --algorithm HNSW
-uv run ann-suite build --algorithm DiskANN
 
-# Run benchmark
+# Build DiskANN (Disk-Based)
+uv run ann-suite build --algorithm DiskANN
+```
+
+### 4. Run a Benchmark
+Run a comparison using a declarative config file.
+
+```bash
+# Run a comparison between HNSW and DiskANN
 uv run ann-suite run --config configs/hnsw_vs_diskann.yaml
 ```
 
-## Features
+---
 
-### Structured Metrics
+## 📚 Documentation
 
-| Category | Metrics |
-|----------|---------|
-| **CPU** | `cpu_time_total_seconds`, `avg_cpu_percent`, `peak_cpu_percent` |
-| **Memory** | `peak_rss_mb`, `avg_rss_mb` |
-| **Disk I/O** | `avg_read_iops`, `avg_write_iops`, `total_pages_read`, `pages_per_query` |
-| **Latency** | `mean_ms`, `p50_ms`, `p95_ms`, `p99_ms` |
+Detailed documentation is available in the `docs/` directory:
 
-### Parameter Sweeps
+- **[CONFIGURATION.md](docs/CONFIGURATION.md)**: Learn how to write benchmark config files, configure parameter sweeps, and tune resource limits.
+- **[METRICS.md](docs/METRICS.md)**: Comprehensive reference for all collected metrics (Recall, QPS, Latency P99, Disk IOPS, etc.).
+- **[ADDING_ALGORITHMS.md](docs/ADDING_ALGORITHMS.md)**: Guide to adding new algorithms (Python, C++, Rust, etc.) via Docker.
+- **[ADDING_DATASETS.md](docs/ADDING_DATASETS.md)**: How to register custom datasets.
+- **[ARCHITECTURE.md](docs/ARCHITECTURE.md)**: Deep dive into the system design, isolation strategy, and metric collection pipelien.
 
-Test multiple parameter values in a single benchmark run:
+---
 
-```yaml
-algorithms:
-  - name: HNSW
-    search:
-      args:
-        ef: [50, 100, 200, 400]  # Runs 4 benchmarks with different ef values
+## 🛠️ CLI Reference
+
+The suite provides a rich CLI for managing the entire benchmarking lifecycle.
+
+### `ann-suite run`
+Execute a benchmark from a config file.
+```bash
+uv run ann-suite run --config configs/my_benchmark.yaml --output ./results
 ```
 
-### cgroups v2 Collector
+### `ann-suite report`
+View or export results from previous runs.
+```bash
+# View as table
+uv run ann-suite report --run "HNSW vs DiskANN"
 
-Automatically uses cgroups v2 for accurate I/O metrics when available:
-
+# Export to JSON or CSV
+uv run ann-suite report --format json > results.json
 ```
-INFO: CgroupsV2Collector available - will collect enhanced I/O metrics
+
+### `ann-suite build`
+Build algorithm containers.
+```bash
+uv run ann-suite build --algorithm HNSW --force
 ```
 
-## Requirements
+### `ann-suite download`
+Manage datasets.
+```bash
+uv run ann-suite download --dataset glove-25-angular
+```
 
-- Python 3.12+
-- Docker 24.0+
-- uv (package manager)
-- Linux with cgroups v2 (recommended for I/O metrics)
+### `ann-suite init-config`
+Generate a sample configuration file to get started.
+```bash
+uv run ann-suite init-config --output my_config.yaml
+```
 
-## Documentation
-
-| Document | Description |
-|----------|-------------|
-| [METRICS.md](docs/METRICS.md) | Complete metrics reference |
-| [CONFIGURATION.md](docs/CONFIGURATION.md) | Config file options |
-| [ADDING_ALGORITHMS.md](docs/ADDING_ALGORITHMS.md) | How to add new algorithms |
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture |
-
-## Available Algorithms
-
-| Algorithm | Type | Library | Description |
-|-----------|------|---------|-------------|
-| HNSW | memory | hnswlib | Graph-based search with excellent recall-QPS tradeoff |
-| DiskANN | disk | diskannpy | Microsoft's billion-scale disk-based algorithm |
-
-## Available Datasets
-
-| Dataset | Dimension | Distance | Vectors |
-|---------|-----------|----------|---------|
-| sift-10k | 128 | L2 | 10K |
-| glove-25-10k | 25 | cosine | 10K |
+---
 
 ## License
 
