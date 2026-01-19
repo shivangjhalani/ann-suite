@@ -29,27 +29,6 @@ uv run ann-suite build --algorithm DiskANN
 uv run ann-suite run --config configs/hnsw_vs_diskann.yaml
 ```
 
-## Example Output
-
-```
-╭────────────────────── HNSW on sift-10k ──────────────────────╮
-│   Recall@k                   0.9997                          │
-│   QPS                        19,594.7                        │
-│   Build Time                 2.21s                           │
-│                                                              │
-│   Latency                                                    │
-│     Mean                     0.050 ms                        │
-│     P99                      0.087 ms                        │
-│                                                              │
-│   Resources                                                  │
-│     Peak RAM                 35.4 MB                         │
-│                                                              │
-│   Hyperparameters                                            │
-│     build.M                  16                              │
-│     search.ef                100                             │
-╰──────────────────────────────────────────────────────────────╯
-```
-
 ## Features
 
 ### Structured Metrics
