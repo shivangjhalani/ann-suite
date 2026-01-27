@@ -1,18 +1,3 @@
-# ANN Benchmarking Suite
-
-The new de-facto standard for production-grade Approximate Nearest Neighbor (ANN) benchmarking. 
-
-Designed for **Deep Observability**, **Containerized Isolation**, and **Real-World Fidelity**, this suite solves the "it works on my machine" problem in ANN research by running every algorithm in a strictly isolated container with kernel-level resource monitoring.
-
-## 🚀 Why Use This Suite?
-
-- **Strict Isolation**: Every algorithm runs in its own Docker container. No dependency conflicts, no pollution.
-- **Kernel-Level Observability**: Uses `cgroups v2` to measure **true** Disk I/O, Page Faults, and CPU usage, not just what the Python process reports.
-- **Disk & Memory Support**: First-class support for disk-based algorithms (like DiskANN) with accurate I/O metrics.
-- **Production Ready**: Configurable via YAML, supports parameter sweeps, and exports results to JSON/CSV for analysis.
-
----
-
 ## ⚡ Quick Start
 
 ### 1. Installation
