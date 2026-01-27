@@ -245,6 +245,121 @@ The suite includes production implementations you can use as templates:
 
 ---
 
+## Optional: Shared Base Runner Utilities
+
+The suite provides optional shared utilities in `library/algorithms/base_runner.py` to reduce boilerplate code when implementing new algorithms. **These are completely optional** - you can write fully standalone runners like HNSW and DiskANN do.
+
+### What's Included
+
+| Utility | Purpose |
+|---------|---------|
+| `compute_recall()` | Standard recall@k calculation |
+| `compute_latency_percentiles()` | Compute mean, p50, p95, p99 latencies |
+| `run_algorithm()` | CLI entrypoint wrapper with JSON parsing |
+| `write_result_to_file()` | Write metrics.json for robust protocol |
+| `measure_search_latencies()` | Per-query latency measurement loop |
+
+### When to Use
+
+**Use base_runner.py when:**
+- You want less boilerplate code
+- You're implementing multiple algorithms and want consistency
+- You prefer importing tested utilities over copy-pasting
+
+**Write standalone runners when:**
+- You want maximum control and transparency
+- Your algorithm has unique requirements
+- You're copying from an existing runner as a template
+
+### Example: Using Base Runner
+
+```python
+# algorithm/runner.py
+import numpy as np
+from pathlib import Path
+
+# Import shared utilities
+import sys
+sys.path.insert(0, str(Path(__file__).parents[2]))  # Add library/algorithms to path
+from base_runner import compute_recall, compute_latency_percentiles, run_algorithm
+
+class MyIndex:
+    def build(self, data, **kwargs): ...
+    def search(self, query, k): ...
+
+def run_build(config):
+    data = np.load(config["dataset_path"])
+    index = MyIndex()
+    index.build(data)
+    index.save(config["index_path"])
+    return {"status": "success", "build_time_seconds": 1.0, "index_size_bytes": 1000}
+
+def run_search(config):
+    index = MyIndex.load(config["index_path"])
+    queries = np.load(config["queries_path"])
+    
+    # Measure latencies
+    latencies = []
+    results = []
+    for query in queries:
+        start = time.perf_counter()
+        results.append(index.search(query, k=config["k"]))
+        latencies.append((time.perf_counter() - start) * 1000)
+    
+    # Use shared utilities
+    latency_stats = compute_latency_percentiles(latencies)
+    recall = compute_recall(np.array(results), ground_truth, config["k"])
+    
+    return {
+        "status": "success",
+        "recall": recall,
+        "qps": len(queries) / sum(latencies) * 1000,
+        **latency_stats,
+    }
+
+if __name__ == "__main__":
+    run_algorithm("My Algorithm", run_build, run_search)
+```
+
+### Example: Standalone Runner (No Dependencies)
+
+```python
+# algorithm/runner.py - Fully self-contained, no imports from base_runner
+import argparse
+import json
+import sys
+import time
+import numpy as np
+
+def compute_recall(predicted, ground_truth, k):
+    """Compute recall@k."""
+    total = 0.0
+    for i in range(len(predicted)):
+        pred = set(predicted[i, :k].tolist())
+        true = set(ground_truth[i, :k].tolist())
+        total += len(pred & true) / k
+    return total / len(predicted)
+
+def run_build(config): ...
+def run_search(config): ...
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["build", "search"])
+    parser.add_argument("--config", type=str)
+    args = parser.parse_args()
+    
+    config = json.loads(args.config)
+    result = run_build(config) if args.mode == "build" else run_search(config)
+    print(json.dumps(result))
+    sys.exit(0 if result["status"] == "success" else 1)
+
+if __name__ == "__main__":
+    main()
+```
+
+> **Note**: The existing HNSW and DiskANN implementations are standalone and do not use `base_runner.py`. They serve as complete, working examples of this approach.
+
 ## Debugging Tips
 
 1. **Test locally first:**

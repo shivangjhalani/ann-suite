@@ -1,8 +1,11 @@
-name: "Manual HNSW SIFT-10K"
-data_dir: "./data"
+name: "HNSW vs DiskANN on SIFT-10K"
+description: "Quick test benchmark comparing in-memory and disk-based algorithms"
+data_dir: "./library/datasets"
 results_dir: "./results"
+index_dir: "./indices"
 
 algorithms:
+  # In-memory algorithm
   - name: HNSW
     docker_image: ann-suite/hnsw:latest
     algorithm_type: memory
@@ -16,6 +19,26 @@ algorithms:
       k: 10
       args:
         ef: 100
+
+  # Disk-based algorithm
+  - name: DiskANN
+    docker_image: ann-suite/diskann:latest
+    algorithm_type: disk
+    build:
+      timeout_seconds: 1800
+      args:
+        R: 64
+        L: 100
+        num_threads: 4
+        build_memory_maximum: 2.0
+        search_memory_maximum: 0.5
+    search:
+      timeout_seconds: 600
+      k: 10
+      args:
+        Ls: 100
+        beam_width: 2
+        num_threads: 4
 
 datasets:
   - name: sift-10k

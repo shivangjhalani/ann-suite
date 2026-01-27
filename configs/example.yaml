@@ -44,6 +44,9 @@ algorithms:
     docker_image: ann-suite/hnsw:latest
     
     # Algorithm type: memory | disk | hybrid
+    # Currently INFORMATIONAL - used for categorization and display purposes.
+    # Does not change benchmark behavior (both types run identical pipeline).
+    # Future: may enable type-specific optimizations like page cache clearing for disk.
     # - memory: Pure in-memory algorithms (HNSW, Annoy, FAISS-IVF)
     # - disk:   Disk-based algorithms (DiskANN, SPANN)
     # - hybrid: Mixed approaches (cached disk indices)

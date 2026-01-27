@@ -84,6 +84,8 @@ algorithms:
 | `disk` | Disk-based algorithms | DiskANN, SPANN |
 | `hybrid` | Mixed memory/disk | Cached disk indices |
 
+> **Note**: The `algorithm_type` field is currently **informational only**. It is used for categorization, display, and documentation purposes but does not change benchmark behavior. Both memory and disk algorithms run through the same pipeline. Future versions may use this to enable type-specific optimizations (e.g., automatic page cache clearing for disk-based algorithms).
+
 ### Build Configuration
 
 | Field | Type | Default | Description |
@@ -344,3 +346,62 @@ The configuration is validated using Pydantic with these constraints:
 - `search.k`: 1 ≤ k ≤ 1000
 
 Invalid configurations will raise validation errors with helpful messages.
+
+---
+
+## Reproducibility Recommendations
+
+For reproducible and fair benchmark results, consider the following best practices:
+
+### System Preparation
+
+```bash
+# Clear page cache before disk-based benchmarks (requires root)
+sudo sync && echo 3 | sudo tee /proc/sys/vm/drop_caches
+
+# Disable CPU frequency scaling for consistent performance
+sudo cpupower frequency-set -g performance
+```
+
+### Configuration Settings
+
+```yaml
+algorithms:
+  - name: DiskANN
+    docker_image: ann-suite/diskann:latest
+    
+    # Pin to specific CPU cores for consistent timing
+    cpu_limit: "0-3"
+    
+    # Set memory limit to prevent swap usage
+    memory_limit: "4g"
+    
+    # Control thread count explicitly
+    env_vars:
+      OMP_NUM_THREADS: "4"
+```
+
+### Checklist for Reproducibility
+
+| Factor | Recommendation |
+|--------|----------------|
+| **Page Cache** | Clear before each disk-based benchmark run |
+| **CPU Affinity** | Use `cpu_limit` to pin containers to specific cores |
+| **Memory Limit** | Set explicit limits to prevent swap |
+| **Thread Count** | Control via environment variables |
+| **Warm-up** | Consider running a warm-up iteration before measurement |
+| **Multiple Runs** | Report mean and variance from multiple runs |
+| **Container Images** | Version and tag all Docker images |
+| **Dataset Subsets** | Use deterministic sampling (suite uses seed=42) |
+
+### What's NOT Controlled
+
+The suite does not automatically control:
+
+- Page cache state (must be cleared manually for disk benchmarks)
+- CPU frequency scaling (handled at OS level)
+- Background processes and system load
+- Container image caching (first run may include image pull)
+
+> **Tip**: For rigorous benchmarks, run each configuration multiple times and report the median with confidence intervals.
+

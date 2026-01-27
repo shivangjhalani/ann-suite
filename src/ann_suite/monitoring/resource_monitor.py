@@ -5,7 +5,6 @@ from running Docker containers, including:
 - Memory usage (peak and average)
 - Block I/O statistics (read/write bytes and IOPS)
 - CPU utilization
-- Network I/O
 
 The monitor runs in a background thread and samples at configurable intervals.
 """

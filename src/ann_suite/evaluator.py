@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -142,8 +143,11 @@ class BenchmarkEvaluator:
         results: list[BenchmarkResult] = []
         algorithms = self.config.enabled_algorithms
 
+        # Generate run_id for log correlation with stored results
+        run_id = str(uuid.uuid4())[:8]
+
         logger.info(
-            f"Starting benchmark: {len(algorithms)} algorithms, "
+            f"[{run_id}] Starting benchmark: {len(algorithms)} algorithms, "
             f"{len(self.config.datasets)} datasets"
         )
 
@@ -164,14 +168,14 @@ class BenchmarkEvaluator:
                 algo_datasets = self.config.datasets  # All datasets
 
             for dataset_config in algo_datasets:
-                logger.info(f"Benchmarking: {algo_config.name} on {dataset_config.name}")
+                logger.info(f"[{run_id}] Benchmarking: {algo_config.name} on {dataset_config.name}")
 
                 # Load dataset from cache or prepare it
                 if dataset_config.name not in dataset_cache:
                     try:
                         dataset_cache[dataset_config.name] = self._prepare_dataset(dataset_config)
                     except Exception as e:
-                        logger.error(f"Failed to load dataset {dataset_config.name}: {e}")
+                        logger.error(f"[{run_id}] Failed to load dataset {dataset_config.name}: {e}")
                         continue
 
                 base_vectors, query_vectors, ground_truth = dataset_cache[dataset_config.name]
@@ -180,13 +184,13 @@ class BenchmarkEvaluator:
                 search_param_combos = expand_sweep_params(algo_config.search.args)
                 n_combos = len(search_param_combos)
                 if n_combos > 1:
-                    logger.info(f"  Running {n_combos} parameter combinations for sweep")
+                    logger.info(f"[{run_id}]   Running {n_combos} parameter combinations for sweep")
 
                 for param_idx, search_params in enumerate(search_param_combos):
                     # Create modified config with expanded params
                     if n_combos > 1:
                         sweep_info = ", ".join(f"{k}={v}" for k, v in search_params.items())
-                        logger.info(f"  [{param_idx + 1}/{n_combos}] {sweep_info}")
+                        logger.info(f"[{run_id}]   [{param_idx + 1}/{n_combos}] {sweep_info}")
 
                     try:
                         result = self._run_single_benchmark(
@@ -199,13 +203,13 @@ class BenchmarkEvaluator:
                         )
                         results.append(result)
                         logger.info(
-                            f"Completed: {algo_config.name} - "
+                            f"[{run_id}] Completed: {algo_config.name} - "
                             f"recall={result.recall:.4f}, qps={result.qps:.1f}"
                             if result.recall and result.qps
-                            else f"Completed: {algo_config.name}"
+                            else f"[{run_id}] Completed: {algo_config.name}"
                         )
                     except Exception as e:
-                        logger.error(f"Benchmark failed for {algo_config.name}: {e}")
+                        logger.error(f"[{run_id}] Benchmark failed for {algo_config.name}: {e}")
                         # Create a failed result
                         results.append(
                             BenchmarkResult(

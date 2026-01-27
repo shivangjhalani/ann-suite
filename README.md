@@ -51,7 +51,7 @@ Run a comparison using a declarative config file.
 
 ```bash
 # Run a comparison between HNSW and DiskANN
-uv run ann-suite run --config configs/hnsw_vs_diskann.yaml
+uv run ann-suite run --config configs/example.yaml
 ```
 
 ---
@@ -64,7 +64,7 @@ Detailed documentation is available in the `docs/` directory:
 - **[METRICS.md](docs/METRICS.md)**: Comprehensive reference for all collected metrics (Recall, QPS, Latency P99, Disk IOPS, etc.).
 - **[ADDING_ALGORITHMS.md](docs/ADDING_ALGORITHMS.md)**: Guide to adding new algorithms (Python, C++, Rust, etc.) via Docker.
 - **[ADDING_DATASETS.md](docs/ADDING_DATASETS.md)**: How to register custom datasets.
-- **[ARCHITECTURE.md](docs/ARCHITECTURE.md)**: Deep dive into the system design, isolation strategy, and metric collection pipelien.
+- **[ARCHITECTURE.md](docs/ARCHITECTURE.md)**: Deep dive into the system design, isolation strategy, and metric collection pipeline.
 
 ---
 
