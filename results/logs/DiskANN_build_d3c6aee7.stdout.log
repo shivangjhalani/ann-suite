@@ -1,0 +1,427 @@
+Starting index build: R=64 L=100 Query RAM budget: 5.36871e+08 Indexing ram budget: 0.6 T: 4
+Compressing 128-dimensional data into 128 bytes per vector.
+Opened: /data/index/DiskANN/sift-128-euclidean/data.bin, size: 512000008, cache_size: 67108864
+Training data with 255956 samples loaded.
+Processing chunk 0 with dimensions [0, 1)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 1 with dimensions [1, 2)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 2 with dimensions [2, 3)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 3 with dimensions [3, 4)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 4 with dimensions [4, 5)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 5 with dimensions [5, 6)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 6 with dimensions [6, 7)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 7 with dimensions [7, 8)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 8 with dimensions [8, 9)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 9 with dimensions [9, 10)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 10 with dimensions [10, 11)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 11 with dimensions [11, 12)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 12 with dimensions [12, 13)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 13 with dimensions [13, 14)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 14 with dimensions [14, 15)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 15 with dimensions [15, 16)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 16 with dimensions [16, 17)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 17 with dimensions [17, 18)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 18 with dimensions [18, 19)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 19 with dimensions [19, 20)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 20 with dimensions [20, 21)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 21 with dimensions [21, 22)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 22 with dimensions [22, 23)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 23 with dimensions [23, 24)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 24 with dimensions [24, 25)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 25 with dimensions [25, 26)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 26 with dimensions [26, 27)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 27 with dimensions [27, 28)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 28 with dimensions [28, 29)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 29 with dimensions [29, 30)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 30 with dimensions [30, 31)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 31 with dimensions [31, 32)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 32 with dimensions [32, 33)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 33 with dimensions [33, 34)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 34 with dimensions [34, 35)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 35 with dimensions [35, 36)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 36 with dimensions [36, 37)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 37 with dimensions [37, 38)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 38 with dimensions [38, 39)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 39 with dimensions [39, 40)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 40 with dimensions [40, 41)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 41 with dimensions [41, 42)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 42 with dimensions [42, 43)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 43 with dimensions [43, 44)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 44 with dimensions [44, 45)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 45 with dimensions [45, 46)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 46 with dimensions [46, 47)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 47 with dimensions [47, 48)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 48 with dimensions [48, 49)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 49 with dimensions [49, 50)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 50 with dimensions [50, 51)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 51 with dimensions [51, 52)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 52 with dimensions [52, 53)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 53 with dimensions [53, 54)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 54 with dimensions [54, 55)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 55 with dimensions [55, 56)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 56 with dimensions [56, 57)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 57 with dimensions [57, 58)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 58 with dimensions [58, 59)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 59 with dimensions [59, 60)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 60 with dimensions [60, 61)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 61 with dimensions [61, 62)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 62 with dimensions [62, 63)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 63 with dimensions [63, 64)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 64 with dimensions [64, 65)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 65 with dimensions [65, 66)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 66 with dimensions [66, 67)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 67 with dimensions [67, 68)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 68 with dimensions [68, 69)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 69 with dimensions [69, 70)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 70 with dimensions [70, 71)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 71 with dimensions [71, 72)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 72 with dimensions [72, 73)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 73 with dimensions [73, 74)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 74 with dimensions [74, 75)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 75 with dimensions [75, 76)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 76 with dimensions [76, 77)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 77 with dimensions [77, 78)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 78 with dimensions [78, 79)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 79 with dimensions [79, 80)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 80 with dimensions [80, 81)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 81 with dimensions [81, 82)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 82 with dimensions [82, 83)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 83 with dimensions [83, 84)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 84 with dimensions [84, 85)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 85 with dimensions [85, 86)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 86 with dimensions [86, 87)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 87 with dimensions [87, 88)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 88 with dimensions [88, 89)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 89 with dimensions [89, 90)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 90 with dimensions [90, 91)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 91 with dimensions [91, 92)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 92 with dimensions [92, 93)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 93 with dimensions [93, 94)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 94 with dimensions [94, 95)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 95 with dimensions [95, 96)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 96 with dimensions [96, 97)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 97 with dimensions [97, 98)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 98 with dimensions [98, 99)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 99 with dimensions [99, 100)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 100 with dimensions [100, 101)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 101 with dimensions [101, 102)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 102 with dimensions [102, 103)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 103 with dimensions [103, 104)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 104 with dimensions [104, 105)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 105 with dimensions [105, 106)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 106 with dimensions [106, 107)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 107 with dimensions [107, 108)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 108 with dimensions [108, 109)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 109 with dimensions [109, 110)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 110 with dimensions [110, 111)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 111 with dimensions [111, 112)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 112 with dimensions [112, 113)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 113 with dimensions [113, 114)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 114 with dimensions [114, 115)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 115 with dimensions [115, 116)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 116 with dimensions [116, 117)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 117 with dimensions [117, 118)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 118 with dimensions [118, 119)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 119 with dimensions [119, 120)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 120 with dimensions [120, 121)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 121 with dimensions [121, 122)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 122 with dimensions [122, 123)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 123 with dimensions [123, 124)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 124 with dimensions [124, 125)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 125 with dimensions [125, 126)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 126 with dimensions [126, 127)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Processing chunk 127 with dimensions [127, 128)
+Residuals unchanged: 3.40282e+38 becomes 0. Early termination.
+Writing bin: /data/index/DiskANN/sift-128-euclidean/ann_pq_pivots.bin
+bin: #pts = 256, #dims = 128, size = 131080B
+Finished writing bin.
+Writing bin: /data/index/DiskANN/sift-128-euclidean/ann_pq_pivots.bin
+bin: #pts = 128, #dims = 1, size = 520B
+Finished writing bin.
+Writing bin: /data/index/DiskANN/sift-128-euclidean/ann_pq_pivots.bin
+bin: #pts = 129, #dims = 1, size = 524B
+Finished writing bin.
+Writing bin: /data/index/DiskANN/sift-128-euclidean/ann_pq_pivots.bin
+bin: #pts = 4, #dims = 1, size = 40B
+Finished writing bin.
+Saved pq pivot data to /data/index/DiskANN/sift-128-euclidean/ann_pq_pivots.bin of size 136220B.
+Opened: /data/index/DiskANN/sift-128-euclidean/data.bin, size: 512000008, cache_size: 67108864
+Reading bin file /data/index/DiskANN/sift-128-euclidean/ann_pq_pivots.bin ...
+Opening bin file /data/index/DiskANN/sift-128-euclidean/ann_pq_pivots.bin... 
+Metadata: #pts = 4, #dims = 1...
+done.
+Reading bin file /data/index/DiskANN/sift-128-euclidean/ann_pq_pivots.bin ...
+Opening bin file /data/index/DiskANN/sift-128-euclidean/ann_pq_pivots.bin... 
+Metadata: #pts = 256, #dims = 128...
+done.
+Reading bin file /data/index/DiskANN/sift-128-euclidean/ann_pq_pivots.bin ...
+Opening bin file /data/index/DiskANN/sift-128-euclidean/ann_pq_pivots.bin... 
+Metadata: #pts = 128, #dims = 1...
+done.
+Reading bin file /data/index/DiskANN/sift-128-euclidean/ann_pq_pivots.bin ...
+Opening bin file /data/index/DiskANN/sift-128-euclidean/ann_pq_pivots.bin... 
+Metadata: #pts = 129, #dims = 1...
+done.
+Loaded PQ pivot information
+Processing points  [0, 1000000)...done.
+Time for generating quantized data: 98.042870 seconds
+Opened: /data/index/DiskANN/sift-128-euclidean/data.bin, size: 512000008, cache_size: 67108864
+Opened: /data/index/DiskANN/sift-128-euclidean/data.bin, size: 512000008, cache_size: 67108864
+Processing global k-means (kmeans_partitioning Step)
+Residuals unchanged: 2.5047e+10 becomes 2.50468e+10. Early termination.
+Estimated cluster sizes: 125101 195010 192419 
+With 3 parts, max estimated RAM usage: 0.607452GB, budget given is 0.6
+Processing global k-means (kmeans_partitioning Step)
+Estimated cluster sizes: 61797 57156 131813 88807 172957 
+With 5 parts, max estimated RAM usage: 0.538758GB, budget given is 0.6
+Saving global k-center pivots
+Writing bin: /data/index/DiskANN/sift-128-euclidean/ann_mem.index_tempFiles_centroids.bin
+bin: #pts = 5, #dims = 128, size = 2568B
+Finished writing bin.
+Opened: /data/index/DiskANN/sift-128-euclidean/data.bin, size: 512000008, cache_size: 67108864
+Actual shard sizes: 241469 222899 514621 346154 674857 
+ Partitioned 1000000 with replication factor 2 to get 2000000 points across 5 shards 
+Time for partitioning data : 3.466583 seconds
+Opened: /data/index/DiskANN/sift-128-euclidean/data.bin, size: 512000008, cache_size: 67108864
+Reading bin file /data/index/DiskANN/sift-128-euclidean/ann_mem.index_tempFiles_subshard-0_ids_uint32.bin ...
+Opening bin file /data/index/DiskANN/sift-128-euclidean/ann_mem.index_tempFiles_subshard-0_ids_uint32.bin... 
+Metadata: #pts = 241469, #dims = 1...
+done.
+Shard has 241469 points
+Written file with 241469 points
+L2: Using AVX2 distance computation DistanceL2Float
+Passed, empty search_params while creating index config
+Using only first 241469 from file.. 
+Starting index build with 241469 points... 
+0% of index build completed.41.4132% of index build completed.82.8264% of index build completed.Starting final cleanup..done. Link time: 25.7357s
+Index built with degree: max:42  avg:35.1278  min:3  count(deg<2):0
+Not saving tags as they are not enabled.
+Time taken for save: 0.145356s.
+Opened: /data/index/DiskANN/sift-128-euclidean/data.bin, size: 512000008, cache_size: 67108864
+Reading bin file /data/index/DiskANN/sift-128-euclidean/ann_mem.index_tempFiles_subshard-1_ids_uint32.bin ...
+Opening bin file /data/index/DiskANN/sift-128-euclidean/ann_mem.index_tempFiles_subshard-1_ids_uint32.bin... 
+Metadata: #pts = 222899, #dims = 1...
+done.
+Shard has 222899 points
+Written file with 222899 points
+L2: Using AVX2 distance computation DistanceL2Float
+Passed, empty search_params while creating index config
+Using only first 222899 from file.. 
+Starting index build with 222899 points... 
+0% of index build completed.44.8634% of index build completed.89.7267% of index build completed.Starting final cleanup..done. Link time: 23.0825s
+Index built with degree: max:42  avg:34.8654  min:3  count(deg<2):0
+Not saving tags as they are not enabled.
+Time taken for save: 0.140977s.
+Opened: /data/index/DiskANN/sift-128-euclidean/data.bin, size: 512000008, cache_size: 67108864
+Reading bin file /data/index/DiskANN/sift-128-euclidean/ann_mem.index_tempFiles_subshard-2_ids_uint32.bin ...
+Opening bin file /data/index/DiskANN/sift-128-euclidean/ann_mem.index_tempFiles_subshard-2_ids_uint32.bin... 
+Metadata: #pts = 514621, #dims = 1...
+done.
+Shard has 514621 points
+Written file with 514621 points
+L2: Using AVX2 distance computation DistanceL2Float
+Passed, empty search_params while creating index config
+Using only first 514621 from file.. 
+Starting index build with 514621 points... 
+0% of index build completed.19.4318% of index build completed.38.8636% of index build completed.58.2953% of index build completed.77.7271% of index build completed.97.1589% of index build completed.Starting final cleanup..done. Link time: 65.4843s
+Index built with degree: max:42  avg:35.2898  min:2  count(deg<2):0
+Not saving tags as they are not enabled.
+Time taken for save: 0.298631s.
+Opened: /data/index/DiskANN/sift-128-euclidean/data.bin, size: 512000008, cache_size: 67108864
+Reading bin file /data/index/DiskANN/sift-128-euclidean/ann_mem.index_tempFiles_subshard-3_ids_uint32.bin ...
+Opening bin file /data/index/DiskANN/sift-128-euclidean/ann_mem.index_tempFiles_subshard-3_ids_uint32.bin... 
+Metadata: #pts = 346154, #dims = 1...
+done.
+Shard has 346154 points
+Written file with 346154 points
+L2: Using AVX2 distance computation DistanceL2Float
+Passed, empty search_params while creating index config
+Using only first 346154 from file.. 
+Starting index build with 346154 points... 
+0% of index build completed.28.8889% of index build completed.57.7778% of index build completed.86.6666% of index build completed.Starting final cleanup..done. Link time: 39.6918s
+Index built with degree: max:42  avg:35.188  min:3  count(deg<2):0
+Not saving tags as they are not enabled.
+Time taken for save: 0.216481s.
+Opened: /data/index/DiskANN/sift-128-euclidean/data.bin, size: 512000008, cache_size: 67108864
+Reading bin file /data/index/DiskANN/sift-128-euclidean/ann_mem.index_tempFiles_subshard-4_ids_uint32.bin ...
+Opening bin file /data/index/DiskANN/sift-128-euclidean/ann_mem.index_tempFiles_subshard-4_ids_uint32.bin... 
+Metadata: #pts = 674857, #dims = 1...
+done.
+Shard has 674857 points
+Written file with 674857 points
+L2: Using AVX2 distance computation DistanceL2Float
+Passed, empty search_params while creating index config
+Using only first 674857 from file.. 
+Starting index build with 674857 points... 
+0% of index build completed.14.818% of index build completed.29.6359% of index build completed.44.4539% of index build completed.59.2718% of index build completed.74.0898% of index build completed.88.9077% of index build completed.Starting final cleanup..done. Link time: 85.6104s
+Index built with degree: max:42  avg:35.9321  min:3  count(deg<2):0
+Not saving tags as they are not enabled.
+Time taken for save: 0.42933s.
+Time for building indices on shards: 245.066010 seconds
+# nodes: 1000000, max. degree: 64
+Creating inverse map -- shard #0
+Creating inverse map -- shard #1
+Creating inverse map -- shard #2
+Creating inverse map -- shard #3
+Creating inverse map -- shard #4
+Finished computing node -> shards map
+Opened: /data/index/DiskANN/sift-128-euclidean/ann_mem.index_tempFiles_subshard-0_mem.index, size: 34895020, cache_size: 34895020
+Opened: /data/index/DiskANN/sift-128-euclidean/ann_mem.index_tempFiles_subshard-1_mem.index, size: 31977448, cache_size: 31977448
+Opened: /data/index/DiskANN/sift-128-euclidean/ann_mem.index_tempFiles_subshard-2_mem.index, size: 74702056, cache_size: 74702056
+Opened: /data/index/DiskANN/sift-128-euclidean/ann_mem.index_tempFiles_subshard-3_mem.index, size: 50106516, cache_size: 50106516
+Opened: /data/index/DiskANN/sift-128-euclidean/ann_mem.index_tempFiles_subshard-4_mem.index, size: 99695512, cache_size: 99695512
+Opened: /data/index/DiskANN/sift-128-euclidean/ann_mem.index, cache_size: 1073741824
+Max input width: 42, output width: 64
+Starting merge
+..Expected size: 179551040
+Finished merge
+Finished writing 179551048B
+Time for merging indices: 2.423561 seconds
+Time for building merged vamana index: 251.145859 seconds
+Opened: /data/index/DiskANN/sift-128-euclidean/data.bin, size: 512000008, cache_size: 67108864
+Vamana index file size=179551040
+Opened: /data/index/DiskANN/sift-128-euclidean/ann_disk.index, cache_size: 67108864
+medoid: 130743B
+max_node_len: 772B
+nnodes_per_sector: 5B
+# sectors: 200000
+Sector #0written
+Sector #100000written
+Finished writing 819204096B
+Writing bin: /data/index/DiskANN/sift-128-euclidean/ann_disk.index
+bin: #pts = 9, #dims = 1, size = 80B
+Finished writing bin.
+Output disk index file written to /data/index/DiskANN/sift-128-euclidean/ann_disk.index
+Finished writing 819204096B
+Time for generating disk layout: 1.527206 seconds
+Opened: /data/index/DiskANN/sift-128-euclidean/data.bin, size: 512000008, cache_size: 67108864
+Loading base /data/index/DiskANN/sift-128-euclidean/data.bin. #points: 1000000. #dim: 128.
+Wrote 100572 points to sample file: /data/index/DiskANN/sift-128-euclidean/ann_sample_data.bin
+Indexing time: 350.983
+{"status": "success", "build_time_seconds": 350.9861951829989, "index_size_bytes": 1511238128}

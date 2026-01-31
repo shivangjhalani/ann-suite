@@ -1,0 +1,147 @@
+[
+  {
+    "algorithm": "HNSW",
+    "dataset": "sift-128-euclidean",
+    "timestamp": "2026-01-30T21:45:56.331824",
+    "quality": {
+      "recall": 0.98279,
+      "qps": 5068.305291933774
+    },
+    "build": {
+      "duration_seconds": 121.15543179900124,
+      "index_size_bytes": 660565344,
+      "cpu_time_seconds": 0.0,
+      "peak_cpu_percent": 1024.4237293428964,
+      "peak_rss_mb": 2164.28125,
+      "error": null
+    },
+    "warmup": {
+      "duration_seconds": 0.8794526150013553,
+      "cpu_time_seconds": 0.702081,
+      "peak_cpu_percent": 100.03678531092824,
+      "peak_rss_mb": 725.32421875,
+      "read_mb": 0.0,
+      "write_mb": 0.0
+    },
+    "search": {
+      "duration_seconds": 1.9730461020008079,
+      "cpu_time_seconds": 1.90129,
+      "cpu_time_per_query_ms": 0.190129,
+      "avg_cpu_percent": 99.49022912276077,
+      "peak_cpu_percent": 100.02073041069059,
+      "peak_rss_mb": 771.34765625,
+      "avg_rss_mb": 767.3845703125,
+      "disk_io": {
+        "avg_read_iops": 0.0,
+        "avg_write_iops": 0.0,
+        "avg_read_throughput_mbps": 0.0,
+        "avg_write_throughput_mbps": 0.0,
+        "total_read_mb": 0.0,
+        "total_pages_read": 0,
+        "total_pages_written": 0,
+        "pages_per_query": 0.0
+      },
+      "error": null
+    },
+    "latency": {
+      "mean_ms": 0.19531815971495234,
+      "p50_ms": 0.19901500127161853,
+      "p95_ms": 0.24164299975382164,
+      "p99_ms": 0.2855599996109959
+    },
+    "metadata": {
+      "run_id": "1e815d93-7e86-4284-863f-d56727884821",
+      "physical_block_size": 512,
+      "sample_count": 20,
+      "query_start_timestamp": "2026-01-30T16:15:53.991209+00:00",
+      "query_end_timestamp": "2026-01-30T16:15:55.964263+00:00"
+    },
+    "hyperparameters": {
+      "build": {
+        "M": 16,
+        "ef_construction": 200,
+        "num_threads": 4
+      },
+      "search": {
+        "ef": 100,
+        "num_threads": 4
+      },
+      "k": 10
+    }
+  },
+  {
+    "algorithm": "DiskANN",
+    "dataset": "sift-128-euclidean",
+    "timestamp": "2026-01-30T21:53:06.218908",
+    "quality": {
+      "recall": 0.99547,
+      "qps": 221.3678518371136
+    },
+    "build": {
+      "duration_seconds": 354.1456193470003,
+      "index_size_bytes": 1511238128,
+      "cpu_time_seconds": 0.0,
+      "peak_cpu_percent": 403.0666828647766,
+      "peak_rss_mb": 4093.57421875,
+      "error": null
+    },
+    "warmup": {
+      "duration_seconds": 29.467104626000946,
+      "cpu_time_seconds": 40.523485,
+      "peak_cpu_percent": 334.66445725596583,
+      "peak_rss_mb": 274.6640625,
+      "read_mb": 11600.0390625,
+      "write_mb": 5.51953125
+    },
+    "search": {
+      "duration_seconds": 45.17367773599835,
+      "cpu_time_seconds": 18.574711,
+      "cpu_time_per_query_ms": 1.8574711,
+      "avg_cpu_percent": 41.18944450873245,
+      "peak_cpu_percent": 50.247512457593224,
+      "peak_rss_mb": 236.32421875,
+      "avg_rss_mb": 234.9867935690423,
+      "disk_io": {
+        "avg_read_iops": 21856.843398278143,
+        "avg_write_iops": 0.0,
+        "avg_read_throughput_mbps": 85.378294524524,
+        "avg_write_throughput_mbps": 0.0,
+        "total_read_mb": 3856.8515625,
+        "total_pages_read": 987354,
+        "total_pages_written": 0,
+        "pages_per_query": 98.7354
+      },
+      "error": null
+    },
+    "latency": {
+      "mean_ms": 4.5135044829814435,
+      "p50_ms": 4.505430999415694,
+      "p95_ms": 5.584313999861479,
+      "p99_ms": 6.09604999772273
+    },
+    "metadata": {
+      "run_id": "dc151cdf-419b-45ed-b089-f0eeb006e20f",
+      "physical_block_size": 512,
+      "sample_count": 449,
+      "query_start_timestamp": "2026-01-30T16:22:20.698185+00:00",
+      "query_end_timestamp": "2026-01-30T16:23:05.871870+00:00"
+    },
+    "hyperparameters": {
+      "build": {
+        "R": 64,
+        "L": 100,
+        "alpha": 1.2,
+        "num_threads": 4,
+        "build_memory_maximum": 0.6,
+        "search_memory_maximum": 0.5
+      },
+      "search": {
+        "Ls": 100,
+        "beam_width": 2,
+        "num_threads": 4,
+        "num_nodes_to_cache": 10000
+      },
+      "k": 10
+    }
+  }
+]
