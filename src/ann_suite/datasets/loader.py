@@ -114,22 +114,44 @@ class DatasetLoader:
                 key = list(f.keys())[0]
                 data = np.array(f[key])
 
+        # Avoid copy if already float32
+        if data.dtype == np.float32:
+            return data
         return data.astype(np.float32)
 
     def _load_numpy(self, path: Path) -> NDArray[np.float32]:
-        """Load vectors from NumPy file."""
-        data = np.load(path, mmap_mode="r")
-        return data  # type: ignore
+        """Load vectors from NumPy file.
+
+        Uses mmap to avoid loading entire file into memory. Returns mmap
+        directly if dtype is already float32 to avoid unnecessary copies.
+        """
+        data: NDArray[np.float32] = np.load(path, mmap_mode="r")
+        # Preserve mmap if already float32 (no copy needed)
+        if data.dtype == np.float32:
+            return data
+        return data.astype(np.float32)
 
     def _load_numpy_archive(self, path: Path) -> NDArray[np.float32]:
-        """Load vectors from NumPy archive (.npz)."""
+        """Load vectors from NumPy archive (.npz).
+
+        Attempts to preserve mmap when dtype is already float32.
+        """
         archive = np.load(path, mmap_mode="r")
         # Try common key names
         for key in ["arr_0", "data", "vectors", "base", "train"]:
             if key in archive:
-                return archive[key]  # type: ignore
+                arr: NDArray[np.float32] = archive[key]
+                # Preserve mmap if already float32
+                if arr.dtype == np.float32:
+                    return arr
+                return arr.astype(np.float32)
         # Fall back to first array
-        return archive[list(archive.keys())[0]]  # type: ignore
+        first_key = list(archive.keys())[0]
+        arr = archive[first_key]
+        # Preserve mmap if already float32
+        if arr.dtype == np.float32:
+            return arr
+        return np.asarray(arr, dtype=np.float32)
 
     def _load_binary(
         self, path: Path, dimension: int, point_type: str = "float32"
@@ -137,6 +159,8 @@ class DatasetLoader:
         """Load vectors from binary file (big-ann-benchmarks format).
 
         Format: [n_vectors (4 bytes)] [dim (4 bytes)] [vectors...]
+
+        Uses np.memmap to avoid loading the entire file into memory.
         """
         dtype_map = {
             "float32": np.float32,
@@ -146,22 +170,27 @@ class DatasetLoader:
         }
         dtype = dtype_map.get(point_type, np.float32)
 
-        with open(path, "rb") as f:
-            # Read header
-            n_vectors = np.frombuffer(f.read(4), dtype=np.uint32)[0]
-            dim = np.frombuffer(f.read(4), dtype=np.uint32)[0]
+        # Read header (8 bytes) to get dimensions
+        header = np.memmap(path, dtype=np.uint32, mode="r", shape=(2,))
+        n_vectors = int(header[0])
+        dim = int(header[1])
 
-            if dim != dimension:
-                logger.warning(f"Dimension mismatch: config={dimension}, file={dim}")
+        if dim != dimension:
+            logger.warning(f"Dimension mismatch: config={dimension}, file={dim}")
 
-            # Read vectors
-            data = np.frombuffer(f.read(), dtype=dtype)
-            data = data.reshape(n_vectors, dim)
+        # Memory-map the vector data (after 8-byte header)
+        data = np.memmap(path, dtype=dtype, mode="r", offset=8, shape=(n_vectors, dim))
 
+        # Return mmap directly if already float32 to avoid copy
+        if dtype == np.float32:
+            return data
         return data.astype(np.float32)
 
     def _load_ground_truth(self, path: Path) -> NDArray[np.int32]:
-        """Load ground truth neighbors."""
+        """Load ground truth neighbors.
+
+        Uses mmap where possible to reduce memory copies.
+        """
         suffix = path.suffix.lower()
 
         if suffix in (".h5", ".hdf5"):
@@ -169,23 +198,38 @@ class DatasetLoader:
 
             with h5py.File(path, "r") as f:
                 if "neighbors" in f:
-                    return np.array(f["neighbors"]).astype(np.int32)
+                    data = np.array(f["neighbors"])
                 elif "test" in f:
-                    return np.array(f["test"]).astype(np.int32)
+                    data = np.array(f["test"])
                 else:
                     key = list(f.keys())[0]
-                    return np.array(f[key]).astype(np.int32)
+                    data = np.array(f[key])
+            # Avoid copy if already int32
+            if data.dtype == np.int32:
+                return data
+            return data.astype(np.int32)
         elif suffix == ".npy":
-            return np.load(path).astype(np.int32)
+            loaded: NDArray[np.int32] = np.load(path, mmap_mode="r")
+            # Preserve mmap if already int32
+            if loaded.dtype == np.int32:
+                return loaded
+            return loaded.astype(np.int32)
         elif suffix in (".bin", ".ibin"):
             # Binary format: [n_queries][k][indices...]
-            with open(path, "rb") as f:
-                n_queries = np.frombuffer(f.read(4), dtype=np.uint32)[0]
-                k = np.frombuffer(f.read(4), dtype=np.uint32)[0]
-                data = np.frombuffer(f.read(), dtype=np.int32)
-                return data.reshape(n_queries, k)
+            # Use memmap to avoid full-file read
+            header = np.memmap(path, dtype=np.uint32, mode="r", shape=(2,))
+            n_queries = int(header[0])
+            k = int(header[1])
+            gt_data: NDArray[np.int32] = np.memmap(
+                path, dtype=np.int32, mode="r", offset=8, shape=(n_queries, k)
+            )
+            return gt_data
         else:
-            return np.load(path).astype(np.int32)
+            loaded = np.load(path, mmap_mode="r")
+            # Preserve mmap if already int32
+            if loaded.dtype == np.int32:
+                return loaded
+            return loaded.astype(np.int32)
 
 
 def load_dataset(
@@ -202,6 +246,3 @@ def load_dataset(
     """
     loader = DatasetLoader(data_dir or Path("."))
     return loader.load(config)
-
-
-

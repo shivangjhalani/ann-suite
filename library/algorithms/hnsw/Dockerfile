@@ -20,11 +20,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
-COPY requirements.txt .
+COPY hnsw/requirements.txt .
 RUN uv pip install --system --no-cache -r requirements.txt
 
 # Copy algorithm code
-COPY algorithm/ ./algorithm/
+# Copy utilities
+COPY utils.py .
+
+# Copy algorithm code
+COPY hnsw/algorithm/ ./algorithm/
 
 # Environment
 ENV PYTHONPATH=/app

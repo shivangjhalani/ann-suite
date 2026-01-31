@@ -16,7 +16,7 @@ import logging
 import re
 import threading
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from ann_suite.monitoring.base import BaseCollector, CollectorResult, CollectorSample
@@ -62,13 +62,33 @@ class CgroupsV2Collector(BaseCollector):
 
     def is_available(self) -> bool:
         """Check if cgroups v2 is available on this system."""
+        return CgroupsV2Collector.check_available()
+
+    @staticmethod
+    def check_available() -> bool:
+        """Check if cgroups v2 is available on this system.
+
+        This static method can be called without an instance to verify
+        cgroups v2 availability before creating a collector.
+
+        Returns:
+            True if cgroups v2 is available and readable
+        """
         cgroup_path = Path("/sys/fs/cgroup")
         if not cgroup_path.exists():
             return False
 
         # Check for cgroups v2 (unified hierarchy) by looking for cgroup.controllers
         controllers_file = cgroup_path / "cgroup.controllers"
-        return controllers_file.exists()
+        if not controllers_file.exists():
+            return False
+
+        # Verify we can actually read the controllers file
+        try:
+            controllers_file.read_text()
+            return True
+        except (PermissionError, OSError):
+            return False
 
     def start(self, container_id: str) -> None:
         """Start collecting metrics for a container.
@@ -84,15 +104,22 @@ class CgroupsV2Collector(BaseCollector):
         self._cgroup_path = self._find_cgroup_path(container_id)
 
         if self._cgroup_path is None:
-            logger.warning(f"Could not find cgroup path for container {container_id}")
-            # Fall back to not collecting - metrics will be zero
-            return
+            raise RuntimeError(
+                f"Could not find cgroup path for container {container_id}. "
+                "Ensure the container runtime is using cgroups v2."
+            )
 
         logger.debug(f"Found cgroup path: {self._cgroup_path}")
 
         self._running = True
         self._start_time = time.monotonic()
         self._samples = []
+
+        # Collect initial sample synchronously to capture fast containers
+        initial_sample = self._collect_sample()
+        if initial_sample is not None:
+            self._samples.append(initial_sample)
+            logger.debug("Collected initial cgroups sample")
 
         self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self._thread.start()
@@ -104,6 +131,14 @@ class CgroupsV2Collector(BaseCollector):
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
+
+        # Collect final sample synchronously for accurate deltas
+        if self._cgroup_path is not None:
+            final_sample = self._collect_sample()
+            if final_sample is not None:
+                with self._lock:
+                    self._samples.append(final_sample)
+                logger.debug("Collected final cgroups sample")
 
         return self._aggregate_samples()
 
@@ -155,7 +190,8 @@ class CgroupsV2Collector(BaseCollector):
         if self._cgroup_path is None:
             return None
 
-        now = datetime.now()
+        now = datetime.now(UTC)
+        mono_now = time.monotonic()
 
         # Read memory
         memory_current = self._read_single_value(self._cgroup_path / "memory.current")
@@ -169,6 +205,7 @@ class CgroupsV2Collector(BaseCollector):
 
         return CollectorSample(
             timestamp=now,
+            monotonic_time=mono_now,
             memory_usage_bytes=memory_current,
             cpu_percent=0.0,  # Calculated during aggregation
             cpu_time_ns=cpu_time_ns,
@@ -232,53 +269,174 @@ class CgroupsV2Collector(BaseCollector):
 
         return result
 
-    def _aggregate_samples(self) -> CollectorResult:
-        """Aggregate collected samples into a result."""
+    def get_summary(
+        self,
+        start_timestamp: datetime | None = None,
+        end_timestamp: datetime | None = None,
+    ) -> CollectorResult:
+        """Get aggregated metrics, optionally filtered by time window.
+
+        Args:
+            start_timestamp: Start of the window (inclusive)
+            end_timestamp: End of the window (inclusive)
+
+        Returns:
+            Aggregated metrics for the specified window
+        """
         with self._lock:
             samples = list(self._samples)
 
         if not samples:
             return CollectorResult()
 
-        # Filter out samples with zero memory (container may have stopped)
-        valid_samples = [s for s in samples if s.memory_usage_bytes > 0]
-        if not valid_samples:
-            return CollectorResult(sample_count=len(samples))
+        if start_timestamp or end_timestamp:
+            filtered_samples = []
+            for s in samples:
+                if start_timestamp and s.timestamp < start_timestamp:
+                    continue
+                if end_timestamp and s.timestamp > end_timestamp:
+                    continue
+                filtered_samples.append(s)
 
-        # Memory metrics
-        memory_values = [s.memory_usage_bytes / (1024 * 1024) for s in valid_samples]
-        peak_memory_mb = max(memory_values)
-        avg_memory_mb = sum(memory_values) / len(memory_values)
+            if len(filtered_samples) < 2 and len(samples) >= 2:
+                logger.debug(
+                    f"Time window filtering left {len(filtered_samples)} samples "
+                    f"(original: {len(samples)}). Using nearest bracketing samples."
+                )
+                bracketed_samples = self._find_bracketing_samples(
+                    samples, start_timestamp, end_timestamp
+                )
+                if len(bracketed_samples) >= 2:
+                    samples = bracketed_samples
+                else:
+                    logger.warning("Could not find valid bracketing samples, using all samples")
+            else:
+                samples = filtered_samples
 
-        # CPU metrics
-        # Calculate total CPU time from first to last sample
-        first_sample = valid_samples[0]
-        last_sample = valid_samples[-1]
-        cpu_time_delta_ns = last_sample.cpu_time_ns - first_sample.cpu_time_ns
+        # Filtering preserves order so samples remain sorted
+        return self._aggregate_samples(samples, already_sorted=True)
+
+    def _find_bracketing_samples(
+        self,
+        samples: list[CollectorSample],
+        start_timestamp: datetime | None,
+        end_timestamp: datetime | None,
+    ) -> list[CollectorSample]:
+        """Find samples that bracket the requested time window.
+
+        Returns the sample closest to (but before or at) start_timestamp and
+        the sample closest to (but after or at) end_timestamp.
+        """
+        before_sample: CollectorSample | None = None
+        after_sample: CollectorSample | None = None
+
+        for s in samples:
+            if start_timestamp and s.timestamp <= start_timestamp:
+                if before_sample is None or s.timestamp > before_sample.timestamp:
+                    before_sample = s
+            if end_timestamp and s.timestamp >= end_timestamp:
+                if after_sample is None or s.timestamp < after_sample.timestamp:
+                    after_sample = s
+
+        if before_sample is None and samples:
+            before_sample = samples[0]
+        if after_sample is None and samples:
+            after_sample = samples[-1]
+
+        if before_sample and after_sample and before_sample is not after_sample:
+            return [before_sample, after_sample]
+        return []
+
+    def _aggregate_samples(
+        self, samples: list[CollectorSample] | None = None, *, already_sorted: bool = False
+    ) -> CollectorResult:
+        """Aggregate collected samples into a result.
+
+        Args:
+            samples: Optional list of samples to aggregate. Uses self._samples if None.
+            already_sorted: If True, skip sorting (samples collected sequentially are
+                            already in monotonic order).
+        """
+        if samples is None:
+            with self._lock:
+                samples = list(self._samples)
+            # Samples from the internal list are always collected in order
+            already_sorted = True
+
+        if not samples:
+            logger.warning("No cgroups samples collected - metrics will be zero")
+            return CollectorResult()
+
+        # Only sort if samples may be out of order (e.g., after filtering/merging)
+        if not already_sorted:
+            samples = sorted(
+                samples,
+                key=lambda s: s.monotonic_time if s.monotonic_time > 0 else s.timestamp.timestamp(),
+            )
+
+        def _duration_seconds(s1: CollectorSample, s2: CollectorSample) -> float:
+            """Compute duration between two samples using monotonic clock when available."""
+            if (
+                s1.monotonic_time > 0.0
+                and s2.monotonic_time > 0.0
+                and s2.monotonic_time >= s1.monotonic_time
+            ):
+                return s2.monotonic_time - s1.monotonic_time
+            return (s2.timestamp - s1.timestamp).total_seconds()
+
+        first_sample = samples[0]
+        last_sample = samples[-1]
+        duration = _duration_seconds(first_sample, last_sample)
+
+        # Log sample count for adequacy assessment
+        if len(samples) < 5:
+            logger.debug(f"Low sample count ({len(samples)}) - metrics may have higher variance")
+
+        # Filter samples with valid memory only for memory metrics
+        memory_samples = [s for s in samples if s.memory_usage_bytes > 0]
+        if memory_samples:
+            memory_values = [s.memory_usage_bytes / (1024 * 1024) for s in memory_samples]
+            peak_memory_mb = max(memory_values)
+            avg_memory_mb = sum(memory_values) / len(memory_values)
+        else:
+            peak_memory_mb = 0.0
+            avg_memory_mb = 0.0
+
+        # CPU metrics - use all samples for accurate duration
+        # Clamp deltas to non-negative to handle counter edge cases (reset, wraparound)
+        cpu_time_delta_ns = max(0, last_sample.cpu_time_ns - first_sample.cpu_time_ns)
         cpu_time_total_seconds = cpu_time_delta_ns / 1e9
-
-        # Duration
-        duration = (last_sample.timestamp - first_sample.timestamp).total_seconds()
 
         # Calculate average CPU percent
         avg_cpu_percent = (cpu_time_total_seconds / duration * 100) if duration > 0 else 0.0
 
         # Calculate peak CPU percent by checking each interval
+        # NOTE: We ignore very short intervals (<< configured sampling interval) because
+        # they can occur around start/stop and produce exaggerated peak estimates.
+        min_interval_seconds = max(0.01, self._interval_seconds * 0.5)
         peak_cpu_percent = 0.0
-        for i in range(1, len(valid_samples)):
-            s1 = valid_samples[i - 1]
-            s2 = valid_samples[i]
+        for i in range(1, len(samples)):
+            s1 = samples[i - 1]
+            s2 = samples[i]
 
             interval_ns = s2.cpu_time_ns - s1.cpu_time_ns
-            interval_duration = (s2.timestamp - s1.timestamp).total_seconds()
+            interval_duration = _duration_seconds(s1, s2)
 
-            if interval_duration > 0:
+            if interval_duration >= min_interval_seconds:
                 interval_cpu = (interval_ns / 1e9) / interval_duration * 100
                 peak_cpu_percent = max(peak_cpu_percent, interval_cpu)
 
-        # Calculate I/O metrics
-        read_ops_delta = last_sample.blkio_read_ops - first_sample.blkio_read_ops
-        write_ops_delta = last_sample.blkio_write_ops - first_sample.blkio_write_ops
+        # If the window is too short or filtered such that no interval met the threshold,
+        # fall back to average CPU as a conservative peak estimate.
+        if peak_cpu_percent == 0.0 and duration > 0:
+            peak_cpu_percent = avg_cpu_percent
+
+        # Calculate I/O metrics (use all samples for accurate deltas)
+        # Clamp deltas to non-negative to handle counter edge cases (reset, wraparound)
+        read_bytes_delta = max(0, last_sample.blkio_read_bytes - first_sample.blkio_read_bytes)
+        write_bytes_delta = max(0, last_sample.blkio_write_bytes - first_sample.blkio_write_bytes)
+        read_ops_delta = max(0, last_sample.blkio_read_ops - first_sample.blkio_read_ops)
+        write_ops_delta = max(0, last_sample.blkio_write_ops - first_sample.blkio_write_ops)
         avg_read_iops = (read_ops_delta / duration) if duration > 0 else 0.0
         avg_write_iops = (write_ops_delta / duration) if duration > 0 else 0.0
 
@@ -288,12 +446,12 @@ class CgroupsV2Collector(BaseCollector):
             peak_cpu_percent=peak_cpu_percent,
             peak_memory_mb=peak_memory_mb,
             avg_memory_mb=avg_memory_mb,
-            total_read_bytes=last_sample.blkio_read_bytes,
-            total_write_bytes=last_sample.blkio_write_bytes,
-            total_read_ops=last_sample.blkio_read_ops,
-            total_write_ops=last_sample.blkio_write_ops,
+            total_read_bytes=read_bytes_delta,
+            total_write_bytes=write_bytes_delta,
+            total_read_ops=read_ops_delta,
+            total_write_ops=write_ops_delta,
             avg_read_iops=avg_read_iops,
             avg_write_iops=avg_write_iops,
             duration_seconds=duration,
-            sample_count=len(valid_samples),
+            sample_count=len(samples),
         )

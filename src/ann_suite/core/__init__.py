@@ -1,5 +1,7 @@
 """Core module - configuration and schemas."""
 
+from __future__ import annotations
+
 from ann_suite.core.config import load_config
 from ann_suite.core.schemas import (
     AlgorithmConfig,

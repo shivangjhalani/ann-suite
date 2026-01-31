@@ -1,36 +1,62 @@
 # ==============================================================================
 # ANN Benchmarking Suite - Complete Configuration Reference
 # ==============================================================================
-# This file documents ALL available configuration options.
-# Use this as a template for creating your own benchmark configurations.
+#
+# This file documents ALL available configuration options for the ANN
+# benchmarking suite. Use it as a template for creating your own benchmarks.
+#
+# QUICK START:
+#   uv run ann-suite run --config configs/example.yaml
+#
+# PREREQUISITES:
+#   1. Build algorithm images: uv run ann-suite build --algorithm HNSW
+#   2. Download datasets: uv run ann-suite download --dataset sift-10k
+#   3. Ensure cgroups v2 is enabled: cat /sys/fs/cgroup/cgroup.controllers
+#
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
 # TOP-LEVEL CONFIGURATION
 # ------------------------------------------------------------------------------
 
-# Required: Human-readable benchmark name
+# Required: Human-readable benchmark name (used in result filenames)
 name: "Complete Configuration Example"
 
-# Optional: Description of this benchmark run
+# Optional: Description of this benchmark run (stored in results metadata)
 description: "Demonstrates all available configuration options"
 
 # Directory paths (relative to where ann-suite is run, or absolute)
-data_dir: "./data"           # Base directory for datasets
-results_dir: "./results"     # Output directory for benchmark results
+# These directories will be created if they don't exist
+data_dir: "./data"           # Base directory for datasets (.npy, .hdf5 files)
+results_dir: "./results"     # Output directory for benchmark results (JSON, CSV)
 index_dir: "./indices"       # Directory where algorithm indices are stored
 
-# Resource monitoring interval in milliseconds (50-1000)
-# Lower = more samples but higher overhead
-# Default: 100
+# Resource monitoring interval in milliseconds
+# - Range: 50-1000ms
+# - Lower values = more samples but higher overhead
+# - Recommended: 50-100ms for accurate IOPS measurement
+# - Default: 100ms
 monitor_interval_ms: 50
 
 # ------------------------------------------------------------------------------
 # ALGORITHMS
 # ------------------------------------------------------------------------------
-# Each algorithm runs in a Docker container with build and search phases.
-# Search args support PARAMETER SWEEPS using list values:
-#   ef: [50, 100, 200]  # Expands to 3 separate benchmark runs
+#
+# Each algorithm runs in a Docker container with two phases:
+#   1. BUILD: Constructs the index from base vectors
+#   2. SEARCH: Executes queries and measures performance
+#
+# PARAMETER SWEEPS:
+#   Use list values in search.args to run multiple configurations automatically:
+#     ef: [50, 100, 200]  # Creates 3 separate benchmark runs
+#     Ls: [50, 100]       # Combined with above = 6 total runs
+#
+# LOG CORRELATION:
+#   Each benchmark run generates a unique run_id (8-char UUID) that appears in:
+#   - Console logs: [abc12345] Starting benchmark...
+#   - Log filenames: results/logs/HNSW_build_abc12345.stdout.log
+#   - Result JSON: "run_id": "abc12345-..."
+#
 # ------------------------------------------------------------------------------
 
 algorithms:
@@ -38,115 +64,252 @@ algorithms:
   # ============================================================================
   # HNSW - Hierarchical Navigable Small World (In-Memory)
   # ============================================================================
+  #
+  # Best for: High recall with low latency when index fits in RAM
+  # Characteristics:
+  #   - O(log N) search complexity
+  #   - Memory usage: ~1.5x dataset size
+  #   - Build time scales with M and ef_construction
+  #
   - name: HNSW
-    
-    # Required: Docker image tag (must be built beforehand)
+
+    # Required: Docker image tag (must be built beforehand with `ann-suite build`)
     docker_image: ann-suite/hnsw:latest
-    
-    # Algorithm type: memory | disk | hybrid
-    # Currently INFORMATIONAL - used for categorization and display purposes.
-    # Does not change benchmark behavior (both types run identical pipeline).
-    # Future: may enable type-specific optimizations like page cache clearing for disk.
+
+    # Algorithm type classification (currently INFORMATIONAL)
+    # Values: memory | disk | hybrid
     # - memory: Pure in-memory algorithms (HNSW, Annoy, FAISS-IVF)
     # - disk:   Disk-based algorithms (DiskANN, SPANN)
     # - hybrid: Mixed approaches (cached disk indices)
+    # Future: May enable type-specific optimizations like page cache clearing
     algorithm_type: memory
-    
+
     # Optional: Limit which datasets this algorithm runs on
-    # If omitted or empty, runs on ALL datasets speified below
-    # datasets: ["sift-10k", "glove-25-10k"]
-    
-    # Optional: Disable this algorithm temporarily
+    # If omitted or empty, runs on ALL datasets defined below
+    # Example: datasets: ["sift-10k", "glove-25-10k"]
+    # datasets: []
+
+    # Optional: Disable this algorithm temporarily without removing config
     # disabled: true
-    
+
     # Optional: CPU core affinity (pin to specific cores for consistent benchmarks)
-    # Examples: "0-3" (cores 0,1,2,3), "0,2,4" (specific cores)
+    # Formats:
+    #   - "0-3"     : Cores 0, 1, 2, 3
+    #   - "0,2,4,6" : Specific cores only
+    #   - "4"       : Single core limit
     cpu_limit: "0-3"
-    
-    # Optional: Memory limit for the container
-    # Examples: "8g", "4096m", "2g"
+
+    # Optional: Memory limit for the container (Docker memory constraint)
+    # Formats: "8g", "4096m", "2g"
+    # Note: Container is killed if it exceeds this limit
     memory_limit: "8g"
-    
+
     # Optional: Environment variables passed to the container
+    # Common uses: Thread count control for reproducible benchmarks
     env_vars:
       OMP_NUM_THREADS: "4"        # OpenMP thread count
-      # OPENBLAS_NUM_THREADS: "4" # OpenBLAS threads
-      # MKL_NUM_THREADS: "4"      # Intel MKL threads
-    
+      # OPENBLAS_NUM_THREADS: "4" # OpenBLAS threads (if using)
+      # MKL_NUM_THREADS: "4"      # Intel MKL threads (if using)
+
     # BUILD PHASE configuration
     build:
-      # Maximum time allowed for building the index (seconds, minimum 60)
+      # Maximum time allowed for building the index
+      # Range: minimum 60 seconds
+      # Tip: Large datasets with high M/ef_construction may need hours
       timeout_seconds: 3600
-      
+
       # Algorithm-specific build arguments (passed as JSON to container)
+      # These are HNSW-specific:
       args:
-        # HNSW-specific parameters:
-        M: 16                 # Number of connections per layer (higher = better recall, more RAM)
-        ef_construction: 200  # Search depth during construction (higher = better quality)
+        M: 16                 # Connections per layer
+                              # - Higher = better recall, more RAM
+                              # - Typical range: 8-64
+                              # - Default: 16
+
+        ef_construction: 200  # Search depth during construction
+                              # - Higher = better index quality, slower build
+                              # - Typical range: 100-500
+                              # - Default: 200
+
         num_threads: 4        # Threads for parallel construction
-    
+                              # - Match to cpu_limit for best results
+
     # SEARCH PHASE configuration
     search:
-      # Maximum time allowed for search phase (seconds, minimum 10)
+      # Maximum time allowed for search phase
+      # Range: minimum 10 seconds
       timeout_seconds: 600
-      
-      # Number of nearest neighbors to retrieve (1-1000)
+
+      # Number of nearest neighbors to retrieve
+      # Range: 1-1000
+      # Recall@k is computed against this value
       k: 10
-      
+
+      # Batch mode processing
+      # - true (default): Process all queries together for maximum QPS
+      # - false: Process queries one-by-one for accurate per-query latency
+      #
+      # ⚠️ IMPORTANT: When batch_mode=true, latency percentiles (P50, P95, P99)
+      #    may be estimated from mean latency. A warning is logged if detected.
+      #    Use batch_mode=false for accurate latency distribution measurement.
+      batch_mode: true
+
       # Algorithm-specific search arguments
+      # HNSW-specific parameters:
       args:
-        # HNSW-specific parameters:
-        # Use lists for PARAMETER SWEEPS - each value creates a separate run
-        ef: [50, 100, 200]    # Search depth (higher = better recall, slower)
+        # ef: Search depth (list = parameter sweep)
+        # - Higher = better recall, slower search
+        # - Must be >= k for valid results
+        # - Typical range: 50-500
+        ef: [50, 100, 200]    # Creates 3 benchmark runs
         # ef: 100             # Or use scalar for single run
+
+      # WARMUP CONFIGURATION
+      # ============================================================================
+      # IMPORTANT: "Warmup" has TWO distinct meanings in this suite:
+      #
+      # 1. WARMUP PHASE (always happens, reported in results.json "warmup" section):
+      #    - Time/resources to LOAD THE INDEX from disk into memory
+      #    - Happens automatically before any queries execute
+      #    - Cannot be disabled; use collect_metrics to hide from output
+      #
+      # 2. CACHE WARMUP QUERIES (optional, controlled by cache_warmup_queries):
+      #    - Extra UNTIMED queries run AFTER index loading, BEFORE benchmark
+      #    - Purpose: warm OS page cache / algorithm internal caches
+      #    - Set to 0 (default) to skip; set to 100-1000 for steady-state benchmarks
+      # ============================================================================
+      warmup:
+        # Whether to collect and report WARMUP PHASE metrics (index load time, etc.)
+        # The warmup phase (index loading) ALWAYS happens; this only controls reporting.
+        # - true (default): Report warmup metrics in output
+        # - false: Suppress warmup metrics from output
+        collect_metrics: true
+
+        # Number of UNTIMED queries to run AFTER index loading, BEFORE timed benchmark
+        # These queries warm the OS page cache and algorithm internal caches.
+        # This is SEPARATE from the warmup phase (index loading) above.
+        # - 0 (default): No extra queries - benchmark starts immediately after index load
+        # - 100-1000: Run warmup queries to measure steady-state performance
+        cache_warmup_queries: 0
+
+        # Drop OS page caches before search (requires root privileges)
+        # Useful for true cold-start benchmarks on disk-based algorithms
+        # - false (default): Keep caches as-is
+        # - true: Reserved for future implementation
+        # NOTE: This option is defined in config but NOT YET IMPLEMENTED.
+        # For cold-start benchmarks, manually clear caches before running:
+        #   sudo sync && echo 3 | sudo tee /proc/sys/vm/drop_caches
+        drop_caches_before: false
 
   # ============================================================================
   # DiskANN - Microsoft's Disk-Based Algorithm
   # ============================================================================
+  #
+  # Best for: Billion-scale datasets that don't fit in RAM
+  # Characteristics:
+  #   - Graph stored on SSD, small memory footprint
+  #   - IOPS-bound performance (SSD quality matters)
+  #   - Build time can be hours for large datasets
+  #
   - name: DiskANN
     docker_image: ann-suite/diskann:latest
     algorithm_type: disk
     cpu_limit: "0-3"
+
+    # DiskANN can run with limited RAM (index is on disk)
+    # This is a hard container limit, not advisory
     memory_limit: "1g"
-    
+
     env_vars:
       OMP_NUM_THREADS: "4"
-    
+
     build:
-      timeout_seconds: 7200   # Disk builds can take longer
+      # Disk-based builds are slower; allow more time
+      timeout_seconds: 7200
+
+      # DiskANN-specific build parameters:
       args:
-        # DiskANN-specific build parameters:
-        R: 64                 # Graph degree (higher = better recall, larger index)
-        L: 100                # Build list size (higher = better quality)
+        R: 64                 # Graph degree
+                              # - Higher = better recall, larger index
+                              # - Typical range: 32-128
+
+        L: 100                # Build list size
+                              # - Higher = better quality, slower build
+                              # - Typical range: 75-200
+
         alpha: 1.2            # Pruning parameter
-        num_threads: 4
-        # pq_disk_bytes: 0    # PQ compression (0 = disabled)
-        
-        # Memory Limits (CRITICAL for containerized environments)
-        build_memory_maximum: 2.0  # Max memory in GB to use during build
-        
-        # Note: search_memory_maximum is required at BUILD time to structure the
-        # index layout for the target search RAM limit.
-        search_memory_maximum: 0.5 # Max memory in GB for search index construction
-    
+                              # - Controls graph density
+                              # - Typical range: 1.0-1.5
+
+        num_threads: 4        # Build parallelism
+
+        # pq_disk_bytes: 0    # PQ compression bytes (0 = disabled)
+                              # - Enable for larger-than-RAM datasets
+
+        # ADVISORY Memory Hints (NOT hard limits!)
+        # These tell DiskANN how to partition and optimize the index structure.
+        # Actual build memory usage will be significantly higher.
+        build_memory_maximum: 2.0   # Target memory budget for index optimization (GB)
+        search_memory_maximum: 0.5  # Target search-time memory budget (GB)
+                                    # Note: This is a BUILD arg that affects index layout
+
     search:
       timeout_seconds: 600
       k: 10
+      batch_mode: true
+
+      # DiskANN-specific search parameters:
       args:
-        # DiskANN-specific search parameters:
         Ls: [50, 100, 200]    # Search list size (parameter sweep)
+                              # - Higher = better recall, more I/O
+                              # - Similar to HNSW's ef parameter
+
         beam_width: 2         # Beam search width
-        num_threads: 4
-        # num_nodes_to_cache: 0  # Nodes to cache in RAM
+                              # - Higher = better recall, more I/O
+                              # - Typical range: 1-4
+
+        num_threads: 4        # Search parallelism
+
+        # Cache control for disk-based search
+        num_nodes_to_cache: 10000  # Cache N most-accessed nodes in RAM
+                                   # - 0 = minimum memory mode
+                                   # - Higher = better QPS, more RAM
+
+      # WARMUP CONFIGURATION (especially important for disk-based algorithms)
+      #
+      # For disk-based algorithms like DiskANN, cache warming dramatically affects
+      # measured performance:
+      # - Without warmup: Measures cold disk I/O (high latency, realistic first-query)
+      # - With warmup: Measures steady-state after OS page cache is populated
+      #
+      warmup:
+        collect_metrics: true
+        # Run 500 queries to warm OS page cache before timed benchmark
+        # This simulates steady-state performance after initial queries have
+        # populated the page cache with frequently-accessed index pages
+        cache_warmup_queries: 500
+        drop_caches_before: false
 
 # ------------------------------------------------------------------------------
 # DATASETS
 # ------------------------------------------------------------------------------
-# Define vector datasets for benchmarking. Download with:
-#   uv run python library/datasets/download.py --list
-#   uv run python library/datasets/download.py --dataset <name>
-# 
-# Supported file formats: .npy, .hdf5/.h5, .fvecs, .bvecs, .ivecs
+#
+# Define vector datasets for benchmarking.
+#
+# DOWNLOADING DATASETS:
+#   uv run ann-suite download --list           # Show available datasets
+#   uv run ann-suite download --dataset sift-10k  # Download specific dataset
+#
+# SUPPORTED FILE FORMATS:
+#   - .npy (NumPy arrays) - recommended for speed
+#   - .hdf5/.h5 (HDF5 files) - supports multiple datasets in one file
+#   - .fvecs/.bvecs/.ivecs (ANN-benchmarks format)
+#
+# GROUND TRUTH:
+#   - Required for recall calculation
+#   - Format: int32 array of shape (n_queries, k) with true neighbor indices
+#   - Auto-computed during download if not provided
+#
 # ------------------------------------------------------------------------------
 
 datasets:
@@ -154,87 +317,270 @@ datasets:
   # ============================================================================
   # SIFT-10K - Euclidean/L2 Distance
   # ============================================================================
+  #
+  # Classic benchmark dataset: 128-dimensional SIFT descriptors
+  # Small size (10K vectors) - good for quick testing
+  #
   - name: sift-10k
-    
+
     # Required: Path to base vectors (relative to data_dir)
     base_path: sift-10k/base.npy
-    
-    # Optional: Path to query vectors (defaults to base_path if omitted)
+
+    # Optional: Path to query vectors
+    # If omitted, queries are sampled from base vectors
     query_path: sift-10k/queries.npy
-    
-    # Optional: Path to ground truth neighbors (required for recall calculation)
+
+    # Optional: Path to ground truth neighbors
+    # Required for recall calculation; omit for QPS-only benchmarks
     # Format: int32 array of shape (n_queries, k) with true neighbor indices
     ground_truth_path: sift-10k/ground_truth.npy
-    
-    # Required: Vector dimension
+
+    # Required: Vector dimension (validated against actual data at load time)
     dimension: 128
-    
+
     # Optional: Distance metric
-    # L2 (Euclidean), IP (Inner Product), cosine, hamming
+    # Supported values:
+    #   - L2 (Euclidean distance) - default
+    #   - IP (Inner Product / dot product)
+    #   - cosine (Cosine similarity - vectors are normalized)
+    #   - hamming (Hamming distance for binary vectors)
     distance_metric: L2
+
+    # Optional: Data type of vectors
+    # Supported: float32 (default), float16, uint8, int8
+    # Must match the actual file contents
+    point_type: float32
+
+    # Optional: Informational fields (auto-detected if omitted)
+    # Useful for documentation; not required for operation
+    # base_count: 10000    # Number of base vectors
+    # query_count: 100     # Number of query vectors
 
   # ============================================================================
   # GloVe-25-10K - Cosine/Angular Distance
   # ============================================================================
+  #
+  # Word embeddings dataset: 25-dimensional GloVe vectors
+  # Uses cosine similarity (vectors are normalized internally)
+  #
   - name: glove-25-10k
     base_path: glove-25-10k/base.npy
     query_path: glove-25-10k/queries.npy
     ground_truth_path: glove-25-10k/ground_truth.npy
     dimension: 25
     distance_metric: cosine
+    # point_type: float32  # Optional, defaults to float32
 
 # ==============================================================================
 # METRICS COLLECTED (Automatic - No Configuration Needed)
 # ==============================================================================
-# The suite automatically collects these structured metrics:
 #
-# CPUMetrics:
-#   - cpu_time_total_seconds   # Total CPU time from cgroups
-#   - avg_cpu_percent          # Average CPU utilization %
-#   - peak_cpu_percent         # Peak CPU utilization %
+# The suite automatically collects structured metrics via cgroups v2.
+# Metrics are organized by phase: BUILD, WARMUP, SEARCH
 #
-# MemoryMetrics:
-#   - peak_rss_mb              # Peak memory (RSS) in MB
-#   - avg_rss_mb               # Average memory in MB
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ CPUMetrics (per phase: build, warmup, search)                               │
+# ├─────────────────────────────────────────────────────────────────────────────┤
+# │ BUILD phase:                                                                │
+# │ • build_cpu_time_seconds     - CPU time during index construction           │
+# │ • build_peak_cpu_percent     - Peak CPU % during build                      │
+# │                                                                             │
+# │ WARMUP phase (index loading):                                               │
+# │ • warmup_cpu_time_seconds    - CPU time during index load                   │
+# │ • warmup_peak_cpu_percent    - Peak CPU % during warmup                     │
+# │                                                                             │
+# │ SEARCH phase (primary benchmark):                                           │
+# │ • search_cpu_time_seconds    - CPU time during query execution              │
+# │ • search_avg_cpu_percent     - Average CPU % during search                  │
+# │ • search_peak_cpu_percent    - Peak CPU % during search                     │
+# │ • search_cpu_time_per_query_ms - CPU time per query (stable metric)         │
+# └─────────────────────────────────────────────────────────────────────────────┘
 #
-# DiskIOMetrics (CRITICAL for disk-based algorithms):
-#   - avg_read_iops            # Read operations per second
-#   - avg_write_iops           # Write operations per second
-#   - avg_read_throughput_mbps # Read throughput MB/s
-#   - avg_write_throughput_mbps# Write throughput MB/s
-#   - total_pages_read         # Total 4KB pages read
-#   - total_pages_written      # Total 4KB pages written
-#   - pages_per_query          # Average pages per query
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ MemoryMetrics (per phase: build, warmup, search)                            │
+# ├─────────────────────────────────────────────────────────────────────────────┤
+# │ • build_peak_rss_mb          - Peak RSS during build (MB)                   │
+# │ • warmup_peak_rss_mb         - Peak RSS during index load (MB)              │
+# │ • search_peak_rss_mb         - Peak RSS during search (MB)                  │
+# │ • search_avg_rss_mb          - Average RSS during search (MB)               │
+# └─────────────────────────────────────────────────────────────────────────────┘
 #
-# LatencyMetrics:
-#   - mean_ms                  # Mean query latency
-#   - p50_ms                   # Median latency
-#   - p95_ms                   # 95th percentile
-#   - p99_ms                   # 99th percentile (tail latency)
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ DiskIOMetrics (CRITICAL for disk-based algorithms)                          │
+# ├─────────────────────────────────────────────────────────────────────────────┤
+# │ WARMUP phase I/O:                                                           │
+# │ • warmup_read_mb             - MB read during index loading                 │
+# │ • warmup_write_mb            - MB written during warmup                     │
+# │                                                                             │
+# │ SEARCH phase I/O (primary metrics):                                         │
+# │ • search_avg_read_iops       - Read operations per second                   │
+# │ • search_avg_write_iops      - Write operations per second                  │
+# │ • search_avg_read_throughput_mbps  - Read throughput (MB/s)                 │
+# │ • search_avg_write_throughput_mbps - Write throughput (MB/s)                │
+# │ • search_total_read_mb       - Total MB read during search                  │
+# │ • search_total_pages_read    - Total 4KB pages read (standardized)          │
+# │ • search_total_pages_written - Total 4KB pages written                      │
+# │ • search_pages_per_query     - Average 4KB pages per query                  │
+# │                                                                             │
+# │ Metadata:                                                                   │
+# │ • physical_block_size        - Detected storage block size (bytes)          │
+# │ • sample_count               - Number of cgroups samples collected          │
+# │                                                                             │
+# │ ℹ️ Note: Page metrics use standardized 4KB pages for cross-system           │
+# │    comparability, regardless of physical storage block size.                │
+# └─────────────────────────────────────────────────────────────────────────────┘
 #
-# Quality Metrics:
-#   - recall                   # Recall@k (fraction of true neighbors found)
-#   - qps                      # Queries per second (throughput)
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ LatencyMetrics                                                              │
+# ├─────────────────────────────────────────────────────────────────────────────┤
+# │ • mean_ms                    - Mean query latency                           │
+# │ • p50_ms                     - Median latency                               │
+# │ • p95_ms                     - 95th percentile                              │
+# │ • p99_ms                     - 99th percentile (tail latency)               │
+# │                                                                             │
+# │ ⚠️ Note: When batch_mode=true, P50/P95/P99 may be estimated from mean.      │
+# │    Use batch_mode=false for accurate latency distribution.                  │
+# └─────────────────────────────────────────────────────────────────────────────┘
 #
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ TimeBases (for rate metric calculation transparency)                        │
+# ├─────────────────────────────────────────────────────────────────────────────┤
+# │ • container_duration_seconds - Total container wall time                    │
+# │ • warmup_duration_seconds    - Time spent loading index                     │
+# │ • query_duration_seconds     - Time spent executing queries (PRIMARY)       │
+# │ • sample_span_seconds        - Time span of resource samples                │
+# └─────────────────────────────────────────────────────────────────────────────┘
+#
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ Quality Metrics                                                             │
+# ├─────────────────────────────────────────────────────────────────────────────┤
+# │ • recall                     - Recall@k (fraction of true neighbors found)  │
+# │ • qps                        - Queries per second (throughput)              │
+# └─────────────────────────────────────────────────────────────────────────────┘
+
 # ==============================================================================
-# OUTPUT EXAMPLE
+# CLI OPTIONS
 # ==============================================================================
-# ╭────────────────────────── HNSW on sift-10k ──────────────────────────╮
-# │   Algorithm                  HNSW                                    │
-# │   Recall@k                   0.9997                                  │
-# │   QPS                        19,594.7                                │
-# │                                                                      │
-# │   Latency                                                            │
-# │     Mean                     0.050 ms                                │
-# │     P50                      0.049 ms                                │
-# │     P95                      0.061 ms                                │
-# │     P99                      0.087 ms                                │
-# │                                                                      │
-# │   Resources                                                          │
-# │     Peak RAM                 35.4 MB                                 │
-# │                                                                      │
-# │   Hyperparameters                                                    │
-# │     build.M                  16                                      │
-# │     search.ef                100                                     │
-# ╰──────────────────────────────────────────────────────────────────────╯
+#
+# Run benchmarks:
+#   uv run ann-suite run --config configs/example.yaml [OPTIONS]
+#
+# Available options:
+#   --output, -o PATH      Override results_dir from config
+#   --log-level, -l LEVEL  Set logging level (DEBUG, INFO, WARNING, ERROR)
+#   --log-file PATH        Write logs to file (in addition to console)
+#   --json-logs            Output logs in JSON format (for log aggregation)
+#   --dry-run              Validate config without running benchmarks
+#
+# Examples:
+#   # Basic run
+#   uv run ann-suite run -c configs/example.yaml
+#
+#   # Verbose with file logging
+#   uv run ann-suite run -c configs/example.yaml -l DEBUG --log-file benchmark.log
+#
+#   # JSON logs for ELK/Datadog
+#   uv run ann-suite run -c configs/example.yaml --json-logs
+#
+#   # Validate config only
+#   uv run ann-suite run -c configs/example.yaml --dry-run
+
+# ==============================================================================
+# OUTPUT FORMATS
+# ==============================================================================
+#
+# Results are saved in three formats:
+#
+# 1. results.json - Phase-structured JSON for human readability and research papers
+# 2. results_detailed.json - Complete BenchmarkResult objects (internal format)
+# 3. results.csv - Flattened table for pandas/Excel analysis
+#
+# Directory structure:
+#   results/
+#   ├── Complete Configuration Example_2026-01-29_14-30-00/
+#   │   ├── results.json           # <- Use this for analysis/papers
+#   │   ├── results_detailed.json  # <- Full Pydantic objects
+#   │   └── results.csv            # <- For pandas/spreadsheets
+#   └── logs/
+#       ├── HNSW_build_abc12345.stdout.log
+#       ├── HNSW_build_abc12345.stderr.log
+#       └── ... (auto-cleaned, keeps 5 most recent per algorithm/phase)
+
+# ==============================================================================
+# EXAMPLE OUTPUT (results.json)
+# ==============================================================================
+#
+# Results are organized by benchmark phase for clarity:
+#
+# {
+#   "algorithm": "HNSW",
+#   "dataset": "sift-10k",
+#   "timestamp": "2026-01-29T14:30:00.000000",
+#
+#   "quality": {
+#     "recall": 0.9997,
+#     "qps": 19594.7
+#   },
+#
+#   "build": {
+#     "duration_seconds": 2.34,
+#     "index_size_bytes": 12345678,
+#     "cpu_time_seconds": 8.5,
+#     "peak_cpu_percent": 380.5,
+#     "peak_rss_mb": 128.5,
+#     "error": null
+#   },
+#
+#   "warmup": {
+#     "duration_seconds": 0.12,
+#     "cpu_time_seconds": 0.11,
+#     "peak_cpu_percent": 95.2,
+#     "peak_rss_mb": 35.4,
+#     "read_mb": 12.5,
+#     "write_mb": 0.0
+#   },
+#
+#   "search": {
+#     "duration_seconds": 0.51,
+#     "cpu_time_seconds": 0.49,
+#     "cpu_time_per_query_ms": 0.049,
+#     "avg_cpu_percent": 96.1,
+#     "peak_cpu_percent": 98.5,
+#     "peak_rss_mb": 35.4,
+#     "avg_rss_mb": 32.1,
+#     "disk_io": {
+#       "avg_read_iops": 0.0,         # 0 for in-memory algorithms
+#       "avg_write_iops": 0.0,
+#       "avg_read_throughput_mbps": 0.0,
+#       "avg_write_throughput_mbps": 0.0,
+#       "total_read_mb": 0.0,
+#       "total_pages_read": 0,        # Standardized 4KB pages
+#       "total_pages_written": 0,
+#       "pages_per_query": null
+#     },
+#     "error": null
+#   },
+#
+#   "latency": {
+#     "mean_ms": 0.050,
+#     "p50_ms": 0.049,
+#     "p95_ms": 0.061,
+#     "p99_ms": 0.087
+#   },
+#
+#   "metadata": {
+#     "run_id": "abc12345-...",
+#     "physical_block_size": 4096,
+#     "sample_count": 50,
+#     "query_start_timestamp": "2026-01-29T14:30:02.500000+00:00",
+#     "query_end_timestamp": "2026-01-29T14:30:03.010000+00:00"
+#   },
+#
+#   "hyperparameters": {
+#     "build": { "M": 16, "ef_construction": 200 },
+#     "search": { "ef": 100 },
+#     "k": 10
+#   }
+# }
+#
 # ==============================================================================

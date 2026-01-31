@@ -30,6 +30,7 @@ algorithms:
         R: 64
         L: 100
         num_threads: 4
+        # ADVISORY hints for index optimization (NOT hard limits)
         build_memory_maximum: 2.0
         search_memory_maximum: 0.5
     search:

@@ -9,7 +9,7 @@ monitor_interval_ms: 100
 
 algorithms:
   - name: HNSW
-    disabled: true
+    disabled: false
     docker_image: ann-suite/hnsw:latest
     algorithm_type: memory
     build:
@@ -21,10 +21,24 @@ algorithms:
     search:
       timeout_seconds: 600
       k: 10
+      batch_mode: false
       args:
         ef: 100
+        num_threads: 4
+      # ============================================================================
+      # WARMUP CONFIGURATION
+      # ============================================================================
+      # Controls cache warming before timed benchmark
+      warmup:
+        # Collect and report warmup phase metrics (index loading time/memory)
+        collect_metrics: true
+        # Number of untimed queries to run before benchmark to warm caches
+        # - 0: Cold start benchmark (default) - measures first-query performance
+        # - 100-1000: Warm cache benchmark - measures steady-state performance
+        cache_warmup_queries: 0
 
   - name: DiskANN
+    disabled: false
     docker_image: ann-suite/diskann:latest
     algorithm_type: disk
     build:
@@ -34,18 +48,47 @@ algorithms:
         L: 100
         alpha: 1.2
         num_threads: 4
-        # Control build/search memory usage
+        # ============================================================================
+        # ADVISORY MEMORY HINTS - NOT HARD LIMITS!
+        # ============================================================================
+        # WARNING: These parameters do NOT limit actual memory usage during build.
+        # They are HINTS for index partitioning and layout optimization.
+        #
+        # Actual build memory will be 5-10x HIGHER than these values because:
+        # - All vectors must be loaded into memory for graph construction
+        # - Additional working memory for graph building algorithm
+        # - For 1M 128D vectors: expect ~2-4 GB RAM during build regardless of hints
+        #
+        # build_memory_maximum: Hint for how to partition the index (GB)
+        # - Affects index layout, NOT actual memory consumption during build
         build_memory_maximum: 0.6
-        # Note: search_memory_maximum is a BUILD argument because the index layout 
-        # must be optimized for the target search RAM limit during construction.
+        # search_memory_maximum: Target in-memory index footprint for search (GB)
+        # - Set at BUILD time because index layout must be optimized accordingly
+        # - During search, only this portion stays in RAM; rest reads from disk
         search_memory_maximum: 0.5
+        # ============================================================================
     search:
       timeout_seconds: 600
       k: 10
+      batch_mode: false
       args:
         Ls: 100
         beam_width: 2
         num_threads: 4
+        # Cache frequently accessed nodes in RAM to reduce disk I/O
+        # 10000 nodes = ~5-10MB of RAM, significantly reduces pages_per_query
+        num_nodes_to_cache: 10000
+      # ============================================================================
+      # WARMUP CONFIGURATION (for disk-based algorithms)
+      # ============================================================================
+      # For disk-based algorithms, cache warming is particularly important:
+      # - Without warmup: measures cold disk I/O (high latency, realistic first-query)
+      # - With warmup: measures steady-state after OS page cache is populated
+      warmup:
+        collect_metrics: true
+        # Run 500 queries to warm OS page cache before timed benchmark
+        # This simulates steady-state performance after initial queries
+        cache_warmup_queries: 0
 
 datasets:
   - name: sift-128-euclidean

@@ -6,9 +6,13 @@ metrics collection strategies (Docker stats, cgroups v2, eBPF, etc.).
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -19,6 +23,11 @@ class CollectorSample:
     """
 
     timestamp: datetime
+    # Monotonic timestamp (seconds) for accurate duration/interval calculation.
+    # This avoids wall-clock adjustments (e.g., NTP) affecting rate metrics.
+    # When unavailable (e.g., tests constructing samples manually), leave as 0.0 and
+    # aggregation will fall back to `timestamp`.
+    monotonic_time: float = 0.0
     # Memory (bytes)
     memory_usage_bytes: int = 0
     # CPU
@@ -59,7 +68,6 @@ class BaseCollector(ABC):
     """Abstract base class for metrics collectors.
 
     Implementations:
-    - DockerStatsCollector: Uses Docker stats API (existing, to be refactored)
     - CgroupsV2Collector: Direct cgroups v2 filesystem access
     - EBPFCollector: eBPF-based deep I/O tracing (future)
     """
@@ -96,3 +104,52 @@ class BaseCollector(ABC):
     def name(self) -> str:
         """Human-readable name of this collector."""
         pass
+
+
+def get_system_block_size() -> int:
+    """Detect the system block size from block device attributes.
+
+    Checks /sys/block/*/queue/physical_block_size for common devices
+    (sda, nvme0n1, etc.) and returns the detected block size.
+
+    Returns:
+        Block size in bytes (defaults to 4096 if detection fails)
+    """
+    default_block_size = 4096
+
+    # Priority list of devices to check (skip loop, ram, dm-* devices)
+    block_device_prefixes = ["nvme", "sd", "vd", "hd", "xvd"]
+
+    sys_block = Path("/sys/block")
+    if not sys_block.exists():
+        logger.debug("No /sys/block directory found, using default block size")
+        return default_block_size
+
+    try:
+        for device_dir in sys_block.iterdir():
+            device_name = device_dir.name
+
+            # Skip virtual/loop devices
+            if device_name.startswith(("loop", "ram", "dm-", "sr", "fd")):
+                continue
+
+            # Check if it's a real block device we care about
+            is_real_device = any(device_name.startswith(p) for p in block_device_prefixes)
+            if not is_real_device:
+                continue
+
+            block_size_path = device_dir / "queue" / "physical_block_size"
+            if block_size_path.exists():
+                try:
+                    block_size = int(block_size_path.read_text().strip())
+                    if 512 <= block_size <= 65536:  # Sanity check
+                        logger.debug(f"Detected block size {block_size} from {device_name}")
+                        return block_size
+                except (ValueError, PermissionError, OSError):
+                    continue
+
+    except (PermissionError, OSError) as e:
+        logger.debug(f"Error detecting block size: {e}")
+
+    logger.debug(f"Using default block size: {default_block_size}")
+    return default_block_size

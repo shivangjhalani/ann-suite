@@ -7,14 +7,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import yaml
 
 from ann_suite.core.schemas import BenchmarkConfig
-
-if TYPE_CHECKING:
-    pass
 
 
 def load_config(path: Path | str) -> BenchmarkConfig:

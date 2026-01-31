@@ -148,24 +148,81 @@ from ann_suite.core.schemas import BenchmarkResult
 # Results are returned by BenchmarkEvaluator.run()
 result: BenchmarkResult
 
-# Access fields
+# Identification
 result.run_id          # UUID for log correlation
 result.algorithm       # Algorithm name
 result.dataset         # Dataset name
-result.recall          # Recall@k value
+result.timestamp       # datetime when benchmark ran
+
+# Quality metrics
+result.recall          # Recall@k value (0.0 to 1.0)
 result.qps             # Queries per second
 
-# Nested structured metrics
-result.latency.mean_ms # Mean latency
-result.latency.p50_ms  # P50 latency
-result.latency.p95_ms  # P95 latency
-result.latency.p99_ms  # P99 latency
-result.memory.peak_rss_mb  # Peak RAM usage
-result.cpu.avg_cpu_percent # Average CPU utilization
-result.disk_io.avg_read_iops  # Read IOPS (for disk-based algorithms)
+# Build summary
+result.total_build_time_seconds  # Total build wall time
+result.index_size_bytes          # Index size on disk
 
-result.build_result    # PhaseResult for build
-result.search_result   # PhaseResult for search
+# Hyperparameters used
+result.hyperparameters           # {"build": {...}, "search": {...}, "k": 10}
+
+# Latency metrics (from container output)
+result.latency.mean_ms   # Mean query latency (ms)
+result.latency.p50_ms    # Median latency (ms)
+result.latency.p95_ms    # 95th percentile (ms)
+result.latency.p99_ms    # 99th percentile - tail latency (ms)
+
+# Memory metrics (phase-separated)
+result.memory.build_peak_rss_mb   # Peak RAM during build (MB)
+result.memory.load_peak_rss_mb    # Peak RAM during index load (MB)
+result.memory.search_peak_rss_mb  # Peak RAM during search (MB)
+result.memory.search_avg_rss_mb   # Average RAM during search (MB)
+
+# CPU metrics (phase-separated)
+result.cpu.build_cpu_time_seconds      # CPU time during build (s)
+result.cpu.build_peak_cpu_percent      # Peak CPU during build (%)
+result.cpu.load_cpu_time_seconds       # CPU time during index load (s)
+result.cpu.load_peak_cpu_percent       # Peak CPU during index load (%)
+result.cpu.search_cpu_time_seconds     # CPU time during search (s)
+result.cpu.search_avg_cpu_percent      # Average CPU during search (%)
+result.cpu.search_peak_cpu_percent     # Peak CPU during search (%)
+result.cpu.search_cpu_time_per_query_ms  # CPU time per query (ms)
+
+# Disk I/O metrics (CRITICAL for disk-based algorithms)
+result.disk_io.avg_read_iops            # Read IOPS from cgroups
+result.disk_io.avg_write_iops           # Write IOPS from cgroups
+result.disk_io.avg_read_throughput_mbps # Read throughput (MB/s)
+result.disk_io.avg_write_throughput_mbps# Write throughput (MB/s)
+result.disk_io.total_pages_read         # Total 4KB pages read
+result.disk_io.total_pages_written      # Total 4KB pages written
+result.disk_io.pages_per_query          # Average pages per query (or None)
+
+# Phase results (contain raw ResourceSummary)
+result.build_result    # PhaseResult for build phase
+result.search_result   # PhaseResult for search phase
+
+# Convert to flat dict for DataFrame/CSV export
+flat = result.to_flat_dict()
+```
+
+#### `PhaseResult`
+
+Result from a single benchmark phase.
+
+```python
+from ann_suite.core.schemas import PhaseResult
+
+phase: PhaseResult
+
+phase.phase              # "build" or "search"
+phase.success            # bool - did the phase complete successfully?
+phase.error_message      # Error message if failed, else None
+phase.duration_seconds   # Wall clock time for this phase
+phase.resources          # ResourceSummary with monitoring data
+phase.load_resources     # ResourceSummary for load sub-phase (search only)
+phase.output             # dict - raw JSON output from container
+phase.time_bases         # TimeBases with explicit time denominators
+phase.stdout_path        # Path to stdout log file
+phase.stderr_path        # Path to stderr log file
 ```
 
 #### `ResourceSummary`
@@ -244,55 +301,78 @@ Result storage and retrieval.
 
 ```python
 from ann_suite.results.storage import ResultsStorage
+from pathlib import Path
 
 storage = ResultsStorage(results_dir=Path("./results"))
 
-# Save results
-storage.save(results, format="json")   # Full JSON with samples
-storage.save(results, format="csv")    # Flat CSV table
-storage.save(results, format="parquet")  # Columnar format
+# Save results (automatically saves multiple formats)
+run_dir = storage.save(
+    results,
+    run_name="My Benchmark",       # Optional: adds timestamp automatically
+    formats=["json", "csv"],       # Optional: defaults to ["json", "csv"]
+)
+# Creates: results/My Benchmark_2026-01-29_10-30-00/
+#   ├── results.json          # Flattened summary
+#   ├── results_detailed.json # Full results with phase details
+#   └── results.csv           # Flat table
 
-# Load results
-loaded = storage.load("results/benchmark_20240117.json")
+# Load results (by run name or latest)
+loaded = storage.load(run_name="My Benchmark_2026-01-29_10-30-00")
+loaded = storage.load()  # Loads latest run
+
+# Load as pandas DataFrame
+df = storage.load_dataframe(run_name="My Benchmark_2026-01-29_10-30-00")
+df = storage.load_dataframe()  # Latest run
 ```
 
 **Methods:**
 
-##### `save(results: list[BenchmarkResult], format: str = "json")`
+##### `save(results: list[BenchmarkResult], run_name: str | None = None, formats: list[str] | None = None) -> Path`
 
-Save benchmark results.
+Save benchmark results to multiple formats.
 
 **Parameters:**
 - `results`: List of BenchmarkResult objects
-- `format`: Output format (`"json"`, `"csv"`, `"parquet"`)
+- `run_name`: Optional name for this run (timestamp appended automatically)
+- `formats`: List of output formats: `["json", "csv", "parquet"]`. Defaults to `["json", "csv"]`
 
-##### `load(path: Path) -> list[BenchmarkResult]`
+**Returns:**
+- `Path` to the created run directory
 
-Load benchmark results from file.
+##### `load(run_name: str | None = None) -> list[BenchmarkResult]`
 
----
+Load benchmark results from a run directory.
 
-### `ann_suite.monitoring.resource_monitor`
+**Parameters:**
+- `run_name`: Specific run directory name, or `None` to load the latest run
 
-Resource monitoring for containers.
+**Returns:**
+- List of `BenchmarkResult` objects
 
-#### `ResourceMonitor`
+##### `load_dataframe(run_name: str | None = None) -> pd.DataFrame`
+
+Load benchmark results as a pandas DataFrame.
+
+**Parameters:**
+- `run_name`: Specific run directory name, or `None` to load the latest run
+
+**Returns:**
+- `pd.DataFrame` with flattened metrics
+
+#### Convenience Functions
 
 ```python
-from ann_suite.monitoring.resource_monitor import ResourceMonitor
+from ann_suite.results.storage import store_results, load_results
 
-# Usually used internally by ContainerRunner
-# But can be used directly for custom monitoring
+# Store results
+run_dir = store_results(results, results_dir=Path("./results"), run_name="My Benchmark")
 
-monitor = ResourceMonitor(container, interval_ms=100)
-monitor.start()
-
-# ... container runs ...
-
-summary = monitor.stop()  # Returns ResourceSummary
+# Load results
+loaded = load_results(results_dir=Path("./results"), run_name="My Benchmark_2026-01-29_10-30-00")
 ```
 
 ---
+
 
 ### `ann_suite.runners.container_runner`
 
@@ -300,31 +380,66 @@ Docker container management.
 
 #### `ContainerRunner`
 
-```python
-from ann_suite.runners.container_runner import ContainerRunner
+ ```python
+ from ann_suite.runners.container_runner import ContainerRunner
+ from pathlib import Path
 
-runner = ContainerRunner(
-    algo_config=algo_config,
-    dataset_config=dataset_config,
-    base_config=benchmark_config,
-)
+ runner = ContainerRunner(
+     data_dir=Path("./data"),
+     index_dir=Path("./indices"),
+     results_dir=Path("./results"),
+     monitor_interval_ms=100,
+ )
 
-# Pull image
-runner.pull_image()
+ # Pull image
+ runner.pull_image("ann-suite/hnsw:latest")
 
-# Run build phase
-build_result = runner.run_build(
-    data_path=Path("/data/base.npy"),
-    index_path=Path("/data/index/algo/dataset"),
-)
+ # Run build phase
+ build_config = {
+     "dataset_path": "/data/sift-10k/base.npy",
+     "index_path": "/data/index/HNSW/sift-10k",
+     "dimension": 128,
+     "metric": "L2",
+     "build_args": {"M": 16, "ef_construction": 200}
+ }
+
+ result, resources = runner.run_phase(
+     algorithm=algo_config,
+     mode="build",
+     config=build_config,
+ )
 
 # Run search phase
-search_result = runner.run_search(
-    index_path=Path("/data/index/algo/dataset"),
-    queries_path=Path("/data/queries.npy"),
-    ground_truth_path=Path("/data/ground_truth.npy"),
+search_config = {
+    "index_path": "/data/index/HNSW/sift-10k",
+    "queries_path": "/data/sift-10k/queries.npy",
+    "ground_truth_path": "/data/sift-10k/ground_truth.npy",  # Optional
+    "k": 10,
+    "batch_mode": True,  # Enable batch processing for high QPS
+    "search_args": {"ef": 100},
+    "dimension": 128,
+    "metric": "L2"
+}
+
+result, resources = runner.run_phase(
+    algorithm=algo_config,
+    mode="search",
+    config=search_config,
 )
 ```
+
+**Volume Mounts:**
+
+The `ContainerRunner` automatically mounts these volumes:
+
+| Host Path | Container Path | Mode | Purpose |
+|-----------|----------------|------|---------|
+| `data_dir` | `/data` | rw | Datasets |
+| `index_dir` | `/data/index` | rw | Index storage |
+| `results_dir` | `/results` | rw | Optional outputs |
+
+> [!IMPORTANT]
+> Disk-based algorithms **must** write indices to `/data/index/` for accurate I/O metrics.
 
 ---
 
@@ -415,8 +530,8 @@ for r in results:
         "dataset": r.dataset,
         "recall": r.recall,
         "qps": r.qps,
-        "p99_latency_ms": r.p99_latency_ms,
-        "peak_memory_mb": r.peak_memory_mb,
+        "p99_latency_ms": r.latency.p99_ms,
+        "peak_memory_mb": r.memory.search_peak_rss_mb,
     })
 
 df = pd.DataFrame(data)

@@ -25,8 +25,11 @@ import docker
 from docker.errors import ContainerError, ImageNotFound, NotFound
 
 from ann_suite.core.schemas import AlgorithmConfig, ResourceSummary
+from ann_suite.monitoring.base import get_system_block_size
 from ann_suite.monitoring.cgroups_collector import CgroupsV2Collector
-from ann_suite.monitoring.resource_monitor import ResourceMonitor
+
+# Maximum number of log files to keep per algorithm/mode combination
+MAX_LOG_FILES_PER_TYPE = 50
 
 if TYPE_CHECKING:
     from docker.models.containers import Container
@@ -45,6 +48,9 @@ class ContainerResult:
     duration_seconds: float
     output: dict[str, Any] = field(default_factory=dict)
     error_message: str | None = None
+    warmup_resources: ResourceSummary | None = None
+    stdout_path: Path | None = None
+    stderr_path: Path | None = None
 
 
 class ContainerRunner:
@@ -109,13 +115,70 @@ class ContainerRunner:
         # Initialize Docker client
         self._client = docker.from_env()
 
-        # Check if cgroups v2 collector is available for enhanced I/O metrics
+        # Verify cgroups v2 is available - required for metrics collection
+        if not CgroupsV2Collector.check_available():
+            raise RuntimeError(
+                "cgroups v2 is required for metrics collection but is not available. "
+                "Ensure your system uses unified cgroup v2 hierarchy. "
+                "See docs/METRICS.md for setup instructions."
+            )
+
         self._cgroups_collector = CgroupsV2Collector(interval_ms=monitor_interval_ms)
-        self._use_cgroups = self._cgroups_collector.is_available()
-        if self._use_cgroups:
-            logger.info("CgroupsV2Collector available - will collect enhanced I/O metrics")
-        else:
-            logger.info("CgroupsV2Collector not available - using Docker stats only")
+
+        # Detect system block size once at initialization
+        self._block_size = get_system_block_size()
+        logger.info(
+            f"CgroupsV2Collector available - will collect metrics (block_size={self._block_size})"
+        )
+
+        # Clean up old logs on initialization
+        self._cleanup_old_logs()
+
+    def _cleanup_old_logs(self) -> None:
+        """Remove old log files to prevent disk space accumulation.
+
+        Keeps the most recent MAX_LOG_FILES_PER_TYPE log files per algorithm/mode
+        combination, removing older files.
+        """
+        logs_dir = self.results_dir / "logs"
+        if not logs_dir.exists():
+            return
+
+        try:
+            # Group log files by algorithm and mode (e.g., "HNSW_build", "DiskANN_search")
+            log_groups: dict[str, list[Path]] = {}
+
+            for log_file in logs_dir.glob("*.log"):
+                # Log filename format: {algorithm}_{mode}_{phase_id}.{stdout|stderr}.log
+                parts = log_file.stem.split("_")
+                if len(parts) >= 2:
+                    group_key = f"{parts[0]}_{parts[1]}"  # e.g., "HNSW_build"
+                    if group_key not in log_groups:
+                        log_groups[group_key] = []
+                    log_groups[group_key].append(log_file)
+
+            # For each group, keep only the most recent files
+            files_removed = 0
+            for _group_key, files in log_groups.items():
+                if len(files) <= MAX_LOG_FILES_PER_TYPE:
+                    continue
+
+                # Sort by modification time (newest first)
+                files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+
+                # Remove oldest files beyond the limit
+                for old_file in files[MAX_LOG_FILES_PER_TYPE:]:
+                    try:
+                        old_file.unlink()
+                        files_removed += 1
+                    except OSError:
+                        pass
+
+            if files_removed > 0:
+                logger.debug(f"Cleaned up {files_removed} old log files from {logs_dir}")
+
+        except Exception as e:
+            logger.debug(f"Error cleaning up old logs: {e}")
 
     def pull_image(self, image: str, force: bool = False) -> bool:
         """Pull a Docker image if not present.
@@ -150,6 +213,7 @@ class ContainerRunner:
         mode: str,
         config: dict[str, Any],
         timeout_seconds: int | None = None,
+        run_id: str | None = None,
     ) -> tuple[ContainerResult, ResourceSummary]:
         """Run a benchmark phase (build or search) in a container.
 
@@ -158,11 +222,17 @@ class ContainerRunner:
             mode: Phase mode ('build' or 'search')
             config: Phase configuration to pass as JSON
             timeout_seconds: Maximum execution time
+            run_id: Optional run identifier for log correlation
 
         Returns:
             Tuple of (ContainerResult, ResourceSummary)
         """
         import time
+        from uuid import uuid4
+
+        # Generate unique ID for log files, incorporating run_id if provided
+        phase_id = str(uuid4())[:8]
+        log_prefix = f"[{run_id}]" if run_id else ""
 
         # Determine timeout
         if timeout_seconds is None:
@@ -183,13 +253,12 @@ class ContainerRunner:
         resource_limits = self._prepare_resource_limits(algorithm)
 
         container: Container | None = None
-        monitor: ResourceMonitor | None = None
 
         start_time = time.monotonic()
 
         try:
             # Create and start container
-            logger.info(f"Starting container for {algorithm.name} ({mode} phase)")
+            logger.info(f"{log_prefix}Starting container for {algorithm.name} ({mode} phase)")
             container = self._client.containers.run(
                 algorithm.docker_image,
                 command=command,
@@ -199,14 +268,8 @@ class ContainerRunner:
                 **resource_limits,
             )
 
-            # Start resource monitoring immediately - the monitor's start() method
-            # collects an initial sample synchronously to capture fast containers
-            monitor = ResourceMonitor(container, interval_ms=self.monitor_interval_ms)
-            monitor.start()
-
-            # Also start cgroups collector for enhanced I/O metrics if available
-            if self._use_cgroups:
-                self._cgroups_collector.start(container.id)
+            # Start cgroups collector for metrics
+            self._cgroups_collector.start(container.id)
 
             # Wait for container to complete
             try:
@@ -216,35 +279,51 @@ class ContainerRunner:
                 logger.warning(f"Container wait failed: {e}")
                 exit_code = -1
 
-            # Stop monitoring
-            resources = monitor.stop()
+            # Stop monitoring and collect metrics
+            cgroups_result = self._cgroups_collector.stop()
 
-            # If cgroups collector was used, enhance I/O metrics
-            if self._use_cgroups:
-                cgroups_result = self._cgroups_collector.stop()
-                # Merge more accurate I/O metrics from cgroups
-                if cgroups_result.avg_read_iops > 0 or cgroups_result.avg_write_iops > 0:
-                    resources = ResourceSummary(
-                        peak_memory_mb=resources.peak_memory_mb,
-                        avg_memory_mb=resources.avg_memory_mb,
-                        cpu_time_total_seconds=cgroups_result.cpu_time_total_seconds,
-                        avg_cpu_percent=resources.avg_cpu_percent,
-                        peak_cpu_percent=resources.peak_cpu_percent,
-                        # Use cgroups I/O metrics (more accurate)
-                        total_blkio_read_mb=cgroups_result.total_read_bytes / (1024 * 1024),
-                        total_blkio_write_mb=cgroups_result.total_write_bytes / (1024 * 1024),
-                        avg_read_iops=cgroups_result.avg_read_iops,
-                        avg_write_iops=cgroups_result.avg_write_iops,
-                        sample_count=resources.sample_count,
-                        duration_seconds=resources.duration_seconds,
-                        samples=resources.samples,
-                    )
-                    iops = cgroups_result.avg_read_iops
-                    logger.debug(f"Enhanced I/O: read={iops:.1f} IOPS")
+            # Build ResourceSummary from cgroups metrics
+            resources = ResourceSummary(
+                peak_memory_mb=cgroups_result.peak_memory_mb,
+                avg_memory_mb=cgroups_result.avg_memory_mb,
+                cpu_time_total_seconds=cgroups_result.cpu_time_total_seconds,
+                avg_cpu_percent=cgroups_result.avg_cpu_percent,
+                peak_cpu_percent=cgroups_result.peak_cpu_percent,
+                total_blkio_read_mb=cgroups_result.total_read_bytes / (1024 * 1024),
+                total_blkio_write_mb=cgroups_result.total_write_bytes / (1024 * 1024),
+                total_read_ops=cgroups_result.total_read_ops,
+                total_write_ops=cgroups_result.total_write_ops,
+                avg_read_iops=cgroups_result.avg_read_iops,
+                avg_write_iops=cgroups_result.avg_write_iops,
+                sample_count=cgroups_result.sample_count,
+                duration_seconds=cgroups_result.duration_seconds,
+                block_size=self._block_size,
+            )
 
-            # Collect output
-            stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")
-            stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")
+            logger.debug(
+                f"Collected metrics from cgroups: "
+                f"cpu_time={cgroups_result.cpu_time_total_seconds:.2f}s, "
+                f"avg_cpu={cgroups_result.avg_cpu_percent:.1f}%, "
+                f"peak_cpu={cgroups_result.peak_cpu_percent:.1f}%, "
+                f"read_iops={cgroups_result.avg_read_iops:.1f}"
+            )
+
+            # Stream logs directly to files to reduce memory usage, keeping only a tail
+            # for parsing (JSON output is expected at the end of stdout)
+            logs_dir = self.results_dir / "logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+
+            stdout_path = logs_dir / f"{algorithm.name}_{mode}_{phase_id}.stdout.log"
+            stderr_path = logs_dir / f"{algorithm.name}_{mode}_{phase_id}.stderr.log"
+
+            # Number of bytes to keep in memory for parsing (enough for JSON output)
+            tail_size = 64 * 1024  # 64KB tail
+
+            stdout_tail, stderr_tail = self._stream_logs_to_files(
+                container, stdout_path, stderr_path, tail_size=tail_size
+            )
+            stdout = stdout_tail
+            stderr = stderr_tail
 
             duration = time.monotonic() - start_time
 
@@ -254,6 +333,51 @@ class ContainerRunner:
 
             output = self._parse_output(stdout, stderr, mode=mode, metrics_file=metrics_file)
 
+            # Refine metrics using query window if available (Issue #1)
+            query_start = output.get("query_start_timestamp")
+            query_end = output.get("query_end_timestamp")
+
+            if query_start and query_end and mode == "search":
+                try:
+                    from datetime import datetime
+
+                    start_dt = datetime.fromisoformat(query_start)
+                    end_dt = datetime.fromisoformat(query_end)
+
+                    logger.debug(
+                        f"{log_prefix}Refining metrics to query window: {query_start} -> {query_end}"
+                    )
+
+                    # Re-aggregate metrics filtering for the specific query window
+                    cgroups_result = self._cgroups_collector.get_summary(start_dt, end_dt)
+
+                    # Update the resources object with the refined metrics
+                    resources = ResourceSummary(
+                        peak_memory_mb=cgroups_result.peak_memory_mb,
+                        avg_memory_mb=cgroups_result.avg_memory_mb,
+                        cpu_time_total_seconds=cgroups_result.cpu_time_total_seconds,
+                        avg_cpu_percent=cgroups_result.avg_cpu_percent,
+                        peak_cpu_percent=cgroups_result.peak_cpu_percent,
+                        total_blkio_read_mb=cgroups_result.total_read_bytes / (1024 * 1024),
+                        total_blkio_write_mb=cgroups_result.total_write_bytes / (1024 * 1024),
+                        total_read_ops=cgroups_result.total_read_ops,
+                        total_write_ops=cgroups_result.total_write_ops,
+                        avg_read_iops=cgroups_result.avg_read_iops,
+                        avg_write_iops=cgroups_result.avg_write_iops,
+                        sample_count=cgroups_result.sample_count,
+                        duration_seconds=cgroups_result.duration_seconds,
+                        samples=[],  # Don't duplicate raw samples to save space
+                        block_size=self._block_size,
+                    )
+                    logger.info(
+                        f"{log_prefix}Refined metrics: cpu={resources.avg_cpu_percent:.1f}%, "
+                        f"read_iops={resources.avg_read_iops:.1f}, "
+                        f"duration={resources.duration_seconds:.2f}s"
+                    )
+
+                except Exception as e:
+                    logger.warning(f"Failed to refine metrics to query window: {e}")
+
             # Clean up metrics file for next run
             if metrics_file.exists():
                 try:
@@ -261,6 +385,39 @@ class ContainerRunner:
                 except Exception as e:
                     logger.warning(f"Failed to cleanup metrics file: {e}")
             error_msg = output.get("error_message") if output.get("status") == "error" else None
+
+            # Calculate warmup phase metrics if timestamps available
+            # Support both old "load_" and new "warmup_" field names for backward compatibility
+            warmup_start = output.get("warmup_start_timestamp", output.get("load_start_timestamp"))
+            warmup_end = output.get("warmup_end_timestamp", output.get("load_end_timestamp"))
+            warmup_resources_obj = None
+
+            if warmup_start and warmup_end:
+                try:
+                    from datetime import datetime
+
+                    ws_dt = datetime.fromisoformat(warmup_start)
+                    we_dt = datetime.fromisoformat(warmup_end)
+                    warmup_res = self._cgroups_collector.get_summary(ws_dt, we_dt)
+
+                    warmup_resources_obj = ResourceSummary(
+                        peak_memory_mb=warmup_res.peak_memory_mb,
+                        avg_memory_mb=warmup_res.avg_memory_mb,
+                        cpu_time_total_seconds=warmup_res.cpu_time_total_seconds,
+                        avg_cpu_percent=warmup_res.avg_cpu_percent,
+                        peak_cpu_percent=warmup_res.peak_cpu_percent,
+                        total_blkio_read_mb=warmup_res.total_read_bytes / (1024 * 1024),
+                        total_blkio_write_mb=warmup_res.total_write_bytes / (1024 * 1024),
+                        total_read_ops=warmup_res.total_read_ops,
+                        total_write_ops=warmup_res.total_write_ops,
+                        avg_read_iops=warmup_res.avg_read_iops,
+                        avg_write_iops=warmup_res.avg_write_iops,
+                        sample_count=warmup_res.sample_count,
+                        duration_seconds=warmup_res.duration_seconds,
+                        block_size=self._block_size,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to calculate warmup metrics: {e}")
 
             return (
                 ContainerResult(
@@ -271,6 +428,9 @@ class ContainerRunner:
                     duration_seconds=duration,
                     output=output,
                     error_message=error_msg,
+                    warmup_resources=warmup_resources_obj,
+                    stdout_path=stdout_path,
+                    stderr_path=stderr_path,
                 ),
                 resources,
             )
@@ -278,11 +438,6 @@ class ContainerRunner:
         except ContainerError as e:
             duration = time.monotonic() - start_time
             logger.error(f"Container error: {e}")
-            resources = monitor.stop() if monitor else ResourceSummary(
-                peak_memory_mb=0, avg_memory_mb=0, avg_cpu_percent=0, peak_cpu_percent=0,
-                total_blkio_read_mb=0, total_blkio_write_mb=0, avg_read_iops=0, avg_write_iops=0,
-                sample_count=0, duration_seconds=0,
-            )
             return (
                 ContainerResult(
                     success=False,
@@ -292,17 +447,23 @@ class ContainerRunner:
                     duration_seconds=duration,
                     error_message=str(e),
                 ),
-                resources,
+                ResourceSummary(
+                    peak_memory_mb=0,
+                    avg_memory_mb=0,
+                    avg_cpu_percent=0,
+                    peak_cpu_percent=0,
+                    total_blkio_read_mb=0,
+                    total_blkio_write_mb=0,
+                    avg_read_iops=0,
+                    avg_write_iops=0,
+                    sample_count=0,
+                    duration_seconds=0,
+                ),
             )
 
         except Exception as e:
             duration = time.monotonic() - start_time
             logger.error(f"Unexpected error: {e}")
-            resources = monitor.stop() if monitor else ResourceSummary(
-                peak_memory_mb=0, avg_memory_mb=0, avg_cpu_percent=0, peak_cpu_percent=0,
-                total_blkio_read_mb=0, total_blkio_write_mb=0, avg_read_iops=0, avg_write_iops=0,
-                sample_count=0, duration_seconds=0,
-            )
             return (
                 ContainerResult(
                     success=False,
@@ -312,7 +473,18 @@ class ContainerRunner:
                     duration_seconds=duration,
                     error_message=str(e),
                 ),
-                resources,
+                ResourceSummary(
+                    peak_memory_mb=0,
+                    avg_memory_mb=0,
+                    avg_cpu_percent=0,
+                    peak_cpu_percent=0,
+                    total_blkio_read_mb=0,
+                    total_blkio_write_mb=0,
+                    avg_read_iops=0,
+                    avg_write_iops=0,
+                    sample_count=0,
+                    duration_seconds=0,
+                ),
             )
 
         finally:
@@ -336,12 +508,17 @@ class ContainerRunner:
             str(self.data_dir): {"bind": "/data", "mode": "rw"},
             str(self.index_dir): {"bind": "/data/index", "mode": "rw"},
             str(self.results_dir): {"bind": "/results", "mode": "rw"},
+            # Mount logs dir as well if needed, but we write from host side
         }
         return volumes
 
     def _prepare_resource_limits(self, algorithm: AlgorithmConfig) -> dict[str, Any]:
         """Prepare resource limits for the container."""
-        limits: dict[str, Any] = {}
+        limits: dict[str, Any] = {
+            "network_mode": "host",  # Eliminate NAT overhead for accurate latency
+            "shm_size": "2g",  # Large workloads (FAISS, etc.) need more than 64MB default
+            "security_opt": ["seccomp=unconfined"],  # Allow advanced syscalls (io_uring, mmap)
+        }
 
         if algorithm.cpu_limit:
             limits["cpuset_cpus"] = algorithm.cpu_limit
@@ -350,6 +527,62 @@ class ContainerRunner:
             limits["mem_limit"] = algorithm.memory_limit
 
         return limits
+
+    def _stream_logs_to_files(
+        self,
+        container: Container,
+        stdout_path: Path,
+        stderr_path: Path,
+        tail_size: int = 64 * 1024,
+    ) -> tuple[str, str]:
+        """Stream container logs to files, returning only a tail for parsing.
+
+        This avoids holding the entire log in memory for long-running containers
+        while still providing a tail for JSON output parsing.
+
+        Args:
+            container: Docker container to read logs from
+            stdout_path: Path to write stdout log file
+            stderr_path: Path to write stderr log file
+            tail_size: Number of bytes to keep in memory for parsing
+
+        Returns:
+            Tuple of (stdout_tail, stderr_tail) as strings
+        """
+        from collections import deque
+
+        # Use streaming API to avoid loading entire log into memory
+        # Docker SDK logs() with stream=True yields chunks
+        stdout_chunks: deque[bytes] = deque()
+        stderr_chunks: deque[bytes] = deque()
+        stdout_bytes = 0
+        stderr_bytes = 0
+
+        with open(stdout_path, "wb") as stdout_file, open(stderr_path, "wb") as stderr_file:
+            # Stream stdout
+            for chunk in container.logs(stdout=True, stderr=False, stream=True):
+                stdout_file.write(chunk)
+                stdout_chunks.append(chunk)
+                stdout_bytes += len(chunk)
+                # Trim tail buffer if it exceeds limit
+                while stdout_bytes > tail_size and len(stdout_chunks) > 1:
+                    removed = stdout_chunks.popleft()
+                    stdout_bytes -= len(removed)
+
+            # Stream stderr
+            for chunk in container.logs(stdout=False, stderr=True, stream=True):
+                stderr_file.write(chunk)
+                stderr_chunks.append(chunk)
+                stderr_bytes += len(chunk)
+                while stderr_bytes > tail_size and len(stderr_chunks) > 1:
+                    removed = stderr_chunks.popleft()
+                    stderr_bytes -= len(removed)
+
+        # Decode tails for parsing
+        stdout_tail = b"".join(stdout_chunks).decode("utf-8", errors="replace")
+        stderr_tail = b"".join(stderr_chunks).decode("utf-8", errors="replace")
+
+        return stdout_tail, stderr_tail
 
     def _parse_output(
         self, stdout: str, stderr: str = "", mode: str = "search", metrics_file: Path | None = None
@@ -385,6 +618,10 @@ class ContainerRunner:
             except json.JSONDecodeError as e:
                 logger.warning(f"Failed to parse output JSON from stdout: {e}")
 
+        # If we still have no output data, it's a failure
+        if not output_data:
+            logger.error("No metrics found in metrics.json or stdout")
+
         # If we found valid JSON, validate against protocol schema
         if output_data:
             try:
@@ -393,8 +630,20 @@ class ContainerRunner:
                 else:
                     ContainerProtocol.SearchOutput.model_validate(output_data)
             except Exception as e:
-                # Log validation warning but continue with raw data
-                logger.warning(f"Container output doesn't match protocol schema: {e}")
+                # Log actionable validation warning but continue with raw data
+                expected_fields = (
+                    "status, build_time_seconds, index_size_bytes"
+                    if mode == "build"
+                    else "status, total_queries, total_time_seconds, qps, recall, "
+                    "mean_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms, "
+                    "query_start_timestamp, query_end_timestamp"
+                )
+                logger.warning(
+                    f"Container output doesn't fully match {mode} protocol schema: {e}. "
+                    f"Expected fields: {expected_fields}. "
+                    f"Received keys: {list(output_data.keys())}. "
+                    "Some metrics may be missing or incorrectly typed."
+                )
             return output_data
 
         # If no JSON found, implies error (or empty output)
@@ -408,6 +657,7 @@ class ContainerRunner:
         dockerfile_path: Path,
         image_tag: str,
         build_args: dict[str, str] | None = None,
+        context_path: Path | None = None,
     ) -> bool:
         """Build a Docker image from a Dockerfile.
 
@@ -415,15 +665,29 @@ class ContainerRunner:
             dockerfile_path: Path to Dockerfile
             image_tag: Tag for the built image
             build_args: Build arguments to pass
+            context_path: Optional build context path (defaults to Dockerfile parent)
 
         Returns:
             True if build succeeded
         """
         try:
             logger.info(f"Building image {image_tag} from {dockerfile_path}")
+
+            # Use provided context path or default to Dockerfile directory
+            build_context = context_path if context_path else dockerfile_path.parent
+
+            # Dockerfile path relative to context
+            # If context is parent-of-parent, we need relative path
+            # But docker-py takes 'dockerfile' as path within context
+            if context_path:
+                rel_dockerfile = dockerfile_path.relative_to(context_path)
+                dockerfile_arg = str(rel_dockerfile)
+            else:
+                dockerfile_arg = dockerfile_path.name
+
             self._client.images.build(
-                path=str(dockerfile_path.parent),
-                dockerfile=dockerfile_path.name,
+                path=str(build_context),
+                dockerfile=dockerfile_arg,
                 tag=image_tag,
                 buildargs=build_args or {},
                 rm=True,

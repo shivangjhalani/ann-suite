@@ -11,7 +11,11 @@ Build Parameters:
     L: Build-time search list size
     num_threads: Number of threads for parallel operations
     pq_disk_bytes: Bytes for PQ compression on disk (0 = uncompressed, full accuracy)
-    build_memory_maximum: Max memory in GB to use during build
+    build_memory_maximum: ADVISORY hint for index partitioning (in GB). This is NOT
+        a hard memory limit - actual build memory usage will exceed this value.
+        It tells DiskANN how to optimize the index structure for target search RAM.
+    search_memory_maximum: ADVISORY hint for search-time memory budget (in GB).
+        Controls how the index is laid out for disk access patterns.
 
 Search Parameters:
     Ls: Search list size (higher = better recall, slower)
@@ -30,11 +34,13 @@ import json
 import shutil
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import diskannpy
 import numpy as np
+from utils import compute_recall
 
 
 class DiskANNIndex:
@@ -86,7 +92,11 @@ class DiskANNIndex:
             index_path: Where to save the index
             metric: Distance metric
             pq_disk_bytes: PQ bytes for disk storage (0 = uncompressed)
-            build_memory_maximum: Max memory to use during build (GB)
+            build_memory_maximum: ADVISORY hint for index partitioning (GB).
+                This is NOT a hard memory limit. Actual build memory will be
+                significantly higher as it needs to load all vectors and
+                construct the graph. This parameter tells diskannpy how to
+                optimize the index layout for the target search memory budget.
 
         Returns:
             Build statistics
@@ -124,7 +134,9 @@ class DiskANNIndex:
             num_threads=self.num_threads,
             pq_disk_bytes=pq_disk_bytes,
             build_memory_maximum=build_memory_maximum,
-            search_memory_maximum=kwargs.get("search_memory_maximum", 0.5), # Default to 0.5GB for search index construction
+            search_memory_maximum=kwargs.get(
+                "search_memory_maximum", 0.5
+            ),  # Default to 0.5GB for search index construction
             vector_dtype=np.float32,
         )
 
@@ -174,6 +186,7 @@ class DiskANNIndex:
         k: int = 10,
         Ls: int = 100,
         beam_width: int = 2,
+        batch_mode: bool = True,
         **kwargs: Any,
     ) -> tuple[np.ndarray, np.ndarray, list[float]]:
         """Search for nearest neighbors.
@@ -190,54 +203,52 @@ class DiskANNIndex:
         if self.index is None:
             raise RuntimeError("Index not loaded")
 
-        latencies = []
-        all_indices = []
-        all_distances = []
+        latencies: list[float] = []
+        all_indices: list[np.ndarray] = []
+        all_distances: list[np.ndarray] = []
 
-        # Run queries one by one to measure latencies
-        for query in queries:
+        if batch_mode:
+            # Batch Mode: Highest Throughput
             start = time.perf_counter()
-            # diskannpy expects 1D query vector
-            labels, distances = self.index.search(
-                query.astype(np.float32),
-                k_neighbors=k,
-                complexity=Ls,
-                beam_width=beam_width,
-            )
-            elapsed = (time.perf_counter() - start) * 1000  # ms
-            latencies.append(elapsed)
-            all_indices.append(labels)
-            all_distances.append(distances)
 
-        return np.array(all_indices), np.array(all_distances), latencies
+            # Try batch_search if available (diskannpy.StaticDiskIndex)
+            # API: batch_search(queries, k_neighbors, complexity, num_threads, beam_width=2)
+            if hasattr(self.index, "batch_search"):
+                all_indices, all_distances = self.index.batch_search(
+                    queries, k, Ls, self.num_threads, beam_width
+                )
+                total_elapsed_ms = (time.perf_counter() - start) * 1000
+                mean_latency = total_elapsed_ms / len(queries)
+                latencies = [mean_latency] * len(queries)
+            else:
+                # Fallback to serial search if batch API unavailable
+                for query in queries:
+                    s = time.perf_counter()
+                    labels, distances = self.index.search(
+                        query,
+                        k_neighbors=k,
+                        complexity=Ls,
+                        beam_width=beam_width,
+                    )
+                    latencies.append((time.perf_counter() - s) * 1000)
+                    all_indices.append(labels)
+                    all_distances.append(distances)
+        else:
+            # Serial Mode: Accurate Latency Distribution
+            for query in queries:
+                start = time.perf_counter()
+                labels, distances = self.index.search(
+                    query,
+                    k_neighbors=k,
+                    complexity=Ls,
+                    beam_width=beam_width,
+                )
+                elapsed = (time.perf_counter() - start) * 1000
+                latencies.append(elapsed)
+                all_indices.append(labels)
+                all_distances.append(distances)
 
-
-def compute_recall(
-    predicted: np.ndarray,
-    ground_truth: np.ndarray,
-    k: int,
-) -> float:
-    """Compute recall@k.
-
-    Args:
-        predicted: Predicted neighbors (Q x k)
-        ground_truth: True neighbors (Q x k')
-        k: Number of neighbors to consider
-
-    Returns:
-        Recall value between 0 and 1
-    """
-    n_queries = len(predicted)
-    total_recall = 0.0
-
-    gt_k = min(k, ground_truth.shape[1])
-
-    for i in range(n_queries):
-        pred_set = set(predicted[i, :k].tolist())
-        true_set = set(ground_truth[i, :gt_k].tolist())
-        total_recall += len(pred_set & true_set) / gt_k
-
-    return total_recall / n_queries
+        return np.asarray(all_indices), np.asarray(all_distances), latencies
 
 
 def run_build(config: dict[str, Any]) -> dict[str, Any]:
@@ -298,22 +309,20 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
         Search results as JSON-serializable dict
     """
     try:
-        # Load index
+        # Read config
         index_path = Path(config["index_path"])
         dimension = config.get("dimension", 128)
         metric = config.get("metric", "L2")
         search_args = config.get("search_args", {})
 
-        index = DiskANNIndex(num_threads=search_args.get("num_threads", 4))
-        index.load(
-            index_path,
-            dimension,
-            metric,
-            num_nodes_to_cache=search_args.get("num_nodes_to_cache", 0),
-        )
-        print(f"Loaded index from {index_path}", file=sys.stderr)
+        # Extract configuration
+        k = config.get("k", 10)
+        batch_mode = config.get("batch_mode", True)
+        Ls = search_args.get("Ls", 100)
+        beam_width = search_args.get("beam_width", 2)
+        cache_warmup_queries = int(config.get("cache_warmup_queries", 0) or 0)
 
-        # Load queries
+        # Load queries (not part of timed benchmark; keep before warmup window)
         queries_path = Path(config["queries_path"])
         queries = np.load(queries_path).astype(np.float32)
         print(f"Loaded {len(queries)} queries from {queries_path}", file=sys.stderr)
@@ -327,17 +336,62 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
                 ground_truth = np.load(gt_path)
                 print(f"Loaded ground truth from {gt_path}", file=sys.stderr)
 
-        # Extract configuration
-        k = config.get("k", 10)
-        Ls = search_args.get("Ls", 100)
-        beam_width = search_args.get("beam_width", 2)
+        # Warmup window (index load + optional cache warmup queries).
+        warmup_start_timestamp = datetime.now(UTC).isoformat()
+        warmup_start = time.perf_counter()
 
-        # Run search
+        # Track legacy "load_*" timing for backward compatibility / diagnostics
+        load_start_timestamp = datetime.now(UTC).isoformat()
+        load_start = time.perf_counter()
+
+        index = DiskANNIndex(num_threads=search_args.get("num_threads", 4))
+        index.load(
+            index_path,
+            dimension,
+            metric,
+            num_nodes_to_cache=search_args.get("num_nodes_to_cache", 0),
+        )
+
+        load_duration_seconds = time.perf_counter() - load_start
+        load_end_timestamp = datetime.now(UTC).isoformat()
+        print(f"Loaded index from {index_path} in {load_duration_seconds:.2f}s", file=sys.stderr)
+
+        cache_warmup_duration_seconds = 0.0
+        cache_warmup_queries_executed = 0
+
+        # Cache warming: run untimed queries to warm caches
+        # NOTE: Depending on DiskANN build/runtime options, the algorithm may use
+        # direct I/O (O_DIRECT), in which case OS page cache warming will not apply.
+        if cache_warmup_queries > 0:
+            print(
+                f"Running {cache_warmup_queries} cache warmup queries (untimed)...",
+                file=sys.stderr,
+            )
+            warmup_query_count = min(cache_warmup_queries, len(queries))
+            rng = np.random.default_rng(seed=42)
+            warmup_indices = rng.choice(len(queries), warmup_query_count, replace=False)
+            warmup_queries = queries[warmup_indices]
+            t0 = time.perf_counter()
+            index.search(warmup_queries, k=k, Ls=Ls, beam_width=beam_width, batch_mode=True)
+            cache_warmup_duration_seconds = time.perf_counter() - t0
+            cache_warmup_queries_executed = warmup_query_count
+            print(
+                f"Cache warmup complete ({warmup_query_count} queries, "
+                f"{cache_warmup_duration_seconds:.2f}s)",
+                file=sys.stderr,
+            )
+
+        warmup_duration_seconds = time.perf_counter() - warmup_start
+        warmup_end_timestamp = datetime.now(UTC).isoformat()
+
+        # Run timed search - emit timestamps for resource window filtering
+        query_start_timestamp = datetime.now(UTC).isoformat()
         start_time = time.perf_counter()
         indices, distances, latencies = index.search(
-            queries, k=k, Ls=Ls, beam_width=beam_width
+            queries, k=k, Ls=Ls, beam_width=beam_width, batch_mode=batch_mode
         )
         total_time = time.perf_counter() - start_time
+        query_end_timestamp = datetime.now(UTC).isoformat()
 
         # Compute metrics
         n_queries = len(queries)
@@ -368,6 +422,20 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
             "p50_latency_ms": p50_latency,
             "p95_latency_ms": p95_latency,
             "p99_latency_ms": p99_latency,
+            # Warmup window for resource-metric separation
+            "warmup_duration_seconds": warmup_duration_seconds,
+            "query_start_timestamp": query_start_timestamp,
+            "query_end_timestamp": query_end_timestamp,
+            "warmup_start_timestamp": warmup_start_timestamp,
+            "warmup_end_timestamp": warmup_end_timestamp,
+            # Backward-compatible legacy load timing
+            "load_duration_seconds": load_duration_seconds,
+            "load_start_timestamp": load_start_timestamp,
+            "load_end_timestamp": load_end_timestamp,
+            # Cache warmup metadata (untimed)
+            "cache_warmup_queries_requested": cache_warmup_queries,
+            "cache_warmup_queries_executed": cache_warmup_queries_executed,
+            "cache_warmup_duration_seconds": cache_warmup_duration_seconds,
         }
 
     except Exception as e:
@@ -380,6 +448,9 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
             "total_queries": 0,
             "total_time_seconds": 0,
             "qps": 0,
+            "warmup_duration_seconds": None,
+            "query_start_timestamp": None,
+            "query_end_timestamp": None,
         }
 
 

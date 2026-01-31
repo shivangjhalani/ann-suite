@@ -5,13 +5,13 @@
 #
 # To add a new dataset:
 # 1. Add an entry below with the required fields
-# 2. Run: uv run python library/datasets/download.py --dataset <name>
+# 2. Run: uv run ann-suite download --dataset <name>
 
 datasets:
   # ============================================================================
   # Small Datasets (for quick testing)
   # ============================================================================
-  
+
   sift-128-euclidean:
     description: "SIFT image descriptors - classic ANN benchmark (128D, Euclidean)"
     url: "https://ann-benchmarks.com/sift-128-euclidean.hdf5"
@@ -45,7 +45,7 @@ datasets:
   # ============================================================================
   # Medium Datasets
   # ============================================================================
-  
+
   fashion-mnist-784-euclidean:
     description: "Fashion-MNIST images flattened to 784D vectors"
     url: "http://ann-benchmarks.com/fashion-mnist-784-euclidean.hdf5"
@@ -69,7 +69,7 @@ datasets:
   # ============================================================================
   # Large Datasets (for production benchmarking)
   # ============================================================================
-  
+
   gist-960-euclidean:
     description: "GIST image descriptors - high dimensional (960D)"
     url: "http://ann-benchmarks.com/gist-960-euclidean.hdf5"

@@ -64,8 +64,17 @@ python_version = "3.12"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
+# Ignore missing stubs for third-party libraries without type information
+# These libraries (docker, pandas, h5py, yaml) don't have py.typed markers
+# or comprehensive type stubs available
+disable_error_code = ["import-untyped"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-v --tb=short"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.19.1",
+]

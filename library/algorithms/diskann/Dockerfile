@@ -15,12 +15,16 @@ LABEL version="1.0.0"
 
 WORKDIR /app
 
-# Install dependencies
-COPY requirements.txt .
+# Install Python dependencies
+COPY diskann/requirements.txt .
 RUN uv pip install --system --no-cache -r requirements.txt
 
 # Copy algorithm code
-COPY algorithm/ ./algorithm/
+# Copy utilities
+COPY utils.py .
+
+# Copy algorithm code
+COPY diskann/algorithm/ ./algorithm/
 
 # Environment
 ENV PYTHONPATH=/app

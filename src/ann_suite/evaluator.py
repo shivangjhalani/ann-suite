@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +34,7 @@ from ann_suite.core.schemas import (
     LatencyMetrics,
     MemoryMetrics,
     PhaseResult,
+    TimeBases,
 )
 from ann_suite.datasets.loader import DatasetLoader
 from ann_suite.results.storage import ResultsStorage
@@ -88,6 +90,7 @@ def expand_sweep_params(args: dict[str, Any]) -> list[dict[str, Any]]:
 
     return combinations
 
+
 class BenchmarkEvaluator:
     """Main evaluator class for running ANN benchmarks.
 
@@ -118,6 +121,7 @@ class BenchmarkEvaluator:
         self.data_dir = Path(config.data_dir).resolve()
         self.index_dir = Path(config.index_dir).resolve()
         self.results_dir = Path(config.results_dir).resolve()
+        self._run_id: str = ""  # Set properly when run() is called
 
         # Ensure directories exist
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -144,15 +148,18 @@ class BenchmarkEvaluator:
         algorithms = self.config.enabled_algorithms
 
         # Generate run_id for log correlation with stored results
-        run_id = str(uuid.uuid4())[:8]
+        # Store as instance variable so it can be accessed by helper methods
+        self._run_id = str(uuid.uuid4())[:8]
 
         logger.info(
-            f"[{run_id}] Starting benchmark: {len(algorithms)} algorithms, "
+            f"[{self._run_id}] Starting benchmark: {len(algorithms)} algorithms, "
             f"{len(self.config.datasets)} datasets"
         )
 
         # Cache loaded datasets to avoid reloading
-        dataset_cache: dict[str, tuple] = {}
+        dataset_cache: dict[
+            str, tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.int32] | None]
+        ] = {}
 
         for algo_config in algorithms:
             # Filter datasets for this algorithm
@@ -168,14 +175,18 @@ class BenchmarkEvaluator:
                 algo_datasets = self.config.datasets  # All datasets
 
             for dataset_config in algo_datasets:
-                logger.info(f"[{run_id}] Benchmarking: {algo_config.name} on {dataset_config.name}")
+                logger.info(
+                    f"[{self._run_id}] Benchmarking: {algo_config.name} on {dataset_config.name}"
+                )
 
                 # Load dataset from cache or prepare it
                 if dataset_config.name not in dataset_cache:
                     try:
                         dataset_cache[dataset_config.name] = self._prepare_dataset(dataset_config)
                     except Exception as e:
-                        logger.error(f"[{run_id}] Failed to load dataset {dataset_config.name}: {e}")
+                        logger.error(
+                            f"[{self._run_id}] Failed to load dataset {dataset_config.name}: {e}"
+                        )
                         continue
 
                 base_vectors, query_vectors, ground_truth = dataset_cache[dataset_config.name]
@@ -184,13 +195,15 @@ class BenchmarkEvaluator:
                 search_param_combos = expand_sweep_params(algo_config.search.args)
                 n_combos = len(search_param_combos)
                 if n_combos > 1:
-                    logger.info(f"[{run_id}]   Running {n_combos} parameter combinations for sweep")
+                    logger.info(
+                        f"[{self._run_id}]   Running {n_combos} parameter combinations for sweep"
+                    )
 
                 for param_idx, search_params in enumerate(search_param_combos):
                     # Create modified config with expanded params
                     if n_combos > 1:
                         sweep_info = ", ".join(f"{k}={v}" for k, v in search_params.items())
-                        logger.info(f"[{run_id}]   [{param_idx + 1}/{n_combos}] {sweep_info}")
+                        logger.info(f"[{self._run_id}]   [{param_idx + 1}/{n_combos}] {sweep_info}")
 
                     try:
                         result = self._run_single_benchmark(
@@ -203,13 +216,15 @@ class BenchmarkEvaluator:
                         )
                         results.append(result)
                         logger.info(
-                            f"[{run_id}] Completed: {algo_config.name} - "
+                            f"[{self._run_id}] Completed: {algo_config.name} - "
                             f"recall={result.recall:.4f}, qps={result.qps:.1f}"
                             if result.recall and result.qps
-                            else f"[{run_id}] Completed: {algo_config.name}"
+                            else f"[{self._run_id}] Completed: {algo_config.name}"
                         )
                     except Exception as e:
-                        logger.error(f"[{run_id}] Benchmark failed for {algo_config.name}: {e}")
+                        logger.error(
+                            f"[{self._run_id}] Benchmark failed for {algo_config.name}: {e}"
+                        )
                         # Create a failed result
                         results.append(
                             BenchmarkResult(
@@ -234,20 +249,41 @@ class BenchmarkEvaluator:
         """Prepare dataset for benchmarking.
 
         Loads vectors and optionally saves them in container-accessible paths.
+
+        If cached .npy files exist in the dataset directory (base.npy, queries.npy,
+        ground_truth.npy), load them directly via mmap to avoid reloading the
+        original formats and reduce memory usage.
         """
+        dataset_dir = self.data_dir / config.name
+        cached_base = dataset_dir / "base.npy"
+        cached_queries = dataset_dir / "queries.npy"
+        cached_gt = dataset_dir / "ground_truth.npy"
+
+        # If cached .npy files exist, load via mmap to avoid reloading original formats
+        if cached_base.exists() and cached_queries.exists():
+            logger.info(f"Loading cached dataset from {dataset_dir}")
+            base_vectors: NDArray[np.float32] = np.load(cached_base, mmap_mode="r")
+            query_vectors: NDArray[np.float32] = np.load(cached_queries, mmap_mode="r")
+            ground_truth: NDArray[np.int32] | None = None
+            if cached_gt.exists():
+                ground_truth = np.load(cached_gt, mmap_mode="r")
+            logger.info(
+                f"Loaded {base_vectors.shape[0]} base vectors, "
+                f"{query_vectors.shape[0]} queries from cache (mmap)"
+            )
+            return base_vectors, query_vectors, ground_truth
+
+        # Fall back to loading from original source
         # Check if dataset exists
         base_path = (
-            config.base_path
-            if config.base_path.is_absolute()
-            else self.data_dir / config.base_path
+            config.base_path if config.base_path.is_absolute() else self.data_dir / config.base_path
         )
-
 
         if not base_path.exists():
             raise FileNotFoundError(
                 f"Dataset not found: {base_path}\n"
                 f"Please download the dataset first:\n"
-                f"  uv run python library/datasets/download.py --dataset {config.name} "
+                f"  uv run ann-suite download --dataset {config.name} "
                 f"--output {self.data_dir}"
             )
 
@@ -314,7 +350,9 @@ class BenchmarkEvaluator:
                 build_result=build_result,
                 hyperparameters={
                     "build": algo_config.build.args,
-                    "search": search_params_override if search_params_override else algo_config.search.args,
+                    "search": search_params_override
+                    if search_params_override
+                    else algo_config.search.args,
                 },
             )
 
@@ -334,6 +372,7 @@ class BenchmarkEvaluator:
             dataset_config,
             build_result,
             search_result,
+            search_params_override=search_params_override,
         )
 
     def _run_build_phase(
@@ -358,6 +397,13 @@ class BenchmarkEvaluator:
             mode="build",
             config=build_config,
             timeout_seconds=algo_config.build.timeout_seconds,
+            run_id=self._run_id,
+        )
+
+        # Create time bases for build phase
+        time_bases = TimeBases(
+            container_duration_seconds=container_result.duration_seconds,
+            sample_span_seconds=resources.duration_seconds,
         )
 
         return PhaseResult(
@@ -367,6 +413,9 @@ class BenchmarkEvaluator:
             duration_seconds=container_result.duration_seconds,
             resources=resources,
             output=container_result.output,
+            time_bases=time_bases,
+            stdout_path=container_result.stdout_path,
+            stderr_path=container_result.stderr_path,
         )
 
     def _run_search_phase(
@@ -386,6 +435,9 @@ class BenchmarkEvaluator:
         # Use override if provided (for parameter sweeps), otherwise use config
         search_args = search_params_override if search_params_override else algo_config.search.args
 
+        # Get warmup configuration
+        warmup_config = algo_config.search.warmup
+
         search_config: dict[str, Any] = {
             "index_path": f"/data/index/{algo_config.name}/{dataset_config.name}",
             "queries_path": f"/data/{dataset_config.name}/queries.npy",
@@ -393,16 +445,41 @@ class BenchmarkEvaluator:
             "search_args": search_args,
             "dimension": dataset_config.dimension,
             "metric": dataset_config.distance_metric.value,
+            "batch_mode": algo_config.search.batch_mode,
+            # Warmup configuration
+            "cache_warmup_queries": warmup_config.cache_warmup_queries,
         }
 
         if gt_path is not None:
             search_config["ground_truth_path"] = f"/data/{dataset_config.name}/ground_truth.npy"
+
+        # Log warmup configuration if non-default
+        if warmup_config.cache_warmup_queries > 0:
+            logger.info(
+                f"[{self._run_id}] Cache warming enabled: {warmup_config.cache_warmup_queries} "
+                "untimed queries before benchmark"
+            )
 
         container_result, resources = self.container_runner.run_phase(
             algorithm=algo_config,
             mode="search",
             config=search_config,
             timeout_seconds=algo_config.search.timeout_seconds,
+            run_id=self._run_id,
+        )
+
+        # Create time bases from container result and algorithm output
+        # Support both old "load_" and new "warmup_" field names for backward compatibility
+        warmup_duration = container_result.output.get(
+            "warmup_duration_seconds", container_result.output.get("load_duration_seconds")
+        )
+        time_bases = TimeBases(
+            container_duration_seconds=container_result.duration_seconds,
+            sample_span_seconds=resources.duration_seconds,
+            warmup_duration_seconds=warmup_duration,
+            query_duration_seconds=container_result.output.get("total_time_seconds"),
+            query_start_timestamp=container_result.output.get("query_start_timestamp"),
+            query_end_timestamp=container_result.output.get("query_end_timestamp"),
         )
 
         return PhaseResult(
@@ -411,7 +488,11 @@ class BenchmarkEvaluator:
             error_message=container_result.error_message,
             duration_seconds=container_result.duration_seconds,
             resources=resources,
+            warmup_resources=container_result.warmup_resources,
             output=container_result.output,
+            time_bases=time_bases,
+            stdout_path=container_result.stdout_path,
+            stderr_path=container_result.stderr_path,
         )
 
     def _aggregate_results(
@@ -420,57 +501,225 @@ class BenchmarkEvaluator:
         dataset_config: DatasetConfig,
         build_result: PhaseResult,
         search_result: PhaseResult,
+        search_params_override: dict[str, Any] | None = None,
     ) -> BenchmarkResult:
         """Aggregate build and search results into a single BenchmarkResult.
 
         Populates structured metrics from both phase resources and container output.
+        Metrics are clearly separated into three phases:
+        - BUILD: Index construction
+        - WARMUP: Index loading/initialization (before queries)
+        - SEARCH: Query execution (primary benchmark metric)
+
+        If the search phase failed, quality metrics (recall, qps) are set to None,
+        and latency/resource metrics are zeroed to avoid emitting invalid data.
         """
-        search_output = search_result.output
         build_output = build_result.output
         build_res = build_result.resources
+
+        # Handle search failure: return result with build info but no search metrics
+        if not search_result.success:
+            logger.warning(
+                f"[{self._run_id}] Search phase failed for {algo_config.name}: "
+                f"{search_result.error_message}. Quality metrics will be None."
+            )
+
+            # Combine hyperparameters
+            hyperparameters = {
+                "build": algo_config.build.args,
+                "search": search_params_override
+                if search_params_override
+                else algo_config.search.args,
+                "k": algo_config.search.k,
+            }
+
+            # Cap peak CPU at theoretical maximum for build phase
+            max_cpus = os.cpu_count() or 1
+            capped_build_peak_cpu = min(build_res.peak_cpu_percent, max_cpus * 100.0)
+
+            # Return result with build metrics but empty/None search metrics
+            return BenchmarkResult(
+                algorithm=algo_config.name,
+                dataset=dataset_config.name,
+                timestamp=datetime.now(),
+                build_result=build_result,
+                search_result=search_result,
+                # Build-only CPU metrics
+                cpu=CPUMetrics(
+                    build_cpu_time_seconds=build_res.cpu_time_total_seconds,
+                    build_peak_cpu_percent=capped_build_peak_cpu,
+                    # Search metrics zeroed due to failure
+                    warmup_cpu_time_seconds=0.0,
+                    warmup_peak_cpu_percent=0.0,
+                    search_cpu_time_seconds=0.0,
+                    search_avg_cpu_percent=0.0,
+                    search_peak_cpu_percent=0.0,
+                    search_cpu_time_per_query_ms=0.0,
+                ),
+                # Build-only Memory metrics
+                memory=MemoryMetrics(
+                    build_peak_rss_mb=build_res.peak_memory_mb,
+                    warmup_peak_rss_mb=0.0,
+                    search_peak_rss_mb=0.0,
+                    search_avg_rss_mb=0.0,
+                ),
+                # Empty Disk I/O metrics (use defaults for metadata fields)
+                disk_io=DiskIOMetrics(
+                    warmup_read_mb=0.0,
+                    warmup_write_mb=0.0,
+                    search_avg_read_iops=0.0,
+                    search_avg_write_iops=0.0,
+                    search_avg_read_throughput_mbps=0.0,
+                    search_avg_write_throughput_mbps=0.0,
+                    search_total_read_mb=0.0,
+                    search_total_pages_read=0,
+                    search_total_pages_written=0,
+                    search_pages_per_query=None,
+                    # Use schema defaults for metadata (physical_block_size defaults to 4096)
+                    sample_count=0,
+                ),
+                # Empty Latency metrics
+                latency=LatencyMetrics(
+                    mean_ms=0.0,
+                    p50_ms=0.0,
+                    p95_ms=0.0,
+                    p99_ms=0.0,
+                ),
+                # Quality metrics are None for failed search
+                recall=None,
+                qps=None,
+                # Build summary
+                total_build_time_seconds=build_result.duration_seconds,
+                index_size_bytes=build_output.get("index_size_bytes"),
+                # Configuration
+                hyperparameters=hyperparameters,
+            )
+
+        # Search succeeded - proceed with normal metric aggregation
+        search_output = search_result.output
         search_res = search_result.resources
 
-        # Get number of queries for per-query metrics
+        # Get number of queries and query duration for per-query metrics
         num_queries = search_output.get("total_queries", 0)
+        query_duration = search_output.get("total_time_seconds", 0.0)
 
-        # Aggregate CPU metrics (use search phase as primary)
+        # Calculate CPU time per query
+        cpu_time_per_query_ms = 0.0
+        if num_queries > 0 and search_res.cpu_time_total_seconds > 0:
+            cpu_time_per_query_ms = (search_res.cpu_time_total_seconds * 1000.0) / num_queries
+
+        # Cap peak CPU at theoretical maximum
+        max_cpus = os.cpu_count() or 1
+        capped_build_peak_cpu = min(build_res.peak_cpu_percent, max_cpus * 100.0)
+        capped_search_peak_cpu = min(search_res.peak_cpu_percent, max_cpus * 100.0)
+        capped_search_avg_cpu = min(search_res.avg_cpu_percent, max_cpus * 100.0)
+
+        # Log sample adequacy warning
+        if search_res.sample_count < 10:
+            logger.warning(
+                f"Only {search_res.sample_count} samples collected during search - "
+                "metrics may be unreliable. Consider increasing run duration."
+            )
+
+        # Get warmup phase resources (index loading before queries)
+        # Only include if warmup metrics collection is enabled
+        collect_warmup = algo_config.search.warmup.collect_metrics
+        warmup_res = search_result.warmup_resources if collect_warmup else None
+
+        # Aggregate CPU metrics (separated by phase: BUILD, WARMUP, SEARCH)
         cpu = CPUMetrics(
-            cpu_time_total_seconds=search_res.cpu_time_total_seconds,
-            avg_cpu_percent=search_res.avg_cpu_percent,
-            peak_cpu_percent=max(build_res.peak_cpu_percent, search_res.peak_cpu_percent),
+            # BUILD phase metrics
+            build_cpu_time_seconds=build_res.cpu_time_total_seconds,
+            build_peak_cpu_percent=capped_build_peak_cpu,
+            # WARMUP phase metrics (index loading)
+            warmup_cpu_time_seconds=warmup_res.cpu_time_total_seconds if warmup_res else 0.0,
+            warmup_peak_cpu_percent=min(warmup_res.peak_cpu_percent, max_cpus * 100.0)
+            if warmup_res
+            else 0.0,
+            # SEARCH phase metrics (primary benchmark focus)
+            search_cpu_time_seconds=search_res.cpu_time_total_seconds,
+            search_avg_cpu_percent=capped_search_avg_cpu,
+            search_peak_cpu_percent=capped_search_peak_cpu,
+            search_cpu_time_per_query_ms=cpu_time_per_query_ms,
         )
 
-        # Aggregate Memory metrics
+        # Aggregate Memory metrics (separated by phase: BUILD, WARMUP, SEARCH)
         memory = MemoryMetrics(
-            peak_rss_mb=max(build_res.peak_memory_mb, search_res.peak_memory_mb),
-            avg_rss_mb=search_res.avg_memory_mb,
+            build_peak_rss_mb=build_res.peak_memory_mb,
+            warmup_peak_rss_mb=warmup_res.peak_memory_mb if warmup_res else 0.0,
+            search_peak_rss_mb=search_res.peak_memory_mb,
+            search_avg_rss_mb=search_res.avg_memory_mb,
         )
 
-        # Aggregate Disk I/O metrics (CRITICAL)
-        total_read_bytes = search_res.total_blkio_read_mb * 1024 * 1024
-        total_write_bytes = search_res.total_blkio_write_mb * 1024 * 1024
-        total_pages_read = int(total_read_bytes / 4096)
-        total_pages_written = int(total_write_bytes / 4096)
+        # Aggregate Disk I/O metrics (CRITICAL for disk-based algorithms)
+        # Use query_duration as the CONSISTENT time base for all rate metrics
+        io_time_base = query_duration if query_duration > 0 else search_res.duration_seconds
+
+        # Warn if we can't compute throughput
+        if io_time_base <= 0:
+            logger.warning(
+                "No valid time base for throughput calculation (io_time_base=0). "
+                "Container may have exited too quickly for metrics collection. "
+                "Throughput metrics will be reported as 0."
+            )
+
+        # Use STANDARD 4KB page size for cross-system comparability
+        # This ensures consistent metrics regardless of physical block size
+        STANDARD_PAGE_SIZE = 4096
+
+        search_total_read_mb = search_res.total_blkio_read_mb
+        search_total_write_mb = search_res.total_blkio_write_mb
+        search_total_read_bytes = search_total_read_mb * 1024 * 1024
+        search_total_write_bytes = search_total_write_mb * 1024 * 1024
+
+        # Calculate pages using STANDARD 4KB page size (not physical block size)
+        search_total_pages_read = int(search_total_read_bytes / STANDARD_PAGE_SIZE)
+        search_total_pages_written = int(search_total_write_bytes / STANDARD_PAGE_SIZE)
+
+        # Calculate warmup phase I/O
+        warmup_read_mb = warmup_res.total_blkio_read_mb if warmup_res else 0.0
+        warmup_write_mb = warmup_res.total_blkio_write_mb if warmup_res else 0.0
+
+        # Use raw deltas from collector for accurate IOPS (avoids lossy reconstruction)
+        if io_time_base > 0:
+            search_avg_read_iops = search_res.total_read_ops / io_time_base
+            search_avg_write_iops = search_res.total_write_ops / io_time_base
+        else:
+            search_avg_read_iops = 0.0
+            search_avg_write_iops = 0.0
 
         disk_io = DiskIOMetrics(
-            avg_read_iops=search_res.avg_read_iops,
-            avg_write_iops=search_res.avg_write_iops,
-            avg_read_throughput_mbps=(
-                search_res.total_blkio_read_mb / search_res.duration_seconds
-                if search_res.duration_seconds > 0
-                else 0.0
+            # WARMUP phase I/O
+            warmup_read_mb=warmup_read_mb,
+            warmup_write_mb=warmup_write_mb,
+            # SEARCH phase IOPS (using consistent query_duration time base)
+            search_avg_read_iops=search_avg_read_iops,
+            search_avg_write_iops=search_avg_write_iops,
+            # SEARCH phase throughput (using consistent query_duration time base)
+            search_avg_read_throughput_mbps=(
+                search_total_read_mb / io_time_base if io_time_base > 0 else 0.0
             ),
-            avg_write_throughput_mbps=(
-                search_res.total_blkio_write_mb / search_res.duration_seconds
-                if search_res.duration_seconds > 0
-                else 0.0
+            search_avg_write_throughput_mbps=(
+                search_total_write_mb / io_time_base if io_time_base > 0 else 0.0
             ),
-            total_pages_read=total_pages_read,
-            total_pages_written=total_pages_written,
-            pages_per_query=(
-                total_pages_read / num_queries if num_queries > 0 else None
+            # SEARCH phase page metrics (standardized 4KB pages)
+            search_total_read_mb=search_total_read_mb,
+            search_total_pages_read=search_total_pages_read,
+            search_total_pages_written=search_total_pages_written,
+            search_pages_per_query=(
+                search_total_pages_read / num_queries if num_queries > 0 else None
             ),
+            # Metadata for transparency
+            physical_block_size=search_res.block_size,
+            sample_count=search_res.sample_count,
         )
+
+        # Warn about unexpected writes during search
+        if search_total_write_mb > 10:
+            logger.warning(
+                f"Unexpected write I/O during search: {search_total_write_mb:.1f} MB. "
+                "This may indicate logging, temp files, or mmap metadata writes."
+            )
 
         # Latency metrics from container output
         latency = LatencyMetrics(
@@ -480,10 +729,19 @@ class BenchmarkEvaluator:
             p99_ms=search_output.get("p99_latency_ms", 0.0),
         )
 
-        # Combine hyperparameters
+        # Warn if latency percentiles appear to be estimated (all equal = batch_mode)
+        if latency.mean_ms > 0 and latency.p50_ms == latency.p95_ms == latency.p99_ms:
+            logger.warning(
+                f"Latency percentiles are identical (p50=p95=p99={latency.p50_ms:.3f}ms). "
+                "This typically indicates batch_mode=True was used, which estimates "
+                "per-query latency rather than measuring it. Set batch_mode=False in "
+                "search config for accurate latency distribution."
+            )
+
+        # Combine hyperparameters - use override if provided (for parameter sweeps)
         hyperparameters = {
             "build": algo_config.build.args,
-            "search": algo_config.search.args,
+            "search": search_params_override if search_params_override else algo_config.search.args,
             "k": algo_config.search.k,
         }
 

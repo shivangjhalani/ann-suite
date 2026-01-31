@@ -16,6 +16,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ann_suite.core.config import load_config
+from ann_suite.core.schemas import BenchmarkConfig, BenchmarkResult
 from ann_suite.datasets.download import download_dataset
 from ann_suite.evaluator import BenchmarkEvaluator
 from ann_suite.results.storage import ResultsStorage
@@ -40,10 +41,18 @@ def run(
         None, "--output", "-o", help="Output directory for results (overrides config)"
     ),
     log_level: str = typer.Option("INFO", "--log-level", "-l", help="Logging level"),
+    log_file: Path | None = typer.Option(
+        None, "--log-file", help="Write logs to file in addition to console"
+    ),
+    json_logs: bool = typer.Option(
+        False, "--json-logs", help="Output logs in JSON format (for programmatic parsing)"
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Validate config without running"),
 ) -> None:
     """Run a benchmark suite from a configuration file."""
-    setup_logging(level=log_level)
+    setup_logging(
+        level=log_level, log_file=log_file, json_format=json_logs, rich_console=not json_logs
+    )
 
     # Load and validate configuration
     console.print(f"[bold blue]Loading configuration from {config}[/]")
@@ -106,7 +115,7 @@ def report(
     elif output_format == "json":
         import json
 
-        data = [r.to_flat_dict() for r in results]
+        data = [r.to_summary_dict() for r in results]
         console.print(json.dumps(data, indent=2, default=str))
     elif output_format == "csv":
         df = storage.load_dataframe(run_name)
@@ -149,6 +158,7 @@ def build(
         dockerfile_path=dockerfile,
         image_tag=image_tag,
         build_args={"NO_CACHE": "true"} if force else None,
+        context_path=algorithms_dir,
     )
 
     if success:
@@ -158,18 +168,13 @@ def build(
         raise typer.Exit(1)
 
 
-
 @app.command()
 def download(
-    dataset: str = typer.Option(None, help="Dataset name to download"),
-    output: Path = typer.Option(
-        None, help="Output directory (default: library/datasets/)"
-    ),
-    list_datasets: bool = typer.Option(
-        False, "--list", help="List available datasets"
-    ),
+    dataset: str | None = typer.Option(None, help="Dataset name to download"),
+    output: Path | None = typer.Option(None, help="Output directory (default: library/datasets/)"),
+    list_datasets: bool = typer.Option(False, "--list", help="List available datasets"),
     quiet: bool = typer.Option(False, help="Suppress output"),
-):
+) -> None:
     """Download and prepare datasets used by the benchmark."""
     from ann_suite.datasets.download import list_datasets as list_ds
 
@@ -239,11 +244,10 @@ algorithms:
         L: 100
         alpha: 1.2
         num_threads: 4
-        # Control build/search memory usage
-        build_memory_maximum: 2.0
-        # Note: search_memory_maximum is a BUILD argument because the index layout
-        # must be optimized for the target search RAM limit during construction.
-        search_memory_maximum: 0.5
+        # ADVISORY memory hints (NOT hard limits!) - for index optimization
+        build_memory_maximum: 2.0   # Target memory budget (GB), actual will be higher
+        # search_memory_maximum is a BUILD arg for index layout optimization
+        search_memory_maximum: 0.5  # Target search-time memory budget (GB)
     search:
       timeout_seconds: 300
       k: 10
@@ -251,7 +255,7 @@ algorithms:
         Ls: 100
 
 # Datasets to benchmark on
-# Download with: uv run python library/datasets/download.py --dataset sift-10k
+# Download with: uv run ann-suite download --dataset sift-10k
 datasets:
   - name: sift-10k
     base_path: sift-10k/base.npy
@@ -265,7 +269,7 @@ datasets:
     console.print(f"[bold green]Sample configuration written to {output}[/]")
 
 
-def _show_config_summary(config) -> None:
+def _show_config_summary(config: BenchmarkConfig) -> None:
     """Display a summary of the benchmark configuration."""
     table = Table(title="Benchmark Configuration")
     table.add_column("Setting", style="cyan")
@@ -292,7 +296,7 @@ def _show_config_summary(config) -> None:
         console.print(algo_table)
 
 
-def _show_results_table(results) -> None:
+def _show_results_table(results: list[BenchmarkResult]) -> None:
     """Display benchmark results with detailed metrics."""
     from rich.panel import Panel
 
@@ -306,7 +310,10 @@ def _show_results_table(results) -> None:
         main_table.add_row("Dataset", r.dataset)
         main_table.add_row("Recall@k", f"[green]{r.recall:.4f}[/]" if r.recall else "N/A")
         main_table.add_row("QPS", f"[green]{r.qps:,.1f}[/]" if r.qps else "N/A")
-        main_table.add_row("Build Time", f"{r.total_build_time_seconds:.2f}s" if r.total_build_time_seconds else "N/A")
+        main_table.add_row(
+            "Build Time",
+            f"{r.total_build_time_seconds:.2f}s" if r.total_build_time_seconds else "N/A",
+        )
 
         # Latency metrics
         lat = r.latency
@@ -317,22 +324,45 @@ def _show_results_table(results) -> None:
         main_table.add_row("  P95", f"{lat.p95_ms:.3f} ms" if lat.p95_ms > 0 else "N/A")
         main_table.add_row("  P99", f"[yellow]{lat.p99_ms:.3f} ms[/]" if lat.p99_ms > 0 else "N/A")
 
-        # Resource metrics
+        # Resource metrics (phase-separated)
         main_table.add_row("", "")
         main_table.add_row("[magenta]Resources[/]", "")
-        main_table.add_row("  Peak RAM", f"{r.memory.peak_rss_mb:.1f} MB" if r.memory.peak_rss_mb > 0 else "N/A")
-        main_table.add_row("  Avg CPU", f"{r.cpu.avg_cpu_percent:.1f}%" if r.cpu.avg_cpu_percent > 0 else "N/A")
+        main_table.add_row(
+            "  Build Peak RAM",
+            f"{r.memory.build_peak_rss_mb:.1f} MB" if r.memory.build_peak_rss_mb > 0 else "N/A",
+        )
+        main_table.add_row(
+            "  Search Peak RAM",
+            f"{r.memory.search_peak_rss_mb:.1f} MB" if r.memory.search_peak_rss_mb > 0 else "N/A",
+        )
+        main_table.add_row(
+            "  Search Avg RAM",
+            f"{r.memory.search_avg_rss_mb:.1f} MB" if r.memory.search_avg_rss_mb > 0 else "N/A",
+        )
+        main_table.add_row(
+            "  Search Avg CPU",
+            f"{r.cpu.search_avg_cpu_percent:.1f}%" if r.cpu.search_avg_cpu_percent > 0 else "N/A",
+        )
+        main_table.add_row(
+            "  Search CPU/Query",
+            f"{r.cpu.search_cpu_time_per_query_ms:.3f} ms"
+            if r.cpu.search_cpu_time_per_query_ms > 0
+            else "N/A",
+        )
 
-        # Disk I/O metrics (CRITICAL)
+        # Disk I/O metrics (CRITICAL) - Search phase metrics
         dio = r.disk_io
-        if dio.avg_read_iops > 0 or dio.avg_write_iops > 0:
+        if dio.search_avg_read_iops > 0 or dio.search_avg_write_iops > 0:
             main_table.add_row("", "")
-            main_table.add_row("[red]Disk I/O[/]", "")
-            main_table.add_row("  Read IOPS", f"{dio.avg_read_iops:.1f}")
-            main_table.add_row("  Write IOPS", f"{dio.avg_write_iops:.1f}")
-            main_table.add_row("  Pages Read", f"{dio.total_pages_read:,}")
-            if dio.pages_per_query:
-                main_table.add_row("  Pages/Query", f"{dio.pages_per_query:.1f}")
+            main_table.add_row("[red]Disk I/O (Search Phase)[/]", "")
+            main_table.add_row("  Read IOPS", f"{dio.search_avg_read_iops:.1f}")
+            main_table.add_row("  Write IOPS", f"{dio.search_avg_write_iops:.1f}")
+            main_table.add_row("  Read MB/s", f"{dio.search_avg_read_throughput_mbps:.1f}")
+            main_table.add_row("  Pages Read (4KB)", f"{dio.search_total_pages_read:,}")
+            if dio.search_pages_per_query:
+                main_table.add_row("  Pages/Query", f"{dio.search_pages_per_query:.1f}")
+            if dio.warmup_read_mb > 0:
+                main_table.add_row("  Warmup Read", f"{dio.warmup_read_mb:.1f} MB")
 
         # Hyperparameters
         if r.hyperparameters:
@@ -345,10 +375,11 @@ def _show_results_table(results) -> None:
                 for k, v in r.hyperparameters["search"].items():
                     main_table.add_row(f"  search.{k}", str(v))
 
-        console.print(Panel(main_table, title=f"[bold]{r.algorithm} on {r.dataset}[/]", border_style="blue"))
+        console.print(
+            Panel(main_table, title=f"[bold]{r.algorithm} on {r.dataset}[/]", border_style="blue")
+        )
         console.print()
 
 
 if __name__ == "__main__":
     app()
-

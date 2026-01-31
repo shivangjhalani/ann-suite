@@ -1,5 +1,7 @@
 """ANN Benchmarking Suite - Core package."""
 
+from __future__ import annotations
+
 from ann_suite.core.schemas import (
     AlgorithmConfig,
     BenchmarkConfig,

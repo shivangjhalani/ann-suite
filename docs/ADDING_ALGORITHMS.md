@@ -55,13 +55,16 @@ python -m algorithm.runner --mode <build|search> --config '<json_string>'
     "queries_path": "/data/dataset_name/queries.npy",
     "ground_truth_path": "/data/dataset_name/ground_truth.npy",
     "k": 10,
+    "batch_mode": true,
+    "dimension": 128,
+    "metric": "L2",
     "search_args": {
         "ef": 100
     }
 }
 ```
 
-**Expected Output (stdout):**
+**Expected Output (stdout or `/results/metrics.json`):**
 ```json
 {
     "status": "success",
@@ -72,19 +75,42 @@ python -m algorithm.runner --mode <build|search> --config '<json_string>'
     "mean_latency_ms": 0.5,
     "p50_latency_ms": 0.4,
     "p95_latency_ms": 0.8,
-    "p99_latency_ms": 1.2
+    "p99_latency_ms": 1.2,
+    "load_duration_seconds": 0.1,
+    "load_start_timestamp": "2026-01-28T21:46:45.000000+00:00",
+    "load_end_timestamp": "2026-01-28T21:46:45.100000+00:00",
+    "query_start_timestamp": "2026-01-28T21:46:45.100000+00:00",
+    "query_end_timestamp": "2026-01-28T21:46:45.600000+00:00"
 }
 ```
+
+> [!WARNING]
+> **Required for Research-Grade Metrics**: The timestamp fields enable accurate resource metrics:
+> - `load_duration_seconds`: Time spent loading the index from disk
+> - `load_start_timestamp`: ISO-8601 UTC timestamp when index loading began
+> - `load_end_timestamp`: ISO-8601 UTC timestamp when index loading completed
+> - `query_start_timestamp`: ISO-8601 UTC timestamp when query execution began
+> - `query_end_timestamp`: ISO-8601 UTC timestamp when query execution ended
+>
+> These fields enable phase-separated resource filtering for fair algorithm comparison.
+> Without them, all metrics are computed over the entire container lifetime.
 
 ## Critical: Volume Mounting
 
 The suite mounts host directories into containers:
 
-| Host Path | Container Path | Purpose |
-|-----------|---------------|---------|
-| `data_dir` | `/data` | Datasets (base vectors, queries, ground truth) |
-| `index_dir` | `/data/index` | Index storage |
-| `results_dir` | `/results` | Optional additional outputs |
+| Host Path (from config) | Container Path | Mode | Purpose |
+|-------------------------|----------------|------|---------|
+| `data_dir` | `/data` | rw | Datasets (base vectors, queries, ground truth) |
+| `index_dir` | `/data/index` | rw | Index storage (persists between build/search) |
+| `results_dir` | `/results` | rw | Optional outputs (e.g., `metrics.json`) |
+
+**Example with default config:**
+```
+Host: ./data/sift-10k/base.npy    → Container: /data/sift-10k/base.npy
+Host: ./indices/HNSW/sift-10k/    → Container: /data/index/HNSW/sift-10k/
+Host: ./results/metrics.json      → Container: /results/metrics.json
+```
 
 ### For Disk-Based Algorithms (DiskANN, SPANN, etc.)
 
@@ -143,12 +169,21 @@ def run_build(config: dict) -> dict:
     }
 
 def run_search(config: dict) -> dict:
-    # Load index and queries
+    from datetime import datetime, timezone
+    import time
+
+    # Load index - track timing
+    load_start = time.perf_counter()
     index = MyAlgorithm.load(config["index_path"])
     queries = np.load(config["queries_path"])
+    load_duration_seconds = time.perf_counter() - load_start
 
-    # Run search with timing
+    # Run search with timing - emit timestamps
+    query_start_timestamp = datetime.now(timezone.utc).isoformat()
+    start_time = time.perf_counter()
     results, latencies = index.search(queries, k=config["k"])
+    total_time = time.perf_counter() - start_time
+    query_end_timestamp = datetime.now(timezone.utc).isoformat()
 
     # Compute recall if ground truth available
     recall = compute_recall(results, ground_truth)
@@ -156,9 +191,13 @@ def run_search(config: dict) -> dict:
     return {
         "status": "success",
         "total_queries": len(queries),
+        "total_time_seconds": total_time,
         "qps": len(queries) / total_time,
         "recall": recall,
         # ... latency percentiles
+        "load_duration_seconds": load_duration_seconds,
+        "query_start_timestamp": query_start_timestamp,
+        "query_end_timestamp": query_end_timestamp,
     }
 
 def main():
@@ -245,23 +284,20 @@ The suite includes production implementations you can use as templates:
 
 ---
 
-## Optional: Shared Base Runner Utilities
+## Optional: Shared Utilities
 
-The suite provides optional shared utilities in `library/algorithms/base_runner.py` to reduce boilerplate code when implementing new algorithms. **These are completely optional** - you can write fully standalone runners like HNSW and DiskANN do.
+The suite provides optional shared utilities in `library/algorithms/utils.py` to reduce boilerplate code when implementing new algorithms. **These are completely optional** - you can write fully standalone runners like HNSW and DiskANN do.
 
-### What's Included
+### What's Included in `utils.py`
 
 | Utility | Purpose |
 |---------|---------|
-| `compute_recall()` | Standard recall@k calculation |
-| `compute_latency_percentiles()` | Compute mean, p50, p95, p99 latencies |
-| `run_algorithm()` | CLI entrypoint wrapper with JSON parsing |
-| `write_result_to_file()` | Write metrics.json for robust protocol |
-| `measure_search_latencies()` | Per-query latency measurement loop |
+| `compute_recall(predicted, ground_truth, k)` | Standard recall@k calculation |
+| `compute_latency_percentiles(latencies)` | Compute mean, p50, p95, p99 latencies (ms) |
 
-### When to Use
+### When to Use Utilities
 
-**Use base_runner.py when:**
+**Use `utils.py` when:**
 - You want less boilerplate code
 - You're implementing multiple algorithms and want consistency
 - You prefer importing tested utilities over copy-pasting
@@ -271,17 +307,19 @@ The suite provides optional shared utilities in `library/algorithms/base_runner.
 - Your algorithm has unique requirements
 - You're copying from an existing runner as a template
 
-### Example: Using Base Runner
+### Example: Using Shared Utilities
 
 ```python
 # algorithm/runner.py
 import numpy as np
+import time
 from pathlib import Path
+from datetime import datetime, timezone
 
-# Import shared utilities
+# Import shared utilities (optional)
 import sys
 sys.path.insert(0, str(Path(__file__).parents[2]))  # Add library/algorithms to path
-from base_runner import compute_recall, compute_latency_percentiles, run_algorithm
+from utils import compute_recall, compute_latency_percentiles
 
 class MyIndex:
     def build(self, data, **kwargs): ...
@@ -289,55 +327,77 @@ class MyIndex:
 
 def run_build(config):
     data = np.load(config["dataset_path"])
+    start = time.perf_counter()
     index = MyIndex()
-    index.build(data)
+    index.build(data, **config.get("build_args", {}))
+    build_time = time.perf_counter() - start
     index.save(config["index_path"])
-    return {"status": "success", "build_time_seconds": 1.0, "index_size_bytes": 1000}
+    return {
+        "status": "success",
+        "build_time_seconds": build_time,
+        "index_size_bytes": index.size_bytes()
+    }
 
 def run_search(config):
+    # Load index with timing
+    load_start = datetime.now(timezone.utc)
+    load_start_time = time.perf_counter()
     index = MyIndex.load(config["index_path"])
     queries = np.load(config["queries_path"])
-    
-    # Measure latencies
+    ground_truth = np.load(config.get("ground_truth_path", "")) if config.get("ground_truth_path") else None
+    load_end = datetime.now(timezone.utc)
+    load_duration = time.perf_counter() - load_start_time
+
+    # Execute queries with timing
+    query_start = datetime.now(timezone.utc)
     latencies = []
     results = []
     for query in queries:
         start = time.perf_counter()
         results.append(index.search(query, k=config["k"]))
-        latencies.append((time.perf_counter() - start) * 1000)
-    
+        latencies.append((time.perf_counter() - start) * 1000)  # ms
+    query_end = datetime.now(timezone.utc)
+    total_time = sum(latencies) / 1000  # seconds
+
     # Use shared utilities
     latency_stats = compute_latency_percentiles(latencies)
-    recall = compute_recall(np.array(results), ground_truth, config["k"])
-    
+    recall = compute_recall(np.array(results), ground_truth, config["k"]) if ground_truth is not None else None
+
     return {
         "status": "success",
+        "total_queries": len(queries),
+        "total_time_seconds": total_time,
+        "qps": len(queries) / total_time,
         "recall": recall,
-        "qps": len(queries) / sum(latencies) * 1000,
         **latency_stats,
+        # Required for research-grade metrics:
+        "load_duration_seconds": load_duration,
+        "load_start_timestamp": load_start.isoformat(),
+        "load_end_timestamp": load_end.isoformat(),
+        "query_start_timestamp": query_start.isoformat(),
+        "query_end_timestamp": query_end.isoformat(),
     }
-
-if __name__ == "__main__":
-    run_algorithm("My Algorithm", run_build, run_search)
 ```
 
 ### Example: Standalone Runner (No Dependencies)
 
 ```python
-# algorithm/runner.py - Fully self-contained, no imports from base_runner
+# algorithm/runner.py - Fully self-contained, no imports from utils
 import argparse
 import json
 import sys
 import time
 import numpy as np
+from datetime import datetime, timezone
 
 def compute_recall(predicted, ground_truth, k):
     """Compute recall@k."""
     total = 0.0
+    gt_k = min(k, ground_truth.shape[1])
     for i in range(len(predicted)):
         pred = set(predicted[i, :k].tolist())
-        true = set(ground_truth[i, :k].tolist())
-        total += len(pred & true) / k
+        true = set(ground_truth[i, :gt_k].tolist())
+        total += len(pred & true) / gt_k
     return total / len(predicted)
 
 def run_build(config): ...
@@ -348,7 +408,7 @@ def main():
     parser.add_argument("--mode", choices=["build", "search"])
     parser.add_argument("--config", type=str)
     args = parser.parse_args()
-    
+
     config = json.loads(args.config)
     result = run_build(config) if args.mode == "build" else run_search(config)
     print(json.dumps(result))
@@ -358,7 +418,9 @@ if __name__ == "__main__":
     main()
 ```
 
-> **Note**: The existing HNSW and DiskANN implementations are standalone and do not use `base_runner.py`. They serve as complete, working examples of this approach.
+> [!NOTE]
+> The existing HNSW and DiskANN implementations are standalone and do not use `utils.py`.
+> They serve as complete, working examples of this approach.
 
 ## Debugging Tips
 
@@ -440,7 +502,7 @@ docker run --gpus all ann-suite/faiss-gpu:latest ...
 uv run ann-suite build --algorithm Test
 
 # Download test data
-uv run python library/datasets/download.py --dataset sift-10k
+uv run ann-suite download --dataset sift-10k
 
 # Run build
 mkdir -p indices/test

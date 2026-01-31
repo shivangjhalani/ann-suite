@@ -24,14 +24,14 @@ algorithms:
     algorithm_type: memory
     cpu_limit: "0-3"
     memory_limit: "4g"
-    
+
     build:
       timeout_seconds: 1800
       args:
         M: 16
         ef_construction: 200
         num_threads: 4
-    
+
     search:
       timeout_seconds: 300
       k: 10
@@ -44,7 +44,7 @@ algorithms:
     algorithm_type: disk
     cpu_limit: "0-3"
     memory_limit: "1g"
-    
+
     build:
       timeout_seconds: 3600
       args:
@@ -52,8 +52,9 @@ algorithms:
         L: 100
         num_threads: 4
         pq_disk_bytes: 0
+        # ADVISORY hint for index optimization (NOT a hard limit)
         build_memory_maximum: 1.0
-    
+
     search:
       timeout_seconds: 600
       k: 10
@@ -69,6 +70,9 @@ algorithms:
 # ------------------------------------------------------------------------------
 datasets:
   - name: glove-25-angular
+    base_path: glove-25-angular/base.npy
+    query_path: glove-25-angular/queries.npy
+    ground_truth_path: glove-25-angular/ground_truth.npy
     distance_metric: cosine
     dimension: 25
 

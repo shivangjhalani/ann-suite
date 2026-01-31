@@ -13,13 +13,16 @@ Datasets are managed through the `library/datasets/` directory with:
 
 ```bash
 # List available datasets
-uv run python library/datasets/download.py --list
+uv run ann-suite download --list
 
 # Download a dataset subset
-uv run python library/datasets/download.py --dataset sift-10k
+uv run ann-suite download --dataset sift-10k
 
 # Download full dataset (by using the parent name)
-uv run python library/datasets/download.py --dataset sift-128-euclidean
+uv run ann-suite download --dataset sift-128-euclidean
+
+# Download to custom location
+uv run ann-suite download --dataset sift-10k --output ./data
 ```
 
 ---
@@ -56,7 +59,7 @@ Edit `library/datasets/registry.yaml`:
 ```yaml
 datasets:
   # ... existing datasets ...
-  
+
   my-new-dataset:
     description: "Description of my dataset"
     url: "http://ann-benchmarks.com/my-dataset.hdf5"
@@ -71,7 +74,7 @@ datasets:
 ### Step 2: Download and Prepare
 
 ```bash
-uv run python library/datasets/download.py --dataset my-new-dataset
+uv run ann-suite download --dataset my-new-dataset
 ```
 
 The download script will:
@@ -102,11 +105,13 @@ datasets:
 
 Now you can download either:
 
+```bash
 # Full dataset (default if parent name used)
-uv run python library/datasets/download.py --dataset sift-128-euclidean
+uv run ann-suite download --dataset sift-128-euclidean
 
 # Subset (must use subset name)
-uv run python library/datasets/download.py --dataset sift-10k
+uv run ann-suite download --dataset sift-10k
+```
 
 ---
 
@@ -148,18 +153,18 @@ from pathlib import Path
 
 def download_my_dataset(output_dir: Path):
     """Download and prepare my custom dataset."""
-    
+
     # 1. Download from your source
     # ...
-    
+
     # 2. Convert to numpy arrays
     base = ...  # shape: (N, D), dtype: float32
     queries = ...  # shape: (Q, D), dtype: float32
-    
+
     # 3. Compute ground truth if not available
     from library.datasets.download import compute_ground_truth
     ground_truth = compute_ground_truth(base, queries, k=100, metric="L2")
-    
+
     # 4. Save
     output_dir.mkdir(parents=True, exist_ok=True)
     np.save(output_dir / "base.npy", base.astype(np.float32))
@@ -232,14 +237,14 @@ The registry includes these pre-configured datasets:
 
 Use small subsets (10K-100K vectors):
 ```bash
-uv run python library/datasets/download.py --dataset sift-10k
+uv run ann-suite download --dataset sift-10k
 ```
 
 ### For Production Benchmarks
 
 Use full datasets with proper ground truth:
 ```bash
-uv run python library/datasets/download.py --dataset sift-128-euclidean
+uv run ann-suite download --dataset sift-128-euclidean
 ```
 
 ### For Fair Comparison
@@ -272,8 +277,8 @@ Large datasets require significant memory for:
 # Check network connectivity
 curl -I http://ann-benchmarks.com/sift-128-euclidean.hdf5
 
-# Try with verbose output
-uv run python library/datasets/download.py --dataset sift-128-euclidean 2>&1
+# Try without quiet mode for error messages
+uv run ann-suite download --dataset sift-128-euclidean 2>&1
 ```
 
 ### Ground Truth Mismatch

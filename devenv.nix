@@ -27,10 +27,14 @@
     pkgs.zlib
   ];
 
-  enterShell = ''
-    echo $GREET
-    python --version
-    uv --version
-    docker --version
-  '';
+enterShell = ''
+  echo $GREET
+  python --version
+  uv --version
+  docker --version
+  # Symlink for IDE compatibility
+  if [ ! -L "$DEVENV_ROOT/.venv" ]; then
+    ln -s "$DEVENV_STATE/venv" "$DEVENV_ROOT/.venv"
+  fi
+'';
 }

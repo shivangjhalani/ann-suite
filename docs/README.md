@@ -12,6 +12,7 @@ Welcome to the ANN Benchmarking Suite documentation. This suite provides product
 | [Adding Datasets](./ADDING_DATASETS.md) | How to add and manage datasets |
 | [Metrics Reference](./METRICS.md) | All metrics collected and how they're measured |
 | [API Reference](./API.md) | Python API for programmatic usage |
+| [Docker Optimizations](./DOCKER_OPTIMIZATIONS.md) | Runtime settings for research-grade performance |
 
 ## Quick Links
 
@@ -26,21 +27,44 @@ Welcome to the ANN Benchmarking Suite documentation. This suite provides product
 - 💾 **Storage Modes**: Evaluates both in-memory (HNSW) and disk-based (DiskANN) algorithms
 - ⚙️ **Modular & Configurable**: YAML/JSON configs, pluggable algorithms, extensible metrics
 
+## Requirements
+
+> [!IMPORTANT]
+> **cgroups v2 is required** for running benchmarks. The suite will fail at startup if cgroups v2 is not available.
+
+Verify with:
+```bash
+cat /sys/fs/cgroup/cgroup.controllers
+# Should output: cpuset cpu io memory hugetlb pids rdma misc
+```
+
+See [METRICS.md](./METRICS.md#requirements) for setup instructions if cgroups v2 is not enabled.
+
 ## Project Structure
 
 ```
 ann-suite/
 ├── src/ann_suite/            # Core benchmarking framework
-│   ├── core/                 # Schemas, config loading, base classes
-│   ├── monitoring/           # Resource monitoring (RAM, IOPS)
+│   ├── core/                 # Schemas (Pydantic models), config loading
+│   │   ├── schemas.py        # BenchmarkConfig, AlgorithmConfig, *Metrics
+│   │   └── config.py         # YAML/JSON loading and validation
+│   ├── monitoring/           # Resource monitoring via cgroups v2
+│   │   ├── base.py           # BaseCollector abstract class
+│   │   └── cgroups_collector.py  # CgroupsV2Collector implementation
 │   ├── runners/              # Docker container lifecycle
+│   │   └── container_runner.py   # ContainerRunner with metrics
 │   ├── datasets/             # Dataset loading utilities
-│   ├── results/              # Result storage and aggregation
-│   └── cli.py                # Command-line interface
+│   ├── results/              # Result storage (JSON, CSV)
+│   │   └── storage.py        # ResultsStorage class
+│   ├── evaluator.py          # BenchmarkEvaluator pipeline
+│   └── cli.py                # Typer CLI (run, build, report, download)
 ├── library/                  # Algorithm & dataset library
 │   ├── algorithms/           # Algorithm implementations (HNSW, DiskANN)
+│   │   ├── hnsw/             # HNSW container (Dockerfile + runner.py)
+│   │   ├── diskann/          # DiskANN container
+│   │   └── utils.py          # Shared utilities (compute_recall, etc.)
 │   └── datasets/             # Dataset registry and download utilities
-├── configs/                  # Benchmark configuration files
+├── configs/                  # Benchmark configuration files (YAML)
 ├── docs/                     # This documentation
-└── tests/                    # Test suite
+└── tests/                    # Test suite (pytest)
 ```

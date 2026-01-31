@@ -34,7 +34,6 @@ The suite follows a **pipeline architecture** where benchmarks flow through dist
 │     │  BUILD PHASE                                                      │   │
 │     │  - Pull/create Docker container                                   │   │
 │     │  - Mount data volumes                                             │   │
-│     │  - Start ResourceMonitor                                          │   │
 │     │  - Execute: --mode build --config '{...}'                         │   │
 │     │  - Collect: build_time, index_size, resource metrics              │   │
 │     └───────────────────────────────────────────────────────────────────┘   │
@@ -43,7 +42,6 @@ The suite follows a **pipeline architecture** where benchmarks flow through dist
 │     ┌───────────────────────────────────────────────────────────────────┐   │
 │     │  SEARCH PHASE                                                     │   │
 │     │  - Run container with existing index                              │   │
-│     │  - Start ResourceMonitor                                          │   │
 │     │  - Execute: --mode search --config '{...}'                        │   │
 │     │  - Collect: recall, QPS, latencies, resource metrics              │   │
 │     └───────────────────────────────────────────────────────────────────┘   │
@@ -69,16 +67,31 @@ The suite follows a **pipeline architecture** where benchmarks flow through dist
 All configuration and result types are defined as Pydantic models for validation:
 
 ```python
-# Key schemas:
+# Configuration schemas:
 BenchmarkConfig      # Top-level benchmark configuration
 AlgorithmConfig      # Single algorithm definition
 DatasetConfig        # Single dataset definition
 BuildConfig          # Build phase parameters
 SearchConfig         # Search phase parameters
+
+# Result schemas:
 ResourceSample       # Single monitoring sample
 ResourceSummary      # Aggregated resource metrics
 PhaseResult          # Result from build or search phase
 BenchmarkResult      # Complete benchmark result
+
+# Structured metrics schemas (organized by category):
+CPUMetrics           # CPU time and utilization (by phase)
+MemoryMetrics        # Peak and average RSS (by phase)
+DiskIOMetrics        # IOPS, throughput, pages read/written
+LatencyMetrics       # Query latency percentiles (mean, p50, p95, p99)
+TimeBases            # Explicit time denominators for rate calculations
+
+# Container protocol schemas:
+ContainerProtocol.BuildInput    # JSON input for build phase
+ContainerProtocol.BuildOutput   # Expected JSON output from build
+ContainerProtocol.SearchInput   # JSON input for search phase
+ContainerProtocol.SearchOutput  # Expected JSON output from search
 ```
 
 #### `config.py` - Configuration Loading
@@ -167,15 +180,14 @@ The monitoring layer uses a **modular collector architecture**:
 │  - is_available() → bool                                            │
 └─────────────────────────────────────────────────────────────────────┘
                                  │
-                ┌────────────────┴────────────────┐
-                ▼                                 ▼
-┌───────────────────────────────┐  ┌───────────────────────────────┐
-│   CgroupsV2Collector          │  │   ResourceMonitor (Docker)    │
-│   - Reads from cgroups v2     │  │   - Uses Docker stats API     │
-│   - io.stat: rios, wios, ...  │  │   - Fallback when no cgroups  │
-│   - cpu.stat: usage_usec      │  │   - stream=True for faster    │
-│   - Accurate IOPS             │  │     sample delivery           │
-└───────────────────────────────┘  └───────────────────────────────┘
+                                 ▼
+                 ┌─────────────────────────────────┐
+                 │   CgroupsV2Collector            │
+                 │   - Reads from cgroups v2       │
+                 │   - io.stat: rios, wios, ...    │
+                 │   - cpu.stat: usage_usec        │
+                 │   - Accurate IOPS               │
+                 └─────────────────────────────────┘
 ```
 
 **CgroupsV2Collector** (preferred when available):
@@ -188,49 +200,32 @@ The monitoring layer uses a **modular collector architecture**:
 
 **ContainerRunner Integration:**
 
-The ContainerRunner automatically uses both collectors when cgroups v2 is available:
+The ContainerRunner uses the CgroupsV2Collector for metrics collection:
 
 ```python
-# Initialization
-if cgroups_collector.is_available():
-    logger.info("CgroupsV2Collector available - will collect enhanced I/O metrics")
+# Initialization (requires cgroups v2)
+if not CgroupsV2Collector.check_available():
+    raise RuntimeError("cgroups v2 is required for metrics collection")
+
+cgroups_collector = CgroupsV2Collector(interval_ms=monitor_interval_ms)
 
 # During container execution
-monitor.start()                  # Docker stats
-cgroups_monitor.start(id)        # cgroups v2
+cgroups_collector.start(container_id)
 
-# On completion - merge more accurate I/O metrics from cgroups
-resources = monitor.stop()
-cgroups_result = cgroups_monitor.stop()
-# Merge cgroups I/O into resources (more accurate IOPS)
+# On completion
+cgroups_result = cgroups_collector.stop()
+
+# Get metrics filtered to query window (if timestamps available)
+refined_result = cgroups_collector.get_summary(
+    start_timestamp=query_start_dt,
+    end_timestamp=query_end_dt
+)
 ```
 
-**Docker Stats API Collection**:
+> [!IMPORTANT]
+> The suite **requires** cgroups v2 and will fail at startup if it's not available.
+> See `docs/METRICS.md` for setup instructions.
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  Docker stats stream                                                │
-│  - Extract memory_stats.usage                                       │
-│  - Extract blkio_stats.io_service_bytes_recursive                   │
-│  - Calculate CPU% from cpu_stats deltas                             │
-└─────────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  ResourceSample (stored every interval_ms)                          │
-│  - timestamp, memory_mb, cpu_percent                                │
-│  - blkio_read_bytes, blkio_write_bytes                              │
-└─────────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  ResourceSummary (aggregated on stop())                             │
-│  - peak_memory_mb, avg_memory_mb                                    │
-│  - peak_cpu_percent, avg_cpu_percent                                │
-│  - total_blkio_read_mb, total_blkio_write_mb                        │
-│  - avg_read_iops, avg_write_iops                                    │
-└─────────────────────────────────────────────────────────────────────┘
-```
 
 ---
 
@@ -241,17 +236,25 @@ Handles saving and loading benchmark results:
 ```python
 storage = ResultsStorage(results_dir)
 
-# Save results
-storage.save(results, format="json")  # or "csv", "parquet"
+# Save results (saves to multiple formats automatically)
+storage.save(results, run_name="My Benchmark")
+# Creates:
+#   results/My Benchmark_2026-01-29_10-30-00/
+#   ├── results.json          # Summary JSON
+#   ├── results_detailed.json # Full JSON with phase details
+#   └── results.csv           # Flat table for spreadsheets
 
-# Load previous results
-loaded = storage.load("results/benchmark_20240117.json")
+# Load previous results by run name
+loaded = storage.load(run_name="My Benchmark")
+
+# Load as pandas DataFrame
+df = storage.load_dataframe(run_name="My Benchmark")
 ```
 
 **Output Formats:**
-- **JSON**: Complete with raw samples (detailed analysis)
-- **CSV**: Flat table for spreadsheets
-- **Parquet**: Columnar format for large-scale analysis
+- **results.json**: Summary metrics (BenchmarkResult core fields)
+- **results_detailed.json**: Complete results including phase details and samples
+- **results.csv**: Flat table with flattened metrics for spreadsheet analysis
 
 ---
 
@@ -279,22 +282,36 @@ python -m algorithm.runner --mode build --config '{"dataset_path": "/data/base.n
 
 **Container Invocation:**
 ```bash
-python -m algorithm.runner --mode search --config '{"index_path": "/data/index", "queries_path": "/data/queries.npy", "ground_truth_path": "/data/gt.npy", "k": 10, "dimension": 128, "metric": "L2", "search_args": {...}}'
+python -m algorithm.runner --mode search --config '{"index_path": "/data/index", "queries_path": "/data/queries.npy", "ground_truth_path": "/data/gt.npy", "k": 10, "batch_mode": true, "dimension": 128, "metric": "L2", "search_args": {...}}'
 ```
 
-**Expected Output (stdout):**
+**Expected Output (stdout or `/results/metrics.json`):**
 ```json
 {
     "status": "success",
     "total_queries": 1000,
-    "qps": 5000.0,
+    "total_time_seconds": 0.5,
+    "qps": 2000.0,
     "recall": 0.95,
-    "mean_latency_ms": 0.2,
-    "p50_latency_ms": 0.15,
-    "p95_latency_ms": 0.4,
-    "p99_latency_ms": 0.8
+    "mean_latency_ms": 0.25,
+    "p50_latency_ms": 0.20,
+    "p95_latency_ms": 0.45,
+    "p99_latency_ms": 0.80,
+    "load_duration_seconds": 0.15,
+    "load_start_timestamp": "2026-01-29T10:00:00.000000+00:00",
+    "load_end_timestamp": "2026-01-29T10:00:00.150000+00:00",
+    "query_start_timestamp": "2026-01-29T10:00:00.150000+00:00",
+    "query_end_timestamp": "2026-01-29T10:00:00.650000+00:00"
 }
 ```
+
+> [!IMPORTANT]
+> **Required for research-grade metrics**: The timestamp fields enable query-window filtering:
+> - `load_start_timestamp` / `load_end_timestamp`: Index loading phase boundaries
+> - `query_start_timestamp` / `query_end_timestamp`: Query execution boundaries
+>
+> Timestamps must be ISO-8601 format with timezone (UTC recommended).
+
 
 ---
 
@@ -369,6 +386,33 @@ ann-suite build --algorithm HNSW [OPTIONS]
 | `--algorithm` | `-a` | *required* | Algorithm name to build |
 | `--algorithms-dir` | `-d` | `./library/algorithms` | Path to algorithms directory |
 | `--force` | `-f` | `false` | Force rebuild without cache |
+
+### `download` Command
+
+Download and prepare datasets for benchmarking.
+
+```bash
+ann-suite download [OPTIONS]
+```
+
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--dataset` | | *none* | Dataset name to download |
+| `--output` | | `library/datasets/` | Output directory |
+| `--list` | | `false` | List available datasets |
+| `--quiet` | | `false` | Suppress output |
+
+**Examples:**
+```bash
+# List available datasets
+ann-suite download --list
+
+# Download a specific dataset
+ann-suite download --dataset sift-10k
+
+# Download to custom location
+ann-suite download --dataset sift-10k --output ./data
+```
 
 ### `init-config` Command
 

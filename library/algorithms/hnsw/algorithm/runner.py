@@ -21,11 +21,13 @@ import argparse
 import json
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import hnswlib
 import numpy as np
+from utils import compute_recall
 
 
 class HNSWIndex:
@@ -131,6 +133,7 @@ class HNSWIndex:
         queries: np.ndarray,
         k: int = 10,
         ef: int = 100,
+        batch_mode: bool = True,
         **kwargs: Any,
     ) -> tuple[np.ndarray, np.ndarray, list[float]]:
         """Search for nearest neighbors.
@@ -150,48 +153,32 @@ class HNSWIndex:
         self.index.set_ef(ef)
 
         latencies = []
-
-        # Run queries one by one to measure latencies
         all_indices = []
         all_distances = []
 
-        for query in queries:
+        if batch_mode:
+            # Batch Mode: Highest Throughput (Releases GIL)
+            # We measure total time for the batch and amortize for latency
             start = time.perf_counter()
-            labels, distances = self.index.knn_query(query.reshape(1, -1), k=k)
-            elapsed = (time.perf_counter() - start) * 1000  # ms
-            latencies.append(elapsed)
-            all_indices.append(labels[0])
-            all_distances.append(distances[0])
+            labels, distances = self.index.knn_query(queries, k=k)
+            total_elapsed_ms = (time.perf_counter() - start) * 1000
 
-        return np.array(all_indices), np.array(all_distances), latencies
+            # Estimate per-query latency (mean)
+            mean_latency = total_elapsed_ms / len(queries)
+            latencies = [mean_latency] * len(queries)
+            all_indices = labels
+            all_distances = distances
+        else:
+            # Serial Mode: Accurate Latency Distribution (Lower QPS)
+            for query in queries:
+                start = time.perf_counter()
+                labels, distances = self.index.knn_query(query.reshape(1, -1), k=k)
+                elapsed = (time.perf_counter() - start) * 1000  # ms
+                latencies.append(elapsed)
+                all_indices.append(labels[0])
+                all_distances.append(distances[0])
 
-
-def compute_recall(
-    predicted: np.ndarray,
-    ground_truth: np.ndarray,
-    k: int,
-) -> float:
-    """Compute recall@k.
-
-    Args:
-        predicted: Predicted neighbors (Q x k)
-        ground_truth: True neighbors (Q x k')
-        k: Number of neighbors to consider
-
-    Returns:
-        Recall value between 0 and 1
-    """
-    n_queries = len(predicted)
-    total_recall = 0.0
-
-    gt_k = min(k, ground_truth.shape[1])
-
-    for i in range(n_queries):
-        pred_set = set(predicted[i, :k].tolist())
-        true_set = set(ground_truth[i, :gt_k].tolist())
-        total_recall += len(pred_set & true_set) / gt_k
-
-    return total_recall / n_queries
+        return np.asarray(all_indices), np.asarray(all_distances), latencies
 
 
 def run_build(config: dict[str, Any]) -> dict[str, Any]:
@@ -225,6 +212,9 @@ def run_build(config: dict[str, Any]) -> dict[str, Any]:
         }
 
     except Exception as e:
+        import traceback
+
+        traceback.print_exc(file=sys.stderr)
         return {
             "status": "error",
             "error_message": str(e),
@@ -243,17 +233,19 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
         Search results as JSON-serializable dict
     """
     try:
-        # Load index
+        # Read config
         index_path = Path(config["index_path"])
         dimension = config.get("dimension", 128)
         metric = config.get("metric", "L2")
         search_args = config.get("search_args", {})
 
-        index = HNSWIndex(num_threads=search_args.get("num_threads", 1))
-        index.load(index_path, dimension, metric)
-        print(f"Loaded index from {index_path}", file=sys.stderr)
+        # Extract search configuration
+        k = config.get("k", 10)
+        batch_mode = config.get("batch_mode", True)
+        ef = search_args.get("ef", 100)
+        cache_warmup_queries = int(config.get("cache_warmup_queries", 0) or 0)
 
-        # Load queries
+        # Load queries (not part of timed benchmark; keep before warmup window)
         queries_path = Path(config["queries_path"])
         queries = np.load(queries_path).astype(np.float32)
         print(f"Loaded {len(queries)} queries from {queries_path}", file=sys.stderr)
@@ -267,14 +259,54 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
                 ground_truth = np.load(gt_path)
                 print(f"Loaded ground truth from {gt_path}", file=sys.stderr)
 
-        # Extract configuration
-        k = config.get("k", 10)
-        ef = search_args.get("ef", 100)
+        # Warmup window (index load + optional cache warmup queries).
+        # This is the window used by the suite to compute warmup resource metrics.
+        warmup_start_timestamp = datetime.now(UTC).isoformat()
+        warmup_start = time.perf_counter()
 
-        # Run search
+        # Track legacy "load_*" timing for backward compatibility / diagnostics
+        load_start_timestamp = datetime.now(UTC).isoformat()
+        load_start = time.perf_counter()
+
+        index = HNSWIndex(num_threads=search_args.get("num_threads", 1))
+        index.load(index_path, dimension, metric)
+
+        load_duration_seconds = time.perf_counter() - load_start
+        load_end_timestamp = datetime.now(UTC).isoformat()
+        print(f"Loaded index from {index_path} in {load_duration_seconds:.2f}s", file=sys.stderr)
+
+        cache_warmup_duration_seconds = 0.0
+        cache_warmup_queries_executed = 0
+
+        # Cache warming: run untimed queries to warm OS/algorithm caches
+        if cache_warmup_queries > 0:
+            print(
+                f"Running {cache_warmup_queries} cache warmup queries (untimed)...",
+                file=sys.stderr,
+            )
+            warmup_query_count = min(cache_warmup_queries, len(queries))
+            rng = np.random.default_rng(42)
+            warmup_indices = rng.choice(len(queries), warmup_query_count, replace=False)
+            warmup_queries = queries[warmup_indices]
+            t0 = time.perf_counter()
+            index.search(warmup_queries, k=k, ef=ef, batch_mode=True)
+            cache_warmup_duration_seconds = time.perf_counter() - t0
+            cache_warmup_queries_executed = warmup_query_count
+            print(
+                f"Cache warmup complete ({warmup_query_count} queries, "
+                f"{cache_warmup_duration_seconds:.2f}s)",
+                file=sys.stderr,
+            )
+
+        warmup_duration_seconds = time.perf_counter() - warmup_start
+        warmup_end_timestamp = datetime.now(UTC).isoformat()
+
+        # Run timed search - emit timestamps for resource window filtering
+        query_start_timestamp = datetime.now(UTC).isoformat()
         start_time = time.perf_counter()
-        indices, distances, latencies = index.search(queries, k=k, ef=ef)
+        indices, distances, latencies = index.search(queries, k=k, ef=ef, batch_mode=batch_mode)
         total_time = time.perf_counter() - start_time
+        query_end_timestamp = datetime.now(UTC).isoformat()
 
         # Compute metrics
         n_queries = len(queries)
@@ -305,15 +337,35 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
             "p50_latency_ms": p50_latency,
             "p95_latency_ms": p95_latency,
             "p99_latency_ms": p99_latency,
+            # Warmup window for resource-metric separation
+            "warmup_duration_seconds": warmup_duration_seconds,
+            "query_start_timestamp": query_start_timestamp,
+            "query_end_timestamp": query_end_timestamp,
+            "warmup_start_timestamp": warmup_start_timestamp,
+            "warmup_end_timestamp": warmup_end_timestamp,
+            # Backward-compatible legacy load timing
+            "load_duration_seconds": load_duration_seconds,
+            "load_start_timestamp": load_start_timestamp,
+            "load_end_timestamp": load_end_timestamp,
+            # Cache warmup metadata (untimed)
+            "cache_warmup_queries_requested": cache_warmup_queries,
+            "cache_warmup_queries_executed": cache_warmup_queries_executed,
+            "cache_warmup_duration_seconds": cache_warmup_duration_seconds,
         }
 
     except Exception as e:
+        import traceback
+
+        traceback.print_exc(file=sys.stderr)
         return {
             "status": "error",
             "error_message": str(e),
             "total_queries": 0,
             "total_time_seconds": 0,
             "qps": 0,
+            "warmup_duration_seconds": None,
+            "query_start_timestamp": None,
+            "query_end_timestamp": None,
         }
 
 
