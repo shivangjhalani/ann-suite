@@ -87,8 +87,8 @@ venv.bak/
 Thumbs.db
 
 # Project specific
-results/
-indices/
+./results
+./indices
 *.hdf5
 *.npy
 !library/datasets/**/*.npy
