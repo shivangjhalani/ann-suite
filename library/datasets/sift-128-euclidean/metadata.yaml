@@ -1,12 +1,8 @@
-base_count: 10000
+base_count: 1000000
 description: SIFT image descriptors - classic ANN benchmark (128D, Euclidean)
 dimension: 128
 distance_metric: L2
-is_subset: true
-name: sift-10k
+name: sift-128-euclidean
 point_type: float32
-query_count: 1000
+query_count: 10000
 source: sift-128-euclidean
-subset_config:
-  base_count: 10000
-  query_count: 1000

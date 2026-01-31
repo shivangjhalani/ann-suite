@@ -9,7 +9,7 @@ import argparse
 import sys
 from pathlib import Path
 from typing import Any
-from urllib.request import urlretrieve
+from urllib.request import Request, urlopen
 
 import h5py
 import numpy as np
@@ -35,13 +35,27 @@ def download_file(url: str, dest: Path, quiet: bool = False) -> None:
         print(f"  Downloading: {url}")
         print(f"  To: {dest}")
 
-    def progress_hook(count: int, block_size: int, total_size: int) -> None:
-        if not quiet and total_size > 0:
-            percent = min(100, count * block_size * 100 // total_size)
-            sys.stdout.write(f"\r  Progress: {percent}%")
-            sys.stdout.flush()
+    # Use custom User-Agent to avoid 403 Forbidden
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; ann-suite/0.1.0; +https://github.com/ann-suite)"}
+    req = Request(url, headers=headers)
 
-    urlretrieve(url, str(dest), progress_hook)
+    with urlopen(req) as response, open(dest, "wb") as out_file:
+        total_size = int(response.info().get("Content-Length", 0))
+        block_size = 8192
+        downloaded = 0
+
+        while True:
+            buffer = response.read(block_size)
+            if not buffer:
+                break
+            
+            out_file.write(buffer)
+            downloaded += len(buffer)
+
+            if not quiet and total_size > 0:
+                percent = min(100, downloaded * 100 // total_size)
+                sys.stdout.write(f"\r  Progress: {percent}%")
+                sys.stdout.flush()
 
     if not quiet:
         print()  # Newline after progress

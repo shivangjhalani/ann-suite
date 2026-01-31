@@ -92,6 +92,10 @@ indices/
 *.npy
 !library/datasets/**/*.npy
 
+# Results tracking
+results/
+!src/ann_suite/results/
+
 # Downloaded datasets (large files)
 library/datasets/*/base.npy
 library/datasets/*/queries.npy
