@@ -1,7 +1,7 @@
 name: "HNSW vs DiskANN SIFT-1M Benchmark"
 description: "Benchmarking HNSW and DiskANN on full SIFT-1M dataset (128D, Euclidean)"
 
-data_dir: "./data"
+data_dir: "./library/datasets"
 results_dir: "./results"
 index_dir: "./indices"
 
