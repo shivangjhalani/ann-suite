@@ -20,7 +20,7 @@ algorithms:
         num_threads: 4
     search:
       timeout_seconds: 600
-      k: 10
+      k: 1
       batch_mode: false
       args:
         ef: 100
@@ -69,7 +69,7 @@ algorithms:
         # ============================================================================
     search:
       timeout_seconds: 600
-      k: 10
+      k: 1
       batch_mode: false
       args:
         Ls: 100

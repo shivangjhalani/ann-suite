@@ -261,6 +261,213 @@ qps: float | None       # Queries per second
 
 ---
 
+## Extended Metrics (Diagnostic-Grade)
+
+The suite supports additional diagnostic metrics for deep I/O analysis. These are collected when available from the kernel and provide insights into disk-based algorithm performance.
+
+### Pressure Stall Information (PSI)
+
+```python
+class PSIMetrics:
+    io_some_percent: float     # % time at least one task stalled on I/O
+    io_full_percent: float     # % time all tasks stalled on I/O
+```
+
+**Source:** cgroups v2 `io.pressure`
+
+**Format:**
+```
+some avg10=0.00 avg60=0.00 avg300=0.00 total=12345678
+full avg10=0.00 avg60=0.00 avg300=0.00 total=87654321
+```
+
+**Interpretation:**
+| Metric | Meaning | Healthy Range |
+|--------|---------|---------------|
+| `io_some_percent` | Partial I/O stall (some tasks waiting) | < 10% |
+| `io_full_percent` | Full I/O stall (all tasks blocked) | < 5% |
+
+**Formula:**
+```python
+io_some_percent = (delta_some_total_usec / query_duration_usec) * 100
+io_full_percent = (delta_full_total_usec / query_duration_usec) * 100
+```
+
+> [!NOTE]
+> PSI metrics require kernel 4.20+ with CONFIG_PSI enabled. When unavailable, values default to 0.0.
+
+---
+
+### Memory Fault Statistics
+
+```python
+class MemoryFaultMetrics:
+    pgmajfault: int              # Major page faults (disk reads)
+    pgfault: int                 # Total page faults (minor + major)
+    major_faults_per_query: float | None   # Major faults per query
+    major_faults_per_second: float         # Major faults rate
+    file_cache_mb: float         # Page cache file bytes (avg)
+    file_mapped_mb: float        # Memory-mapped file bytes
+    active_file_mb: float        # Active file cache
+    inactive_file_mb: float      # Inactive file cache
+```
+
+**Source:** cgroups v2 `memory.stat`
+
+**Key Fields:**
+| Field | Source | Description |
+|-------|--------|-------------|
+| `pgmajfault` | `memory.stat` | Major faults requiring disk I/O |
+| `pgfault` | `memory.stat` | All page faults (includes minor) |
+| `file` | `memory.stat` | Page cache size (bytes) |
+| `file_mapped` | `memory.stat` | Memory-mapped file regions |
+| `active_file` | `memory.stat` | Recently accessed file cache |
+| `inactive_file` | `memory.stat` | Cold file cache (eviction candidates) |
+
+**Interpretation:**
+- **Major faults** indicate disk reads due to page cache misses — critical for disk-based ANN
+- **Minor faults** are memory-only (copy-on-write, zero-fill) and don't indicate I/O
+- **High `major_faults_per_query`** suggests index doesn't fit in memory or cache is cold
+
+---
+
+### I/O Service Time and Bytes per Operation
+
+```python
+class IOServiceMetrics:
+    avg_read_service_time_ms: float | None   # Avg read latency per op
+    avg_write_service_time_ms: float | None  # Avg write latency per op
+    avg_read_bytes_per_op: float | None      # Avg bytes per read operation
+    avg_write_bytes_per_op: float | None     # Avg bytes per write operation
+```
+
+**Source:** cgroups v2 `io.stat` extended fields (`rusec`, `wusec`)
+
+**Format:**
+```
+8:0 rbytes=12345 wbytes=67890 rios=100 wios=50 rusec=5000 wusec=2000
+```
+
+**Formulas:**
+```python
+avg_read_service_time_ms = (delta_rusec / delta_rios) / 1000  # usec -> ms
+avg_read_bytes_per_op = delta_rbytes / delta_rios
+```
+
+**Interpretation:**
+| Metric | Typical Value | Notes |
+|--------|---------------|-------|
+| `avg_read_service_time_ms` | 0.1-2.0 ms (NVMe), 5-15 ms (HDD) | Queue depth affects this |
+| `avg_read_bytes_per_op` | 4KB-256KB | Small = random; Large = sequential |
+
+> [!NOTE]
+> `rusec`/`wusec` fields are available on Linux 5.5+ with certain I/O schedulers. When unavailable, service time metrics are `None`.
+
+---
+
+### Tail Metrics (p95/max)
+
+```python
+class TailIOMetrics:
+    p95_read_iops: float | None       # 95th percentile read IOPS (per interval)
+    max_read_iops: float | None       # Peak read IOPS in any interval
+    p95_read_mbps: float | None       # 95th percentile read throughput
+    max_read_mbps: float | None       # Peak read throughput
+    p95_service_time_ms: float | None # 95th percentile service time
+    max_service_time_ms: float | None # Peak service time
+```
+
+**Source:** Computed from interval deltas of `CollectorSample`
+
+**Methodology:**
+1. For each sampling interval, compute instantaneous IOPS/MBps/service time
+2. Collect all interval values
+3. Compute p95 = `numpy.percentile(values, 95)`, max = `max(values)`
+
+**Interpretation:**
+- **Tail metrics** reveal worst-case performance and I/O bursts
+- High `max_read_iops` with low `avg_read_iops` indicates bursty access patterns
+- `p95_service_time_ms` >> `avg_service_time_ms` suggests queue contention or device saturation
+
+---
+
+### Per-Device I/O Statistics
+
+```python
+class DeviceIOStat:
+    device: str        # Device identifier (e.g., "8:0", "nvme0n1")
+    rbytes: int        # Bytes read from this device
+    wbytes: int        # Bytes written to this device
+    rios: int          # Read operations
+    wios: int          # Write operations
+    rusec: int         # Read latency (microseconds, if available)
+    wusec: int         # Write latency (microseconds, if available)
+
+class PerDeviceMetrics:
+    top_device: str | None              # Device with most read bytes
+    top_device_read_pct: float | None   # % of total reads from top device
+    device_count: int                   # Number of devices with I/O
+```
+
+**Source:** cgroups v2 `io.stat` (one line per device)
+
+**Format:**
+```
+8:0 rbytes=12345 wbytes=67890 rios=100 wios=50
+8:16 rbytes=5000 wbytes=1000 rios=20 wios=5
+```
+
+**Interpretation:**
+- **Per-device breakdown** helps identify if I/O is spread across devices or concentrated
+- For RAID/LVM setups, multiple devices may appear
+- `top_device_read_pct` near 100% indicates single-device workload
+
+---
+
+### CPU Throttling Statistics
+
+```python
+class CPUThrottlingMetrics:
+    nr_throttled: int          # Number of times the cgroup was throttled
+    throttled_usec: int        # Total time spent throttled (microseconds)
+    throttled_percent: float   # % of CPU time spent throttled
+```
+
+**Source:** cgroups v2 `cpu.stat`
+
+**Fields:**
+| Field | Description |
+|-------|-------------|
+| `nr_throttled` | Count of throttling events (hit CPU quota) |
+| `throttled_usec` | Total microseconds spent in throttled state |
+
+**Formula:**
+```python
+throttled_percent = (throttled_usec / container_duration_usec) * 100
+```
+
+> [!NOTE]
+> Throttling only occurs when a CPU limit is configured. Without limits, these values are 0.
+
+---
+
+## Handling Missing/Optional Metrics
+
+Not all kernels or configurations provide all metrics. The suite handles this gracefully:
+
+| Condition | Behavior |
+|-----------|----------|
+| `io.pressure` missing | PSI metrics default to 0.0 |
+| `rusec`/`wusec` not in `io.stat` | Service time metrics are `None` |
+| `memory.stat` missing fields | Fault/cache metrics default to 0 |
+| `cpu.stat` missing throttling | Throttling metrics default to 0 |
+| Too few samples for tail metrics | Tail metrics are `None` |
+
+> [!TIP]
+> Check `sample_count` in results — low counts (< 5) indicate the container ran too fast for accurate interval metrics.
+
+---
+
 ## Raw Sample Collection
 
 Each collector samples at a configurable interval (default: 100ms). Each sample contains:
@@ -269,12 +476,27 @@ Each collector samples at a configurable interval (default: 100ms). Each sample 
 @dataclass
 class CollectorSample:
     timestamp: datetime
+    monotonic_time: float       # Monotonic clock for accurate intervals
     memory_usage_bytes: int     # Current RSS in bytes
     cpu_time_ns: int            # CPU time in nanoseconds
     blkio_read_bytes: int       # Cumulative bytes read
     blkio_write_bytes: int      # Cumulative bytes written
-    blkio_read_ops: int         # Cumulative read operations (cgroups only)
-    blkio_write_ops: int        # Cumulative write operations (cgroups only)
+    blkio_read_ops: int         # Cumulative read operations (rios)
+    blkio_write_ops: int        # Cumulative write operations (wios)
+    # Extended fields (when available)
+    blkio_read_usec: int        # Cumulative read latency (rusec)
+    blkio_write_usec: int       # Cumulative write latency (wusec)
+    per_device_io: list[DeviceIOStat] | None  # Per-device breakdown
+    io_pressure_some_total_usec: int  # PSI some total
+    io_pressure_full_total_usec: int  # PSI full total
+    pgmajfault: int             # Major page faults
+    pgfault: int                # Total page faults
+    file_bytes: int             # Page cache file bytes
+    file_mapped_bytes: int      # Memory-mapped file bytes
+    active_file_bytes: int      # Active file cache
+    inactive_file_bytes: int    # Inactive file cache
+    nr_throttled: int           # CPU throttle count
+    throttled_usec: int         # CPU throttle time
 ```
 
 > [!TIP]

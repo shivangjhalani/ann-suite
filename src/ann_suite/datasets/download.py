@@ -36,7 +36,9 @@ def download_file(url: str, dest: Path, quiet: bool = False) -> None:
         print(f"  To: {dest}")
 
     # Use custom User-Agent to avoid 403 Forbidden
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; ann-suite/0.1.0; +https://github.com/ann-suite)"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; ann-suite/0.1.0; +https://github.com/ann-suite)"
+    }
     req = Request(url, headers=headers)
 
     with urlopen(req) as response, open(dest, "wb") as out_file:
@@ -48,7 +50,7 @@ def download_file(url: str, dest: Path, quiet: bool = False) -> None:
             buffer = response.read(block_size)
             if not buffer:
                 break
-            
+
             out_file.write(buffer)
             downloaded += len(buffer)
 

@@ -13,13 +13,20 @@ Metrics sourced:
 from __future__ import annotations
 
 import logging
+import math
 import re
 import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ann_suite.monitoring.base import BaseCollector, CollectorResult, CollectorSample
+from ann_suite.monitoring.base import (
+    BaseCollector,
+    CollectorResult,
+    CollectorSample,
+    DeviceIOStat,
+    TopDeviceSummary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -196,12 +203,18 @@ class CgroupsV2Collector(BaseCollector):
         # Read memory
         memory_current = self._read_single_value(self._cgroup_path / "memory.current")
 
-        # Read CPU time (in microseconds)
+        # Read CPU time (in microseconds) and throttling
         cpu_stat = self._read_cpu_stat()
         cpu_time_ns = cpu_stat.get("usage_usec", 0) * 1000  # Convert to nanoseconds
 
-        # Read I/O stats
-        io_stat = self._read_io_stat()
+        # Read I/O stats (aggregated + per-device)
+        io_stat, per_device_io = self._read_io_stat()
+
+        # Read I/O pressure (PSI)
+        io_pressure = self._read_io_pressure()
+
+        # Read memory.stat
+        memory_stat = self._read_memory_stat()
 
         return CollectorSample(
             timestamp=now,
@@ -213,6 +226,19 @@ class CgroupsV2Collector(BaseCollector):
             blkio_write_bytes=io_stat.get("wbytes", 0),
             blkio_read_ops=io_stat.get("rios", 0),
             blkio_write_ops=io_stat.get("wios", 0),
+            blkio_read_usec=io_stat.get("rusec", 0),
+            blkio_write_usec=io_stat.get("wusec", 0),
+            per_device_io=per_device_io if per_device_io else None,
+            io_pressure_some_total_usec=io_pressure.get("some_total", 0),
+            io_pressure_full_total_usec=io_pressure.get("full_total", 0),
+            pgmajfault=memory_stat.get("pgmajfault", 0),
+            pgfault=memory_stat.get("pgfault", 0),
+            file_bytes=memory_stat.get("file", 0),
+            file_mapped_bytes=memory_stat.get("file_mapped", 0),
+            active_file_bytes=memory_stat.get("active_file", 0),
+            inactive_file_bytes=memory_stat.get("inactive_file", 0),
+            nr_throttled=cpu_stat.get("nr_throttled", 0),
+            throttled_usec=cpu_stat.get("throttled_usec", 0),
         )
 
     def _read_single_value(self, path: Path) -> int:
@@ -244,15 +270,24 @@ class CgroupsV2Collector(BaseCollector):
 
         return result
 
-    def _read_io_stat(self) -> dict[str, int]:
+    def _read_io_stat(self) -> tuple[dict[str, int], list[DeviceIOStat]]:
         """Read io.stat file.
 
         Format (per device):
-            8:0 rbytes=12345 wbytes=67890 rios=100 wios=50 ...
+            8:0 rbytes=12345 wbytes=67890 rios=100 wios=50 rusec=1000 wusec=2000 ...
 
-        Returns aggregated values across all devices.
+        Returns:
+            Tuple of (aggregated stats dict, list of per-device stats)
         """
-        result: dict[str, int] = {"rbytes": 0, "wbytes": 0, "rios": 0, "wios": 0}
+        result: dict[str, int] = {
+            "rbytes": 0,
+            "wbytes": 0,
+            "rios": 0,
+            "wios": 0,
+            "rusec": 0,
+            "wusec": 0,
+        }
+        per_device: list[DeviceIOStat] = []
         io_stat_path = self._cgroup_path / "io.stat"  # type: ignore
 
         try:
@@ -260,11 +295,88 @@ class CgroupsV2Collector(BaseCollector):
             for line in content.strip().split("\n"):
                 if not line:
                     continue
-                # Parse key=value pairs
-                for match in re.finditer(r"(rbytes|wbytes|rios|wios)=(\d+)", line):
+                # First token is device (e.g., "8:0")
+                parts = line.split(None, 1)
+                if len(parts) < 2:
+                    continue
+                device = parts[0]
+                rest = parts[1]
+
+                # Parse key=value pairs for this device
+                device_stat = DeviceIOStat(device=device)
+                for match in re.finditer(r"(rbytes|wbytes|rios|wios|rusec|wusec)=(\d+)", rest):
                     key, value = match.groups()
-                    result[key] += int(value)
+                    val = int(value)
+                    result[key] += val
+                    setattr(device_stat, key, val)
+                per_device.append(device_stat)
         except (FileNotFoundError, PermissionError):
+            pass
+
+        return result, per_device
+
+    def _read_io_pressure(self) -> dict[str, int]:
+        """Read io.pressure file for PSI (Pressure Stall Information).
+
+        Format:
+            some avg10=0.00 avg60=0.00 avg300=0.00 total=12345
+            full avg10=0.00 avg60=0.00 avg300=0.00 total=67890
+
+        Returns dict with some_total and full_total in microseconds.
+        """
+        result: dict[str, int] = {"some_total": 0, "full_total": 0}
+        io_pressure_path = self._cgroup_path / "io.pressure"  # type: ignore
+
+        try:
+            content = io_pressure_path.read_text()
+            for line in content.strip().split("\n"):
+                if not line:
+                    continue
+                if line.startswith("some "):
+                    match = re.search(r"total=(\d+)", line)
+                    if match:
+                        result["some_total"] = int(match.group(1))
+                elif line.startswith("full "):
+                    match = re.search(r"total=(\d+)", line)
+                    if match:
+                        result["full_total"] = int(match.group(1))
+        except (FileNotFoundError, PermissionError):
+            pass
+
+        return result
+
+    def _read_memory_stat(self) -> dict[str, int]:
+        """Read memory.stat file.
+
+        Format:
+            anon 12345
+            file 67890
+            pgfault 1000
+            pgmajfault 10
+            file_mapped 5000
+            active_file 3000
+            inactive_file 4000
+            ...
+
+        Returns dict with requested fields.
+        """
+        result: dict[str, int] = {
+            "pgfault": 0,
+            "pgmajfault": 0,
+            "file": 0,
+            "file_mapped": 0,
+            "active_file": 0,
+            "inactive_file": 0,
+        }
+        memory_stat_path = self._cgroup_path / "memory.stat"  # type: ignore
+
+        try:
+            content = memory_stat_path.read_text()
+            for line in content.strip().split("\n"):
+                parts = line.split()
+                if len(parts) == 2 and parts[0] in result:
+                    result[parts[0]] = int(parts[1])
+        except (FileNotFoundError, PermissionError, ValueError):
             pass
 
         return result
@@ -331,12 +443,18 @@ class CgroupsV2Collector(BaseCollector):
         after_sample: CollectorSample | None = None
 
         for s in samples:
-            if start_timestamp and s.timestamp <= start_timestamp:
-                if before_sample is None or s.timestamp > before_sample.timestamp:
-                    before_sample = s
-            if end_timestamp and s.timestamp >= end_timestamp:
-                if after_sample is None or s.timestamp < after_sample.timestamp:
-                    after_sample = s
+            if (
+                start_timestamp
+                and s.timestamp <= start_timestamp
+                and (before_sample is None or s.timestamp > before_sample.timestamp)
+            ):
+                before_sample = s
+            if (
+                end_timestamp
+                and s.timestamp >= end_timestamp
+                and (after_sample is None or s.timestamp < after_sample.timestamp)
+            ):
+                after_sample = s
 
         if before_sample is None and samples:
             before_sample = samples[0]
@@ -346,6 +464,55 @@ class CgroupsV2Collector(BaseCollector):
         if before_sample and after_sample and before_sample is not after_sample:
             return [before_sample, after_sample]
         return []
+
+    def _compute_top_read_device(
+        self, first_sample: CollectorSample, last_sample: CollectorSample
+    ) -> TopDeviceSummary | None:
+        """Compute the top device by read bytes delta between samples.
+
+        Matches devices between first and last samples by device ID,
+        computes delta, and returns the device with the highest read bytes delta.
+        """
+        if not first_sample.per_device_io or not last_sample.per_device_io:
+            return None
+
+        # Build lookup from first sample
+        first_by_device: dict[str, DeviceIOStat] = {d.device: d for d in first_sample.per_device_io}
+
+        # Compute deltas per device
+        device_deltas: list[tuple[str, int, int, int, int]] = []
+        for last_dev in last_sample.per_device_io:
+            first_dev = first_by_device.get(last_dev.device)
+            if first_dev:
+                read_delta = max(0, last_dev.rbytes - first_dev.rbytes)
+                write_delta = max(0, last_dev.wbytes - first_dev.wbytes)
+                read_ops_delta = max(0, last_dev.rios - first_dev.rios)
+                write_ops_delta = max(0, last_dev.wios - first_dev.wios)
+            else:
+                # New device appeared, treat all as delta
+                read_delta = last_dev.rbytes
+                write_delta = last_dev.wbytes
+                read_ops_delta = last_dev.rios
+                write_ops_delta = last_dev.wios
+            device_deltas.append(
+                (last_dev.device, read_delta, write_delta, read_ops_delta, write_ops_delta)
+            )
+
+        if not device_deltas:
+            return None
+
+        # Find top by read bytes
+        top = max(device_deltas, key=lambda x: x[1])
+        if top[1] == 0 and top[2] == 0:
+            return None
+
+        return TopDeviceSummary(
+            device=top[0],
+            total_read_bytes=top[1],
+            total_write_bytes=top[2],
+            total_read_ops=top[3],
+            total_write_ops=top[4],
+        )
 
     def _aggregate_samples(
         self, samples: list[CollectorSample] | None = None, *, already_sorted: bool = False
@@ -440,6 +607,91 @@ class CgroupsV2Collector(BaseCollector):
         avg_read_iops = (read_ops_delta / duration) if duration > 0 else 0.0
         avg_write_iops = (write_ops_delta / duration) if duration > 0 else 0.0
 
+        # I/O latency deltas (rusec/wusec)
+        read_usec_delta = max(0, last_sample.blkio_read_usec - first_sample.blkio_read_usec)
+        write_usec_delta = max(0, last_sample.blkio_write_usec - first_sample.blkio_write_usec)
+
+        # I/O pressure deltas (PSI totals)
+        io_pressure_some_delta = max(
+            0,
+            last_sample.io_pressure_some_total_usec - first_sample.io_pressure_some_total_usec,
+        )
+        io_pressure_full_delta = max(
+            0,
+            last_sample.io_pressure_full_total_usec - first_sample.io_pressure_full_total_usec,
+        )
+
+        # Memory stat deltas (page faults are counters, file stats are gauges)
+        pgmajfault_delta = max(0, last_sample.pgmajfault - first_sample.pgmajfault)
+        pgfault_delta = max(0, last_sample.pgfault - first_sample.pgfault)
+
+        # File cache stats (gauges)
+        file_bytes_values = [s.file_bytes for s in samples]
+        file_mapped_values = [s.file_mapped_bytes for s in samples]
+        active_file_values = [s.active_file_bytes for s in samples]
+        inactive_file_values = [s.inactive_file_bytes for s in samples]
+
+        avg_file_bytes = sum(file_bytes_values) / len(file_bytes_values) if file_bytes_values else 0
+        avg_file_mapped_bytes = (
+            sum(file_mapped_values) / len(file_mapped_values) if file_mapped_values else 0
+        )
+        avg_active_file_bytes = (
+            sum(active_file_values) / len(active_file_values) if active_file_values else 0
+        )
+        avg_inactive_file_bytes = (
+            sum(inactive_file_values) / len(inactive_file_values) if inactive_file_values else 0
+        )
+
+        peak_file_bytes = max(file_bytes_values) if file_bytes_values else 0
+        peak_file_mapped_bytes = max(file_mapped_values) if file_mapped_values else 0
+        peak_active_file_bytes = max(active_file_values) if active_file_values else 0
+        peak_inactive_file_bytes = max(inactive_file_values) if inactive_file_values else 0
+
+        # CPU throttling deltas
+        nr_throttled_delta = max(0, last_sample.nr_throttled - first_sample.nr_throttled)
+        throttled_usec_delta = max(0, last_sample.throttled_usec - first_sample.throttled_usec)
+
+        # Per-device I/O: compute top device by read bytes delta
+        top_read_device = self._compute_top_read_device(first_sample, last_sample)
+
+        def _percentile(values: list[float], percentile: float) -> float | None:
+            if not values:
+                return None
+            values_sorted = sorted(values)
+            rank = math.ceil((percentile / 100) * len(values_sorted)) - 1
+            index = max(0, min(rank, len(values_sorted) - 1))
+            return values_sorted[index]
+
+        interval_read_iops: list[float] = []
+        interval_read_mbps: list[float] = []
+        interval_read_service_time_ms: list[float] = []
+
+        for i in range(1, len(samples)):
+            s1 = samples[i - 1]
+            s2 = samples[i]
+            interval_duration = _duration_seconds(s1, s2)
+            if interval_duration < min_interval_seconds:
+                continue
+
+            read_ops_delta = max(0, s2.blkio_read_ops - s1.blkio_read_ops)
+            read_bytes_delta = max(0, s2.blkio_read_bytes - s1.blkio_read_bytes)
+            read_usec_delta = max(0, s2.blkio_read_usec - s1.blkio_read_usec)
+
+            interval_read_iops.append(read_ops_delta / interval_duration)
+            interval_read_mbps.append((read_bytes_delta / (1024 * 1024)) / interval_duration)
+
+            if read_ops_delta > 0 and read_usec_delta > 0:
+                interval_read_service_time_ms.append((read_usec_delta / read_ops_delta) / 1000.0)
+
+        p95_read_iops = _percentile(interval_read_iops, 95)
+        max_read_iops = max(interval_read_iops) if interval_read_iops else None
+        p95_read_mbps = _percentile(interval_read_mbps, 95)
+        max_read_mbps = max(interval_read_mbps) if interval_read_mbps else None
+        p95_read_service_time_ms = _percentile(interval_read_service_time_ms, 95)
+        max_read_service_time_ms = (
+            max(interval_read_service_time_ms) if interval_read_service_time_ms else None
+        )
+
         return CollectorResult(
             cpu_time_total_seconds=cpu_time_total_seconds,
             avg_cpu_percent=avg_cpu_percent,
@@ -452,6 +704,29 @@ class CgroupsV2Collector(BaseCollector):
             total_write_ops=write_ops_delta,
             avg_read_iops=avg_read_iops,
             avg_write_iops=avg_write_iops,
+            total_read_usec=read_usec_delta,
+            total_write_usec=write_usec_delta,
+            io_pressure_some_total_usec=io_pressure_some_delta,
+            io_pressure_full_total_usec=io_pressure_full_delta,
+            pgmajfault_delta=pgmajfault_delta,
+            pgfault_delta=pgfault_delta,
+            avg_file_bytes=avg_file_bytes,
+            peak_file_bytes=peak_file_bytes,
+            avg_file_mapped_bytes=avg_file_mapped_bytes,
+            peak_file_mapped_bytes=peak_file_mapped_bytes,
+            avg_active_file_bytes=avg_active_file_bytes,
+            peak_active_file_bytes=peak_active_file_bytes,
+            avg_inactive_file_bytes=avg_inactive_file_bytes,
+            peak_inactive_file_bytes=peak_inactive_file_bytes,
+            nr_throttled_delta=nr_throttled_delta,
+            throttled_usec_delta=throttled_usec_delta,
+            top_read_device=top_read_device,
+            p95_read_iops=p95_read_iops,
+            max_read_iops=max_read_iops,
+            p95_read_mbps=p95_read_mbps,
+            max_read_mbps=max_read_mbps,
+            p95_read_service_time_ms=p95_read_service_time_ms,
+            max_read_service_time_ms=max_read_service_time_ms,
             duration_seconds=duration,
             sample_count=len(samples),
         )

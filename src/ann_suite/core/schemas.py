@@ -46,6 +46,10 @@ class WarmupPhaseDict(TypedDict):
     peak_rss_mb: float
     read_mb: float
     write_mb: float
+    io_stall_percent: float | None
+    major_faults_per_second: float | None
+    file_cache_avg_mb: float | None
+    file_cache_peak_mb: float | None
 
 
 class DiskIODict(TypedDict):
@@ -59,6 +63,30 @@ class DiskIODict(TypedDict):
     total_pages_read: int
     total_pages_written: int
     pages_per_query: float | None
+    # Service time proxy / efficiency metrics
+    avg_bytes_per_read_op: float | None
+    avg_bytes_per_write_op: float | None
+    avg_read_service_time_ms: float | None
+    avg_write_service_time_ms: float | None
+    # Tail metrics (p95/max IOPS)
+    p95_read_iops: float | None
+    max_read_iops: float | None
+    p95_read_mbps: float | None
+    max_read_mbps: float | None
+    p95_read_service_time_ms: float | None
+    max_read_service_time_ms: float | None
+    # PSI stall metrics (future)
+    io_stall_percent: float | None
+
+
+class PerDeviceIODict(TypedDict):
+    """Per-device I/O summary for multi-device systems."""
+
+    device: str
+    read_mb: float
+    write_mb: float
+    read_ops: int
+    write_ops: int
 
 
 class SearchPhaseDict(TypedDict):
@@ -72,6 +100,10 @@ class SearchPhaseDict(TypedDict):
     peak_rss_mb: float
     avg_rss_mb: float
     disk_io: DiskIODict
+    major_faults_per_query: float | None
+    major_faults_per_second: float | None
+    file_cache_avg_mb: float | None
+    file_cache_peak_mb: float | None
     error: str | None
 
 
@@ -82,6 +114,7 @@ class LatencyDict(TypedDict):
     p50_ms: float | None
     p95_ms: float | None
     p99_ms: float | None
+    max_ms: float | None
 
 
 class MetadataDict(TypedDict):
@@ -312,6 +345,62 @@ class ResourceSummary(BaseModel):
     total_write_ops: int = Field(default=0, ge=0, description="Total write I/O operations")
     avg_read_iops: float = Field(ge=0, description="Average read IOPS")
     avg_write_iops: float = Field(ge=0, description="Average write IOPS")
+    total_read_usec: int = Field(
+        default=0, ge=0, description="Total read service time from io.stat (microseconds)"
+    )
+    total_write_usec: int = Field(
+        default=0, ge=0, description="Total write service time from io.stat (microseconds)"
+    )
+    io_pressure_some_total_usec: int = Field(
+        default=0, ge=0, description="Total PSI io.some time (microseconds)"
+    )
+    io_pressure_full_total_usec: int = Field(
+        default=0, ge=0, description="Total PSI io.full time (microseconds)"
+    )
+    pgmajfault_delta: int = Field(
+        default=0, ge=0, description="Major page faults during window (delta)"
+    )
+    pgfault_delta: int = Field(default=0, ge=0, description="Total page faults (delta)")
+    avg_file_bytes: float = Field(default=0.0, ge=0, description="Avg file cache bytes")
+    peak_file_bytes: int = Field(default=0, ge=0, description="Peak file cache bytes")
+    avg_file_mapped_bytes: float = Field(default=0.0, ge=0, description="Avg mapped file bytes")
+    peak_file_mapped_bytes: int = Field(default=0, ge=0, description="Peak mapped file bytes")
+    avg_active_file_bytes: float = Field(
+        default=0.0, ge=0, description="Avg active file cache bytes"
+    )
+    peak_active_file_bytes: int = Field(default=0, ge=0, description="Peak active file cache bytes")
+    avg_inactive_file_bytes: float = Field(
+        default=0.0, ge=0, description="Avg inactive file cache bytes"
+    )
+    peak_inactive_file_bytes: int = Field(
+        default=0, ge=0, description="Peak inactive file cache bytes"
+    )
+    nr_throttled_delta: int = Field(default=0, ge=0, description="CPU throttle count (delta)")
+    throttled_usec_delta: int = Field(
+        default=0, ge=0, description="CPU throttled time (microseconds)"
+    )
+    top_read_device: dict[str, int | str] | None = Field(
+        default=None,
+        description="Top device by read bytes {device, total_read_bytes, total_write_bytes, total_read_ops, total_write_ops}",
+    )
+    p95_read_iops: float | None = Field(
+        default=None, ge=0, description="95th percentile read IOPS (interval-based)"
+    )
+    max_read_iops: float | None = Field(
+        default=None, ge=0, description="Max read IOPS (interval-based)"
+    )
+    p95_read_mbps: float | None = Field(
+        default=None, ge=0, description="95th percentile read MB/s (interval-based)"
+    )
+    max_read_mbps: float | None = Field(
+        default=None, ge=0, description="Max read MB/s (interval-based)"
+    )
+    p95_read_service_time_ms: float | None = Field(
+        default=None, ge=0, description="95th percentile read service time (ms/op)"
+    )
+    max_read_service_time_ms: float | None = Field(
+        default=None, ge=0, description="Max read service time (ms/op)"
+    )
     sample_count: int = Field(ge=0, description="Number of samples collected")
     duration_seconds: float = Field(
         ge=0,
@@ -398,6 +487,14 @@ class MemoryMetrics(BaseModel):
         default=0.0, ge=0, description="Average RSS during search phase in MB"
     )
 
+    # Cache/fault statistics (optional - requires /proc or memory.stat access)
+    search_major_faults: int | None = Field(
+        default=None, ge=0, description="Major page faults during search (disk-backed pages)"
+    )
+    search_page_cache_hit_ratio: float | None = Field(
+        default=None, ge=0, le=1, description="Page cache hit ratio (0-1) during search"
+    )
+
 
 class DiskIOMetrics(BaseModel):
     """Structured disk I/O metrics (CRITICAL + HIGH priority).
@@ -424,6 +521,21 @@ class DiskIOMetrics(BaseModel):
     )
     warmup_write_mb: float = Field(
         default=0.0, ge=0, description="Total MB written during warmup phase"
+    )
+    warmup_io_stall_percent: float | None = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description="Percentage of time stalled on I/O during warmup (from PSI)",
+    )
+    warmup_major_faults_per_second: float | None = Field(
+        default=None, ge=0, description="Major faults per second during warmup"
+    )
+    warmup_file_cache_avg_mb: float | None = Field(
+        default=None, ge=0, description="Average file cache size during warmup (MB)"
+    )
+    warmup_file_cache_peak_mb: float | None = Field(
+        default=None, ge=0, description="Peak file cache size during warmup (MB)"
     )
 
     # SEARCH phase IOPS metrics (operations per second)
@@ -456,6 +568,72 @@ class DiskIOMetrics(BaseModel):
         default=None, ge=0, description="Average 4KB pages read per query (search phase only)"
     )
 
+    # Service time proxy metrics (bytes per operation - indicates I/O pattern efficiency)
+    search_avg_bytes_per_read_op: float | None = Field(
+        default=None,
+        ge=0,
+        description="Average bytes per read operation (proxy for I/O efficiency)",
+    )
+    search_avg_bytes_per_write_op: float | None = Field(
+        default=None, ge=0, description="Average bytes per write operation"
+    )
+    search_avg_read_service_time_ms: float | None = Field(
+        default=None,
+        ge=0,
+        description="Average read service time per op (ms) from rusec/rios",
+    )
+    search_avg_write_service_time_ms: float | None = Field(
+        default=None,
+        ge=0,
+        description="Average write service time per op (ms) from wusec/wios",
+    )
+
+    # Tail metrics for IOPS (p95/max)
+    search_p95_read_iops: float | None = Field(
+        default=None, ge=0, description="95th percentile read IOPS (from per-interval samples)"
+    )
+    search_max_read_iops: float | None = Field(
+        default=None, ge=0, description="Maximum read IOPS observed in any sampling interval"
+    )
+    search_p95_read_mbps: float | None = Field(
+        default=None, ge=0, description="95th percentile read MB/s (from per-interval samples)"
+    )
+    search_max_read_mbps: float | None = Field(
+        default=None, ge=0, description="Maximum read MB/s observed in any sampling interval"
+    )
+    search_p95_read_service_time_ms: float | None = Field(
+        default=None,
+        ge=0,
+        description="95th percentile read service time per op (ms) from interval deltas",
+    )
+    search_max_read_service_time_ms: float | None = Field(
+        default=None,
+        ge=0,
+        description="Maximum read service time per op (ms) from interval deltas",
+    )
+
+    # PSI (Pressure Stall Information) metrics - Linux 4.20+
+    search_io_stall_percent: float | None = Field(
+        default=None, ge=0, le=100, description="Percentage of time stalled on I/O (from PSI)"
+    )
+    search_major_faults_per_query: float | None = Field(
+        default=None, ge=0, description="Major page faults per query during search"
+    )
+    search_major_faults_per_second: float | None = Field(
+        default=None, ge=0, description="Major page faults per second during search"
+    )
+    search_file_cache_avg_mb: float | None = Field(
+        default=None, ge=0, description="Average file cache size during search (MB)"
+    )
+    search_file_cache_peak_mb: float | None = Field(
+        default=None, ge=0, description="Peak file cache size during search (MB)"
+    )
+
+    # Per-device I/O summary for multi-device systems
+    per_device_summary: list[dict[str, Any]] | None = Field(
+        default=None, description="Per-device I/O breakdown [{device, read_mb, write_mb, ...}]"
+    )
+
     # Metadata for transparency
     physical_block_size: int = Field(
         default=4096, ge=512, description="Detected physical block size of storage device (bytes)"
@@ -475,6 +653,7 @@ class LatencyMetrics(BaseModel):
     p50_ms: float = Field(default=0.0, ge=0, description="Median (p50) latency in ms")
     p95_ms: float = Field(default=0.0, ge=0, description="95th percentile latency in ms")
     p99_ms: float = Field(default=0.0, ge=0, description="99th percentile latency in ms")
+    max_ms: float | None = Field(default=None, ge=0, description="Maximum query latency in ms")
 
 
 class TimeBases(BaseModel):
@@ -618,6 +797,10 @@ class BenchmarkResult(BaseModel):
                 peak_rss_mb=self.memory.warmup_peak_rss_mb,
                 read_mb=self.disk_io.warmup_read_mb,
                 write_mb=self.disk_io.warmup_write_mb,
+                io_stall_percent=self.disk_io.warmup_io_stall_percent,
+                major_faults_per_second=self.disk_io.warmup_major_faults_per_second,
+                file_cache_avg_mb=self.disk_io.warmup_file_cache_avg_mb,
+                file_cache_peak_mb=self.disk_io.warmup_file_cache_peak_mb,
             ),
             search=SearchPhaseDict(
                 duration_seconds=self._get_time_base("query_duration_seconds"),
@@ -636,7 +819,25 @@ class BenchmarkResult(BaseModel):
                     total_pages_read=self.disk_io.search_total_pages_read,
                     total_pages_written=self.disk_io.search_total_pages_written,
                     pages_per_query=self.disk_io.search_pages_per_query,
+                    # Service time proxy / efficiency metrics
+                    avg_bytes_per_read_op=self.disk_io.search_avg_bytes_per_read_op,
+                    avg_bytes_per_write_op=self.disk_io.search_avg_bytes_per_write_op,
+                    avg_read_service_time_ms=self.disk_io.search_avg_read_service_time_ms,
+                    avg_write_service_time_ms=self.disk_io.search_avg_write_service_time_ms,
+                    # Tail metrics (p95/max IOPS)
+                    p95_read_iops=self.disk_io.search_p95_read_iops,
+                    max_read_iops=self.disk_io.search_max_read_iops,
+                    p95_read_mbps=self.disk_io.search_p95_read_mbps,
+                    max_read_mbps=self.disk_io.search_max_read_mbps,
+                    p95_read_service_time_ms=self.disk_io.search_p95_read_service_time_ms,
+                    max_read_service_time_ms=self.disk_io.search_max_read_service_time_ms,
+                    # PSI stall metrics
+                    io_stall_percent=self.disk_io.search_io_stall_percent,
                 ),
+                major_faults_per_query=self.disk_io.search_major_faults_per_query,
+                major_faults_per_second=self.disk_io.search_major_faults_per_second,
+                file_cache_avg_mb=self.disk_io.search_file_cache_avg_mb,
+                file_cache_peak_mb=self.disk_io.search_file_cache_peak_mb,
                 error=self.search_result.error_message if self.search_result else None,
             ),
             latency=LatencyDict(
@@ -644,6 +845,7 @@ class BenchmarkResult(BaseModel):
                 p50_ms=self.latency.p50_ms,
                 p95_ms=self.latency.p95_ms,
                 p99_ms=self.latency.p99_ms,
+                max_ms=self.latency.max_ms,
             ),
             metadata=MetadataDict(
                 run_id=str(self.run_id),

@@ -649,6 +649,8 @@ class BenchmarkEvaluator:
             warmup_peak_rss_mb=warmup_res.peak_memory_mb if warmup_res else 0.0,
             search_peak_rss_mb=search_res.peak_memory_mb,
             search_avg_rss_mb=search_res.avg_memory_mb,
+            search_major_faults=search_res.pgmajfault_delta,
+            search_page_cache_hit_ratio=None,
         )
 
         # Aggregate Disk I/O metrics (CRITICAL for disk-based algorithms)
@@ -688,10 +690,91 @@ class BenchmarkEvaluator:
             search_avg_read_iops = 0.0
             search_avg_write_iops = 0.0
 
+        # Compute service time proxy metrics (bytes per operation + service time)
+        search_avg_bytes_per_read_op: float | None = None
+        search_avg_bytes_per_write_op: float | None = None
+        search_avg_read_service_time_ms: float | None = None
+        search_avg_write_service_time_ms: float | None = None
+        if search_res.total_read_ops > 0:
+            search_avg_bytes_per_read_op = search_total_read_bytes / search_res.total_read_ops
+            if search_res.total_read_usec > 0:
+                search_avg_read_service_time_ms = (
+                    search_res.total_read_usec / search_res.total_read_ops
+                ) / 1000.0
+        if search_res.total_write_ops > 0:
+            search_avg_bytes_per_write_op = search_total_write_bytes / search_res.total_write_ops
+            if search_res.total_write_usec > 0:
+                search_avg_write_service_time_ms = (
+                    search_res.total_write_usec / search_res.total_write_ops
+                ) / 1000.0
+
+        # Tail metrics from per-interval samples (computed by collector)
+        search_p95_read_iops = search_res.p95_read_iops
+        search_max_read_iops = search_res.max_read_iops
+        search_p95_read_mbps = search_res.p95_read_mbps
+        search_max_read_mbps = search_res.max_read_mbps
+        search_p95_read_service_time_ms = search_res.p95_read_service_time_ms
+        search_max_read_service_time_ms = search_res.max_read_service_time_ms
+
+        # PSI stall metrics
+        search_io_stall_percent: float | None = None
+        if io_time_base > 0 and search_res.io_pressure_some_total_usec > 0:
+            search_io_stall_percent = (
+                search_res.io_pressure_some_total_usec / (io_time_base * 1_000_000)
+            ) * 100.0
+
+        # Per-device summary (top device only)
+        per_device_summary: list[dict[str, Any]] | None = None
+        if search_res.top_read_device:
+            device_name = str(search_res.top_read_device.get("device", ""))
+            read_bytes = float(search_res.top_read_device.get("total_read_bytes", 0))
+            write_bytes = float(search_res.top_read_device.get("total_write_bytes", 0))
+            read_ops = int(search_res.top_read_device.get("total_read_ops", 0))
+            write_ops = int(search_res.top_read_device.get("total_write_ops", 0))
+            if device_name:
+                per_device_summary = [
+                    {
+                        "device": device_name,
+                        "read_mb": read_bytes / (1024 * 1024),
+                        "write_mb": write_bytes / (1024 * 1024),
+                        "read_ops": read_ops,
+                        "write_ops": write_ops,
+                    }
+                ]
+
+        search_major_faults_per_query: float | None = None
+        if num_queries > 0:
+            search_major_faults_per_query = search_res.pgmajfault_delta / num_queries
+        search_major_faults_per_second: float | None = None
+        if io_time_base > 0:
+            search_major_faults_per_second = search_res.pgmajfault_delta / io_time_base
+
+        search_file_cache_avg_mb = search_res.avg_file_bytes / (1024 * 1024)
+        search_file_cache_peak_mb = search_res.peak_file_bytes / (1024 * 1024)
+
+        warmup_io_stall_percent: float | None = None
+        warmup_major_faults_per_second: float | None = None
+        warmup_file_cache_avg_mb: float | None = None
+        warmup_file_cache_peak_mb: float | None = None
+        if warmup_res:
+            warmup_time_base = warmup_res.duration_seconds
+            if warmup_time_base > 0 and warmup_res.io_pressure_some_total_usec > 0:
+                warmup_io_stall_percent = (
+                    warmup_res.io_pressure_some_total_usec / (warmup_time_base * 1_000_000)
+                ) * 100.0
+            if warmup_time_base > 0:
+                warmup_major_faults_per_second = warmup_res.pgmajfault_delta / warmup_time_base
+            warmup_file_cache_avg_mb = warmup_res.avg_file_bytes / (1024 * 1024)
+            warmup_file_cache_peak_mb = warmup_res.peak_file_bytes / (1024 * 1024)
+
         disk_io = DiskIOMetrics(
             # WARMUP phase I/O
             warmup_read_mb=warmup_read_mb,
             warmup_write_mb=warmup_write_mb,
+            warmup_io_stall_percent=warmup_io_stall_percent,
+            warmup_major_faults_per_second=warmup_major_faults_per_second,
+            warmup_file_cache_avg_mb=warmup_file_cache_avg_mb,
+            warmup_file_cache_peak_mb=warmup_file_cache_peak_mb,
             # SEARCH phase IOPS (using consistent query_duration time base)
             search_avg_read_iops=search_avg_read_iops,
             search_avg_write_iops=search_avg_write_iops,
@@ -709,6 +792,26 @@ class BenchmarkEvaluator:
             search_pages_per_query=(
                 search_total_pages_read / num_queries if num_queries > 0 else None
             ),
+            # Service time proxy metrics (bytes per operation)
+            search_avg_bytes_per_read_op=search_avg_bytes_per_read_op,
+            search_avg_bytes_per_write_op=search_avg_bytes_per_write_op,
+            search_avg_read_service_time_ms=search_avg_read_service_time_ms,
+            search_avg_write_service_time_ms=search_avg_write_service_time_ms,
+            # Tail metrics (p95/max IOPS)
+            search_p95_read_iops=search_p95_read_iops,
+            search_max_read_iops=search_max_read_iops,
+            search_p95_read_mbps=search_p95_read_mbps,
+            search_max_read_mbps=search_max_read_mbps,
+            search_p95_read_service_time_ms=search_p95_read_service_time_ms,
+            search_max_read_service_time_ms=search_max_read_service_time_ms,
+            # PSI stall metrics
+            search_io_stall_percent=search_io_stall_percent,
+            search_major_faults_per_query=search_major_faults_per_query,
+            search_major_faults_per_second=search_major_faults_per_second,
+            search_file_cache_avg_mb=search_file_cache_avg_mb,
+            search_file_cache_peak_mb=search_file_cache_peak_mb,
+            # Per-device summary
+            per_device_summary=per_device_summary,
             # Metadata for transparency
             physical_block_size=search_res.block_size,
             sample_count=search_res.sample_count,
@@ -727,6 +830,7 @@ class BenchmarkEvaluator:
             p50_ms=search_output.get("p50_latency_ms", 0.0),
             p95_ms=search_output.get("p95_latency_ms", 0.0),
             p99_ms=search_output.get("p99_latency_ms", 0.0),
+            max_ms=search_output.get("max_latency_ms"),  # Default None if not provided
         )
 
         # Warn if latency percentiles appear to be estimated (all equal = batch_mode)

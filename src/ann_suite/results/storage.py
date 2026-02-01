@@ -6,6 +6,7 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
+
 import pandas as pd
 
 from ann_suite.core.schemas import BenchmarkResult
@@ -46,10 +47,7 @@ class ResultsStorage:
 
         # Create run directory with timestamp to prevent overwrites
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        if run_name:
-            run_name = f"{run_name}_{timestamp}"
-        else:
-            run_name = f"benchmark_{timestamp}"
+        run_name = f"{run_name}_{timestamp}" if run_name else f"benchmark_{timestamp}"
         run_dir = self.results_dir / run_name
         run_dir.mkdir(parents=True, exist_ok=True)
 

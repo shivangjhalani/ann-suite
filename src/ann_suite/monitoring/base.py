@@ -16,6 +16,19 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class DeviceIOStat:
+    """Per-device I/O statistics from cgroups v2 io.stat."""
+
+    device: str  # Device identifier (e.g., "8:0")
+    rbytes: int = 0
+    wbytes: int = 0
+    rios: int = 0
+    wios: int = 0
+    rusec: int = 0  # Read latency microseconds (if available)
+    wusec: int = 0  # Write latency microseconds (if available)
+
+
+@dataclass
 class CollectorSample:
     """A single sample from any collector.
 
@@ -33,11 +46,40 @@ class CollectorSample:
     # CPU
     cpu_percent: float = 0.0
     cpu_time_ns: int = 0  # Nanoseconds of CPU time
-    # Block I/O (from cgroups v2 io.stat)
+    # Block I/O (from cgroups v2 io.stat) - aggregated across devices
     blkio_read_bytes: int = 0
     blkio_write_bytes: int = 0
     blkio_read_ops: int = 0  # rios from cgroups
     blkio_write_ops: int = 0  # wios from cgroups
+    # I/O latency (from io.stat rusec/wusec if present)
+    blkio_read_usec: int = 0
+    blkio_write_usec: int = 0
+    # Per-device I/O stats (optional detailed breakdown)
+    per_device_io: list[DeviceIOStat] | None = None
+    # I/O pressure (PSI from io.pressure)
+    io_pressure_some_total_usec: int = 0
+    io_pressure_full_total_usec: int = 0
+    # Memory stats (from memory.stat)
+    pgmajfault: int = 0
+    pgfault: int = 0
+    file_bytes: int = 0  # Page cache file bytes
+    file_mapped_bytes: int = 0
+    active_file_bytes: int = 0
+    inactive_file_bytes: int = 0
+    # CPU throttling (from cpu.stat)
+    nr_throttled: int = 0
+    throttled_usec: int = 0
+
+
+@dataclass
+class TopDeviceSummary:
+    """Summary of the top I/O device by read bytes."""
+
+    device: str
+    total_read_bytes: int = 0
+    total_write_bytes: int = 0
+    total_read_ops: int = 0
+    total_write_ops: int = 0
 
 
 @dataclass
@@ -58,6 +100,35 @@ class CollectorResult:
     total_write_ops: int = 0
     avg_read_iops: float = 0.0
     avg_write_iops: float = 0.0
+    # I/O latency totals (delta of rusec/wusec)
+    total_read_usec: int = 0
+    total_write_usec: int = 0
+    # I/O pressure (PSI deltas)
+    io_pressure_some_total_usec: int = 0
+    io_pressure_full_total_usec: int = 0
+    # Memory stats deltas
+    pgmajfault_delta: int = 0
+    pgfault_delta: int = 0
+    avg_file_bytes: float = 0.0
+    peak_file_bytes: int = 0
+    avg_file_mapped_bytes: float = 0.0
+    peak_file_mapped_bytes: int = 0
+    avg_active_file_bytes: float = 0.0
+    peak_active_file_bytes: int = 0
+    avg_inactive_file_bytes: float = 0.0
+    peak_inactive_file_bytes: int = 0
+    # CPU throttling deltas
+    nr_throttled_delta: int = 0
+    throttled_usec_delta: int = 0
+    # Per-device summary (top device by read bytes)
+    top_read_device: TopDeviceSummary | None = None
+    # Tail metrics from per-interval deltas
+    p95_read_iops: float | None = None
+    max_read_iops: float | None = None
+    p95_read_mbps: float | None = None
+    max_read_mbps: float | None = None
+    p95_read_service_time_ms: float | None = None
+    max_read_service_time_ms: float | None = None
     # Meta
     duration_seconds: float = 0.0
     sample_count: int = 0
