@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import itertools
 import logging
-import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from ann_suite.core.constants import STANDARD_PAGE_SIZE
 from ann_suite.core.schemas import (
     AlgorithmConfig,
     BenchmarkConfig,
@@ -135,6 +135,7 @@ class BenchmarkEvaluator:
             index_dir=self.index_dir,
             results_dir=self.results_dir,
             monitor_interval_ms=config.monitor_interval_ms,
+            include_raw_samples=config.include_raw_samples,
         )
         self.results_storage = ResultsStorage(self.results_dir)
 
@@ -533,10 +534,6 @@ class BenchmarkEvaluator:
                 "k": algo_config.search.k,
             }
 
-            # Cap peak CPU at theoretical maximum for build phase
-            max_cpus = os.cpu_count() or 1
-            capped_build_peak_cpu = min(build_res.peak_cpu_percent, max_cpus * 100.0)
-
             # Return result with build metrics but empty/None search metrics
             return BenchmarkResult(
                 algorithm=algo_config.name,
@@ -547,7 +544,7 @@ class BenchmarkEvaluator:
                 # Build-only CPU metrics
                 cpu=CPUMetrics(
                     build_cpu_time_seconds=build_res.cpu_time_total_seconds,
-                    build_peak_cpu_percent=capped_build_peak_cpu,
+                    build_peak_cpu_percent=build_res.peak_cpu_percent,
                     # Search metrics zeroed due to failure
                     warmup_cpu_time_seconds=0.0,
                     warmup_peak_cpu_percent=0.0,
@@ -608,12 +605,6 @@ class BenchmarkEvaluator:
         if num_queries > 0 and search_res.cpu_time_total_seconds > 0:
             cpu_time_per_query_ms = (search_res.cpu_time_total_seconds * 1000.0) / num_queries
 
-        # Cap peak CPU at theoretical maximum
-        max_cpus = os.cpu_count() or 1
-        capped_build_peak_cpu = min(build_res.peak_cpu_percent, max_cpus * 100.0)
-        capped_search_peak_cpu = min(search_res.peak_cpu_percent, max_cpus * 100.0)
-        capped_search_avg_cpu = min(search_res.avg_cpu_percent, max_cpus * 100.0)
-
         # Log sample adequacy warning
         if search_res.sample_count < 10:
             logger.warning(
@@ -630,18 +621,26 @@ class BenchmarkEvaluator:
         cpu = CPUMetrics(
             # BUILD phase metrics
             build_cpu_time_seconds=build_res.cpu_time_total_seconds,
-            build_peak_cpu_percent=capped_build_peak_cpu,
+            build_peak_cpu_percent=build_res.peak_cpu_percent,
             # WARMUP phase metrics (index loading)
             warmup_cpu_time_seconds=warmup_res.cpu_time_total_seconds if warmup_res else 0.0,
-            warmup_peak_cpu_percent=min(warmup_res.peak_cpu_percent, max_cpus * 100.0)
-            if warmup_res
-            else 0.0,
+            warmup_peak_cpu_percent=warmup_res.peak_cpu_percent if warmup_res else 0.0,
             # SEARCH phase metrics (primary benchmark focus)
             search_cpu_time_seconds=search_res.cpu_time_total_seconds,
-            search_avg_cpu_percent=capped_search_avg_cpu,
-            search_peak_cpu_percent=capped_search_peak_cpu,
+            search_avg_cpu_percent=search_res.avg_cpu_percent,
+            search_peak_cpu_percent=search_res.peak_cpu_percent,
             search_cpu_time_per_query_ms=cpu_time_per_query_ms,
         )
+
+        # Calculate page cache hit ratio from page fault counters
+        # pgfault = total page faults (major + minor)
+        # pgmajfault = major page faults (disk reads)
+        # hit_ratio = 1 - (major_faults / total_faults)
+        page_cache_hit_ratio = None
+        if search_res.pgfault_delta > 0:
+            page_cache_hit_ratio = 1.0 - (search_res.pgmajfault_delta / search_res.pgfault_delta)
+            # Clamp to valid range [0, 1] to handle edge cases
+            page_cache_hit_ratio = max(0.0, min(1.0, page_cache_hit_ratio))
 
         # Aggregate Memory metrics (separated by phase: BUILD, WARMUP, SEARCH)
         memory = MemoryMetrics(
@@ -650,7 +649,7 @@ class BenchmarkEvaluator:
             search_peak_rss_mb=search_res.peak_memory_mb,
             search_avg_rss_mb=search_res.avg_memory_mb,
             search_major_faults=search_res.pgmajfault_delta,
-            search_page_cache_hit_ratio=None,
+            search_page_cache_hit_ratio=page_cache_hit_ratio,
         )
 
         # Aggregate Disk I/O metrics (CRITICAL for disk-based algorithms)
@@ -664,10 +663,6 @@ class BenchmarkEvaluator:
                 "Container may have exited too quickly for metrics collection. "
                 "Throughput metrics will be reported as 0."
             )
-
-        # Use STANDARD 4KB page size for cross-system comparability
-        # This ensures consistent metrics regardless of physical block size
-        STANDARD_PAGE_SIZE = 4096
 
         search_total_read_mb = search_res.total_blkio_read_mb
         search_total_write_mb = search_res.total_blkio_write_mb

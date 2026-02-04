@@ -48,6 +48,11 @@ def run(
         False, "--json-logs", help="Output logs in JSON format (for programmatic parsing)"
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Validate config without running"),
+    include_raw_samples: bool = typer.Option(
+        False,
+        "--include-raw-samples",
+        help="Also include raw samples in results_detailed.json (debug JSONL always stored)",
+    ),
 ) -> None:
     """Run a benchmark suite from a configuration file."""
     setup_logging(
@@ -66,6 +71,10 @@ def run(
     # Override output directory if specified
     if output_dir is not None:
         benchmark_config.results_dir = output_dir
+
+    # Override include_raw_samples if specified via CLI
+    if include_raw_samples:
+        benchmark_config.include_raw_samples = True
 
     # Show configuration summary
     _show_config_summary(benchmark_config)

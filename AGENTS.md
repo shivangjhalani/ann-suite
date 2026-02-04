@@ -12,7 +12,7 @@ uv run ruff format src tests         # Format
 uv run mypy src                      # Type check (strict mode)
 uv run ann-suite --help              # CLI entrypoint
 uv run ann-suite build --algorithm HNSW  # Build algorithm container
-uv run ann-suite run --config configs/example.yaml  # Run benchmark
+sudo -E env PYTHONPATH="$PYTHONPATH" uv run ann-suite run --config configs/example.yaml  # Run benchmark sudo and env needed for eBPF
 ```
 
 ## Requirements

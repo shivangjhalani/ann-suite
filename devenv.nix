@@ -9,6 +9,10 @@
     pkgs.git
     pkgs.docker
     pkgs.stdenv.cc.cc.lib # for many python wheels on linux
+    pkgs.bcc
+    pkgs.linuxHeaders
+    pkgs.glib
+    pkgs.gcc # Explicitly adding GCC
   ];
 
   # https://devenv.sh/languages/
@@ -25,6 +29,7 @@
   env.LD_LIBRARY_PATH = lib.makeLibraryPath [
     pkgs.stdenv.cc.cc.lib
     pkgs.zlib
+    pkgs.glib
   ];
 
 enterShell = ''

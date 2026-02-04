@@ -17,6 +17,18 @@ cat /sys/fs/cgroup/cgroup.controllers
 # Expected output: cpuset cpu io memory hugetlb pids rdma misc
 ```
 
+### Verifying CPU Controller Is Enabled
+
+The CPU controller must be enabled in the parent cgroup's subtree control for `cpu.stat` to report usage.
+
+```bash
+# Example for systemd-managed Docker
+cat /sys/fs/cgroup/system.slice/cgroup.subtree_control
+# Expected to include: cpu
+```
+
+If `cpu` is missing, metrics will fail fast with remediation guidance.
+
 ### Enabling cgroups v2
 
 Most modern Linux distributions (Ubuntu 21.10+, Fedora 31+, Debian 11+, Arch Linux) use cgroups v2 by default.
@@ -232,6 +244,12 @@ class DiskIOMetrics:
 > from disk into RAM. If the index was recently built (same benchmark run), most of it may
 > be in the Linux page cache, resulting in low but non-zero I/O values.
 
+### Block I/O vs Memory-Mapped I/O
+
+The suite reports **real block-layer I/O only** from `io.stat`. Memory-mapped workloads may show zero block I/O even when they trigger disk reads via page faults.
+
+For research-grade mmap I/O, use block-layer tracing (eBPF) rather than estimating from page faults.
+
 ---
 
 ### LatencyMetrics
@@ -310,6 +328,7 @@ class MemoryFaultMetrics:
     file_mapped_mb: float        # Memory-mapped file bytes
     active_file_mb: float        # Active file cache
     inactive_file_mb: float      # Inactive file cache
+    page_cache_hit_ratio: float | None  # Page cache hit ratio (0.0-1.0)
 ```
 
 **Source:** cgroups v2 `memory.stat`
@@ -328,6 +347,24 @@ class MemoryFaultMetrics:
 - **Major faults** indicate disk reads due to page cache misses — critical for disk-based ANN
 - **Minor faults** are memory-only (copy-on-write, zero-fill) and don't indicate I/O
 - **High `major_faults_per_query`** suggests index doesn't fit in memory or cache is cold
+
+**Page Cache Hit Ratio:**
+
+The `page_cache_hit_ratio` indicates the fraction of page faults that were satisfied from cache (minor faults) versus requiring disk access (major faults):
+
+```python
+page_cache_hit_ratio = 1.0 - (pgmajfault_delta / pgfault_delta)
+```
+
+| Hit Ratio | Interpretation |
+|-----------|----------------|
+| 0.95-1.0  | Excellent - Most accesses from cache |
+| 0.80-0.95 | Good - Some cache misses |
+| 0.50-0.80 | Fair - Frequent disk reads |
+| < 0.50    | Poor - Mostly cold cache/disk-bound |
+
+> [!NOTE]
+> `page_cache_hit_ratio` is `None` when `pgfault_delta` is 0 (no page faults occurred).
 
 ---
 
@@ -555,6 +592,24 @@ monitor_interval_ms: 100  # Range: 50-1000ms
 |---------|-----------|
 | Lower (50ms) | More samples, higher overhead, better for short runs |
 | Higher (1000ms) | Fewer samples, lower overhead, may miss fast containers |
+
+### Raw Sample Collection
+
+Raw metric samples are always stored in a separate debug JSONL file and referenced from `results.json`.
+Use the option below only when you also want raw samples embedded in `results_detailed.json`.
+
+**Via CLI:**
+```bash
+ann-suite run --config benchmark.yaml --include-raw-samples
+```
+
+**Via Config:**
+```yaml
+include_raw_samples: true  # Also include raw samples in results_detailed.json
+```
+
+> [!WARNING]
+> Including raw samples in detailed JSON can significantly increase file size (10-100x). Use only for debugging short runs.
 
 ---
 

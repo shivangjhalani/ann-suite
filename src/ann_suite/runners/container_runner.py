@@ -24,12 +24,11 @@ from typing import TYPE_CHECKING, Any
 import docker
 from docker.errors import ContainerError, ImageNotFound, NotFound
 
-from ann_suite.core.schemas import AlgorithmConfig, ResourceSummary
-from ann_suite.monitoring.base import get_system_block_size
+from ann_suite.core.constants import MAX_LOG_FILES_PER_TYPE
+from ann_suite.core.schemas import AlgorithmConfig, ResourceSample, ResourceSummary
+from ann_suite.monitoring.base import CollectorResult, CollectorSample, get_system_block_size
 from ann_suite.monitoring.cgroups_collector import CgroupsV2Collector
-
-# Maximum number of log files to keep per algorithm/mode combination
-MAX_LOG_FILES_PER_TYPE = 50
+from ann_suite.monitoring.ebpf_collector import EBPFCollector
 
 if TYPE_CHECKING:
     from docker.models.containers import Container
@@ -93,6 +92,7 @@ class ContainerRunner:
         index_dir: Path,
         results_dir: Path,
         monitor_interval_ms: int = 100,
+        include_raw_samples: bool = False,
     ) -> None:
         """Initialize the container runner.
 
@@ -101,11 +101,13 @@ class ContainerRunner:
             index_dir: Host directory for indices (mounted to /data/index)
             results_dir: Host directory for results (mounted to /results)
             monitor_interval_ms: Resource monitoring interval
+            include_raw_samples: Whether to embed raw samples in results_detailed.json
         """
         self.data_dir = Path(data_dir).resolve()
         self.index_dir = Path(index_dir).resolve()
         self.results_dir = Path(results_dir).resolve()
         self.monitor_interval_ms = monitor_interval_ms
+        self.include_raw_samples = include_raw_samples
 
         # Ensure directories exist
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -125,10 +127,21 @@ class ContainerRunner:
 
         self._cgroups_collector = CgroupsV2Collector(interval_ms=monitor_interval_ms)
 
+        # Initialize eBPF collector (graceful fallback if unavailable)
+        self._ebpf_collector = EBPFCollector(interval_ms=monitor_interval_ms)
+        self._use_ebpf = self._ebpf_collector.is_available()
+        if self._use_ebpf:
+            logger.info("EBPFCollector available - will use for high-precision block I/O tracing")
+        else:
+            logger.warning(
+                "EBPFCollector not available - falling back to cgroups I/O metrics (mmap I/O may be missed)"
+            )
+
         # Detect system block size once at initialization
         self._block_size = get_system_block_size()
         logger.info(
-            f"CgroupsV2Collector available - will collect metrics (block_size={self._block_size})"
+            f"CgroupsV2Collector available - will collect metrics (block_size={self._block_size}, "
+            f"include_raw_samples={include_raw_samples})"
         )
 
         # Clean up old logs on initialization
@@ -179,6 +192,248 @@ class ContainerRunner:
 
         except Exception as e:
             logger.debug(f"Error cleaning up old logs: {e}")
+
+    def _build_resource_summary(
+        self,
+        result: CollectorResult,
+        include_samples: bool | None = None,
+        run_id: str | None = None,
+        *,
+        persist_debug: bool = True,
+        phase_label: str | None = None,
+    ) -> ResourceSummary:
+        """Build a ResourceSummary from CollectorResult.
+
+        Centralizes construction to ensure field parity across initial,
+        refined, and warmup metrics (Issues #2, #3).
+
+        Args:
+            result: CollectorResult from cgroups collector
+            include_samples: Override for including raw samples (defaults to self.include_raw_samples)
+
+        Returns:
+            ResourceSummary with all fields populated from the CollectorResult
+        """
+        if include_samples is None:
+            include_samples = self.include_raw_samples
+
+        debug_path: Path | None = None
+        samples_payload: list[ResourceSample] = []
+        if result.samples:
+            if persist_debug:
+                debug_path = self._persist_debug_samples(result.samples, run_id, phase_label)
+            if include_samples:
+                samples_payload = self._convert_samples(result.samples)
+
+        return ResourceSummary(
+            peak_memory_mb=result.peak_memory_mb,
+            avg_memory_mb=result.avg_memory_mb,
+            cpu_time_total_seconds=result.cpu_time_total_seconds,
+            avg_cpu_percent=result.avg_cpu_percent,
+            peak_cpu_percent=result.peak_cpu_percent,
+            total_blkio_read_mb=result.total_read_bytes / (1024 * 1024),
+            total_blkio_write_mb=result.total_write_bytes / (1024 * 1024),
+            total_read_ops=result.total_read_ops,
+            total_write_ops=result.total_write_ops,
+            avg_read_iops=result.avg_read_iops,
+            avg_write_iops=result.avg_write_iops,
+            total_read_usec=result.total_read_usec,
+            total_write_usec=result.total_write_usec,
+            io_pressure_some_total_usec=result.io_pressure_some_total_usec,
+            io_pressure_full_total_usec=result.io_pressure_full_total_usec,
+            pgmajfault_delta=result.pgmajfault_delta,
+            pgfault_delta=result.pgfault_delta,
+            avg_file_bytes=result.avg_file_bytes,
+            peak_file_bytes=result.peak_file_bytes,
+            avg_file_mapped_bytes=result.avg_file_mapped_bytes,
+            peak_file_mapped_bytes=result.peak_file_mapped_bytes,
+            avg_active_file_bytes=result.avg_active_file_bytes,
+            peak_active_file_bytes=result.peak_active_file_bytes,
+            avg_inactive_file_bytes=result.avg_inactive_file_bytes,
+            peak_inactive_file_bytes=result.peak_inactive_file_bytes,
+            nr_throttled_delta=result.nr_throttled_delta,
+            throttled_usec_delta=result.throttled_usec_delta,
+            top_read_device=result.top_read_device.to_dict() if result.top_read_device else None,
+            p95_read_iops=result.p95_read_iops,
+            max_read_iops=result.max_read_iops,
+            p95_read_mbps=result.p95_read_mbps,
+            max_read_mbps=result.max_read_mbps,
+            p95_read_service_time_ms=result.p95_read_service_time_ms,
+            max_read_service_time_ms=result.max_read_service_time_ms,
+            sample_count=result.sample_count,
+            duration_seconds=result.duration_seconds,
+            samples=samples_payload,
+            block_size=self._block_size,
+            debug_samples_path=debug_path,
+        )
+
+    def _convert_samples(self, samples: list[CollectorSample]) -> list[ResourceSample]:
+        """Convert CollectorSample objects to ResourceSample payloads."""
+        return [
+            ResourceSample(
+                timestamp=s.timestamp,
+                memory_usage_bytes=s.memory_usage_bytes,
+                memory_limit_bytes=0,
+                memory_percent=0.0,
+                cpu_percent=s.cpu_percent,
+                blkio_read_bytes=s.blkio_read_bytes,
+                blkio_write_bytes=s.blkio_write_bytes,
+                pids=0,
+            )
+            for s in samples
+        ]
+
+    def _persist_debug_samples(
+        self,
+        samples: list[CollectorSample],
+        run_id: str | None,
+        phase_label: str | None,
+    ) -> Path:
+        """Persist raw samples to a debug JSONL file.
+
+        Returns the path to the written file.
+        """
+        from uuid import uuid4
+
+        debug_id = run_id or str(uuid4())[:8]
+        debug_root = self.results_dir / "debug" / debug_id
+        debug_root.mkdir(parents=True, exist_ok=True)
+        debug_path = debug_root / "samples.jsonl"
+
+        with debug_path.open("a", encoding="utf-8") as handle:
+            for sample in samples:
+                payload = {
+                    "phase": phase_label,
+                    "timestamp": sample.timestamp.isoformat(),
+                    "monotonic_time": sample.monotonic_time,
+                    "memory_usage_bytes": sample.memory_usage_bytes,
+                    "cpu_time_ns": sample.cpu_time_ns,
+                    "blkio_read_bytes": sample.blkio_read_bytes,
+                    "blkio_write_bytes": sample.blkio_write_bytes,
+                    "blkio_read_ops": sample.blkio_read_ops,
+                    "blkio_write_ops": sample.blkio_write_ops,
+                    "blkio_read_usec": sample.blkio_read_usec,
+                    "blkio_write_usec": sample.blkio_write_usec,
+                    "io_pressure_some_total_usec": sample.io_pressure_some_total_usec,
+                    "io_pressure_full_total_usec": sample.io_pressure_full_total_usec,
+                    "pgmajfault": sample.pgmajfault,
+                    "pgfault": sample.pgfault,
+                    "file_bytes": sample.file_bytes,
+                    "file_mapped_bytes": sample.file_mapped_bytes,
+                    "active_file_bytes": sample.active_file_bytes,
+                    "inactive_file_bytes": sample.inactive_file_bytes,
+                    "nr_throttled": sample.nr_throttled,
+                    "throttled_usec": sample.throttled_usec,
+                }
+                if sample.per_device_io:
+                    payload["per_device_io"] = json.dumps(
+                        [
+                            {
+                                "device": dev.device,
+                                "rbytes": dev.rbytes,
+                                "wbytes": dev.wbytes,
+                                "rios": dev.rios,
+                                "wios": dev.wios,
+                                "rusec": dev.rusec,
+                                "wusec": dev.wusec,
+                            }
+                            for dev in sample.per_device_io
+                        ]
+                    )
+                handle.write(json.dumps(payload))
+                handle.write("\n")
+
+        return debug_path
+
+    def _merge_ebpf_io(self, cgroups_result: CollectorResult, ebpf_result: CollectorResult) -> None:
+        """Merge eBPF I/O metrics into a cgroups result (mutates in place).
+
+        eBPF provides more accurate I/O metrics for memory-mapped files and
+        per-request timings. This replaces the I/O totals and IOPS in the
+        cgroups result while preserving CPU, memory, and other cgroups-only metrics.
+
+        Also replaces tail metrics (p95/max IOPS, etc.) from eBPF samples if available,
+        or clears them for transparency if eBPF samples are insufficient.
+        """
+        logger.debug(
+            f"Merging eBPF I/O: read={ebpf_result.total_read_bytes}, "
+            f"write={ebpf_result.total_write_bytes}, samples={ebpf_result.sample_count}"
+        )
+
+        # Replace I/O totals with eBPF values
+        cgroups_result.total_read_bytes = ebpf_result.total_read_bytes
+        cgroups_result.total_write_bytes = ebpf_result.total_write_bytes
+        cgroups_result.total_read_ops = ebpf_result.total_read_ops
+        cgroups_result.total_write_ops = ebpf_result.total_write_ops
+        cgroups_result.total_read_usec = ebpf_result.total_read_usec
+        cgroups_result.total_write_usec = ebpf_result.total_write_usec
+        cgroups_result.avg_read_iops = ebpf_result.avg_read_iops
+        cgroups_result.avg_write_iops = ebpf_result.avg_write_iops
+
+        # Compute tail metrics from eBPF samples for consistency
+        # If eBPF has enough samples, derive p95/max from them; else set to None for transparency
+        if ebpf_result.samples and len(ebpf_result.samples) >= 2:
+            import math
+
+            samples = ebpf_result.samples
+            samples = sorted(
+                samples,
+                key=lambda s: s.monotonic_time if s.monotonic_time > 0 else s.timestamp.timestamp(),
+            )
+
+            def _duration_seconds(s1: CollectorSample, s2: CollectorSample) -> float:
+                if s1.monotonic_time > 0 and s2.monotonic_time > 0:
+                    return s2.monotonic_time - s1.monotonic_time
+                return (s2.timestamp - s1.timestamp).total_seconds()
+
+            def _percentile(values: list[float], percentile: float) -> float | None:
+                if not values:
+                    return None
+                values_sorted = sorted(values)
+                rank = math.ceil((percentile / 100) * len(values_sorted)) - 1
+                index = max(0, min(rank, len(values_sorted) - 1))
+                return values_sorted[index]
+
+            min_interval = 0.01
+            interval_read_iops: list[float] = []
+            interval_read_mbps: list[float] = []
+            interval_read_service_time_ms: list[float] = []
+
+            for i in range(1, len(samples)):
+                s1 = samples[i - 1]
+                s2 = samples[i]
+                interval_duration = _duration_seconds(s1, s2)
+                if interval_duration < min_interval:
+                    continue
+
+                read_ops_delta = max(0, s2.blkio_read_ops - s1.blkio_read_ops)
+                read_bytes_delta = max(0, s2.blkio_read_bytes - s1.blkio_read_bytes)
+                read_usec_delta = max(0, s2.blkio_read_usec - s1.blkio_read_usec)
+
+                interval_read_iops.append(read_ops_delta / interval_duration)
+                interval_read_mbps.append((read_bytes_delta / (1024 * 1024)) / interval_duration)
+
+                if read_ops_delta > 0 and read_usec_delta > 0:
+                    interval_read_service_time_ms.append(
+                        (read_usec_delta / read_ops_delta) / 1000.0
+                    )
+
+            cgroups_result.p95_read_iops = _percentile(interval_read_iops, 95)
+            cgroups_result.max_read_iops = max(interval_read_iops) if interval_read_iops else None
+            cgroups_result.p95_read_mbps = _percentile(interval_read_mbps, 95)
+            cgroups_result.max_read_mbps = max(interval_read_mbps) if interval_read_mbps else None
+            cgroups_result.p95_read_service_time_ms = _percentile(interval_read_service_time_ms, 95)
+            cgroups_result.max_read_service_time_ms = (
+                max(interval_read_service_time_ms) if interval_read_service_time_ms else None
+            )
+        else:
+            # Insufficient eBPF samples for tail metrics - set to None for transparency
+            cgroups_result.p95_read_iops = None
+            cgroups_result.max_read_iops = None
+            cgroups_result.p95_read_mbps = None
+            cgroups_result.max_read_mbps = None
+            cgroups_result.p95_read_service_time_ms = None
+            cgroups_result.max_read_service_time_ms = None
 
     def pull_image(self, image: str, force: bool = False) -> bool:
         """Pull a Docker image if not present.
@@ -257,19 +512,58 @@ class ContainerRunner:
         start_time = time.monotonic()
 
         try:
-            # Create and start container
-            logger.info(f"{log_prefix}Starting container for {algorithm.name} ({mode} phase)")
-            container = self._client.containers.run(
+            # Issue #7 fix: Use create() + start() instead of run() to ensure
+            # the cgroups collector starts BEFORE the container executes any code.
+            # This eliminates the timing gap where fast containers (<100ms) could
+            # complete before metrics collection begins.
+            logger.info(f"{log_prefix}Creating container for {algorithm.name} ({mode} phase)")
+            container = self._client.containers.create(
                 algorithm.docker_image,
                 command=command,
                 volumes=volumes,
                 environment=algorithm.env_vars,
-                detach=True,
                 **resource_limits,
             )
 
-            # Start cgroups collector for metrics
-            self._cgroups_collector.start(container.id)
+            # Now start the container - this creates the cgroup on systemd/NixOS
+            logger.info(f"{log_prefix}Starting container {container.short_id}")
+            container.start()
+
+            # Start collectors immediately after container start
+            # We use a retry loop for finding the cgroup as there might be a race condition
+            # between start() returning and the cgroup appearing.
+            try:
+                # Basic retry loop for cgroup availability - CRITICAL
+                retries = 10
+                for i in range(retries):
+                    try:
+                        self._cgroups_collector.start(container.id)
+                        break
+                    except RuntimeError as e:
+                        if "Could not find cgroup path" in str(e) and i < retries - 1:
+                            # Wait and retry
+                            import time
+
+                            time.sleep(0.1)
+                            continue
+                        raise e
+            except Exception as e:
+                # If monitoring fails, we try to stop the container to clean up
+                # But realistically we just log and raise
+                logger.error(f"Failed to start cgroups collector: {e}")
+                container.stop()
+                raise RuntimeError(f"Failed to start cgroups collector: {e}") from e
+
+            # Start eBPF collector (Optional / Best Effort)
+            if self._use_ebpf:
+                try:
+                    self._ebpf_collector.start(container.id)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to start eBPF collector: {e}. "
+                        "Continuing with cgroups-only metrics (mmap I/O may be missed)."
+                    )
+                    self._use_ebpf = False
 
             # Wait for container to complete
             try:
@@ -282,53 +576,19 @@ class ContainerRunner:
             # Stop monitoring and collect metrics
             cgroups_result = self._cgroups_collector.stop()
 
+            # Stop eBPF and merge results if utilized
+            if self._use_ebpf:
+                try:
+                    ebpf_result = self._ebpf_collector.stop()
+                    self._merge_ebpf_io(cgroups_result, ebpf_result)
+                except Exception as e:
+                    logger.warning(f"Failed to stop/merge eBPF metrics: {e}")
+
             # Build ResourceSummary from cgroups metrics
-            resources = ResourceSummary(
-                peak_memory_mb=cgroups_result.peak_memory_mb,
-                avg_memory_mb=cgroups_result.avg_memory_mb,
-                cpu_time_total_seconds=cgroups_result.cpu_time_total_seconds,
-                avg_cpu_percent=cgroups_result.avg_cpu_percent,
-                peak_cpu_percent=cgroups_result.peak_cpu_percent,
-                total_blkio_read_mb=cgroups_result.total_read_bytes / (1024 * 1024),
-                total_blkio_write_mb=cgroups_result.total_write_bytes / (1024 * 1024),
-                total_read_ops=cgroups_result.total_read_ops,
-                total_write_ops=cgroups_result.total_write_ops,
-                avg_read_iops=cgroups_result.avg_read_iops,
-                avg_write_iops=cgroups_result.avg_write_iops,
-                total_read_usec=cgroups_result.total_read_usec,
-                total_write_usec=cgroups_result.total_write_usec,
-                io_pressure_some_total_usec=cgroups_result.io_pressure_some_total_usec,
-                io_pressure_full_total_usec=cgroups_result.io_pressure_full_total_usec,
-                pgmajfault_delta=cgroups_result.pgmajfault_delta,
-                pgfault_delta=cgroups_result.pgfault_delta,
-                avg_file_bytes=cgroups_result.avg_file_bytes,
-                peak_file_bytes=cgroups_result.peak_file_bytes,
-                avg_file_mapped_bytes=cgroups_result.avg_file_mapped_bytes,
-                peak_file_mapped_bytes=cgroups_result.peak_file_mapped_bytes,
-                avg_active_file_bytes=cgroups_result.avg_active_file_bytes,
-                peak_active_file_bytes=cgroups_result.peak_active_file_bytes,
-                avg_inactive_file_bytes=cgroups_result.avg_inactive_file_bytes,
-                peak_inactive_file_bytes=cgroups_result.peak_inactive_file_bytes,
-                nr_throttled_delta=cgroups_result.nr_throttled_delta,
-                throttled_usec_delta=cgroups_result.throttled_usec_delta,
-                top_read_device={
-                    "device": cgroups_result.top_read_device.device,
-                    "total_read_bytes": cgroups_result.top_read_device.total_read_bytes,
-                    "total_write_bytes": cgroups_result.top_read_device.total_write_bytes,
-                    "total_read_ops": cgroups_result.top_read_device.total_read_ops,
-                    "total_write_ops": cgroups_result.top_read_device.total_write_ops,
-                }
-                if cgroups_result.top_read_device
-                else None,
-                p95_read_iops=cgroups_result.p95_read_iops,
-                max_read_iops=cgroups_result.max_read_iops,
-                p95_read_mbps=cgroups_result.p95_read_mbps,
-                max_read_mbps=cgroups_result.max_read_mbps,
-                p95_read_service_time_ms=cgroups_result.p95_read_service_time_ms,
-                max_read_service_time_ms=cgroups_result.max_read_service_time_ms,
-                sample_count=cgroups_result.sample_count,
-                duration_seconds=cgroups_result.duration_seconds,
-                block_size=self._block_size,
+            resources = self._build_resource_summary(
+                cgroups_result,
+                run_id=run_id,
+                phase_label=f"{mode}/container",
             )
 
             logger.debug(
@@ -379,57 +639,26 @@ class ContainerRunner:
                         f"{log_prefix}Refining metrics to query window: {query_start} -> {query_end}"
                     )
 
-                    # Re-aggregate metrics filtering for the specific query window
+                    # Re-aggregate cgroups metrics for the query window
                     cgroups_result = self._cgroups_collector.get_summary(start_dt, end_dt)
 
+                    # Re-aggregate and merge eBPF I/O for the same window (preserves eBPF accuracy)
+                    if self._use_ebpf:
+                        try:
+                            ebpf_result = self._ebpf_collector.get_summary(start_dt, end_dt)
+                            self._merge_ebpf_io(cgroups_result, ebpf_result)
+                            logger.debug(
+                                f"Re-merged eBPF for query window: "
+                                f"read={ebpf_result.total_read_bytes}, write={ebpf_result.total_write_bytes}"
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to re-merge eBPF for query window: {e}")
+
                     # Update the resources object with the refined metrics
-                    resources = ResourceSummary(
-                        peak_memory_mb=cgroups_result.peak_memory_mb,
-                        avg_memory_mb=cgroups_result.avg_memory_mb,
-                        cpu_time_total_seconds=cgroups_result.cpu_time_total_seconds,
-                        avg_cpu_percent=cgroups_result.avg_cpu_percent,
-                        peak_cpu_percent=cgroups_result.peak_cpu_percent,
-                        total_blkio_read_mb=cgroups_result.total_read_bytes / (1024 * 1024),
-                        total_blkio_write_mb=cgroups_result.total_write_bytes / (1024 * 1024),
-                        total_read_ops=cgroups_result.total_read_ops,
-                        total_write_ops=cgroups_result.total_write_ops,
-                        avg_read_iops=cgroups_result.avg_read_iops,
-                        avg_write_iops=cgroups_result.avg_write_iops,
-                        total_read_usec=cgroups_result.total_read_usec,
-                        total_write_usec=cgroups_result.total_write_usec,
-                        io_pressure_some_total_usec=cgroups_result.io_pressure_some_total_usec,
-                        io_pressure_full_total_usec=cgroups_result.io_pressure_full_total_usec,
-                        pgmajfault_delta=cgroups_result.pgmajfault_delta,
-                        pgfault_delta=cgroups_result.pgfault_delta,
-                        avg_file_bytes=cgroups_result.avg_file_bytes,
-                        peak_file_bytes=cgroups_result.peak_file_bytes,
-                        avg_file_mapped_bytes=cgroups_result.avg_file_mapped_bytes,
-                        peak_file_mapped_bytes=cgroups_result.peak_file_mapped_bytes,
-                        avg_active_file_bytes=cgroups_result.avg_active_file_bytes,
-                        peak_active_file_bytes=cgroups_result.peak_active_file_bytes,
-                        avg_inactive_file_bytes=cgroups_result.avg_inactive_file_bytes,
-                        peak_inactive_file_bytes=cgroups_result.peak_inactive_file_bytes,
-                        nr_throttled_delta=cgroups_result.nr_throttled_delta,
-                        throttled_usec_delta=cgroups_result.throttled_usec_delta,
-                        top_read_device={
-                            "device": cgroups_result.top_read_device.device,
-                            "total_read_bytes": cgroups_result.top_read_device.total_read_bytes,
-                            "total_write_bytes": cgroups_result.top_read_device.total_write_bytes,
-                            "total_read_ops": cgroups_result.top_read_device.total_read_ops,
-                            "total_write_ops": cgroups_result.top_read_device.total_write_ops,
-                        }
-                        if cgroups_result.top_read_device
-                        else None,
-                        p95_read_iops=cgroups_result.p95_read_iops,
-                        max_read_iops=cgroups_result.max_read_iops,
-                        p95_read_mbps=cgroups_result.p95_read_mbps,
-                        max_read_mbps=cgroups_result.max_read_mbps,
-                        p95_read_service_time_ms=cgroups_result.p95_read_service_time_ms,
-                        max_read_service_time_ms=cgroups_result.max_read_service_time_ms,
-                        sample_count=cgroups_result.sample_count,
-                        duration_seconds=cgroups_result.duration_seconds,
-                        samples=[],  # Don't duplicate raw samples to save space
-                        block_size=self._block_size,
+                    resources = self._build_resource_summary(
+                        cgroups_result,
+                        run_id=run_id,
+                        persist_debug=False,
                     )
                     logger.info(
                         f"{log_prefix}Refined metrics: cpu={resources.avg_cpu_percent:.1f}%, "
@@ -462,52 +691,11 @@ class ContainerRunner:
                     we_dt = datetime.fromisoformat(warmup_end)
                     warmup_res = self._cgroups_collector.get_summary(ws_dt, we_dt)
 
-                    warmup_resources_obj = ResourceSummary(
-                        peak_memory_mb=warmup_res.peak_memory_mb,
-                        avg_memory_mb=warmup_res.avg_memory_mb,
-                        cpu_time_total_seconds=warmup_res.cpu_time_total_seconds,
-                        avg_cpu_percent=warmup_res.avg_cpu_percent,
-                        peak_cpu_percent=warmup_res.peak_cpu_percent,
-                        total_blkio_read_mb=warmup_res.total_read_bytes / (1024 * 1024),
-                        total_blkio_write_mb=warmup_res.total_write_bytes / (1024 * 1024),
-                        total_read_ops=warmup_res.total_read_ops,
-                        total_write_ops=warmup_res.total_write_ops,
-                        avg_read_iops=warmup_res.avg_read_iops,
-                        avg_write_iops=warmup_res.avg_write_iops,
-                        total_read_usec=warmup_res.total_read_usec,
-                        total_write_usec=warmup_res.total_write_usec,
-                        io_pressure_some_total_usec=warmup_res.io_pressure_some_total_usec,
-                        io_pressure_full_total_usec=warmup_res.io_pressure_full_total_usec,
-                        pgmajfault_delta=warmup_res.pgmajfault_delta,
-                        pgfault_delta=warmup_res.pgfault_delta,
-                        avg_file_bytes=warmup_res.avg_file_bytes,
-                        peak_file_bytes=warmup_res.peak_file_bytes,
-                        avg_file_mapped_bytes=warmup_res.avg_file_mapped_bytes,
-                        peak_file_mapped_bytes=warmup_res.peak_file_mapped_bytes,
-                        avg_active_file_bytes=warmup_res.avg_active_file_bytes,
-                        peak_active_file_bytes=warmup_res.peak_active_file_bytes,
-                        avg_inactive_file_bytes=warmup_res.avg_inactive_file_bytes,
-                        peak_inactive_file_bytes=warmup_res.peak_inactive_file_bytes,
-                        nr_throttled_delta=warmup_res.nr_throttled_delta,
-                        throttled_usec_delta=warmup_res.throttled_usec_delta,
-                        top_read_device={
-                            "device": warmup_res.top_read_device.device,
-                            "total_read_bytes": warmup_res.top_read_device.total_read_bytes,
-                            "total_write_bytes": warmup_res.top_read_device.total_write_bytes,
-                            "total_read_ops": warmup_res.top_read_device.total_read_ops,
-                            "total_write_ops": warmup_res.top_read_device.total_write_ops,
-                        }
-                        if warmup_res.top_read_device
-                        else None,
-                        p95_read_iops=warmup_res.p95_read_iops,
-                        max_read_iops=warmup_res.max_read_iops,
-                        p95_read_mbps=warmup_res.p95_read_mbps,
-                        max_read_mbps=warmup_res.max_read_mbps,
-                        p95_read_service_time_ms=warmup_res.p95_read_service_time_ms,
-                        max_read_service_time_ms=warmup_res.max_read_service_time_ms,
-                        sample_count=warmup_res.sample_count,
-                        duration_seconds=warmup_res.duration_seconds,
-                        block_size=self._block_size,
+                    warmup_resources_obj = self._build_resource_summary(
+                        warmup_res,
+                        include_samples=False,
+                        run_id=run_id,
+                        persist_debug=False,
                     )
                 except Exception as e:
                     logger.warning(f"Failed to calculate warmup metrics: {e}")

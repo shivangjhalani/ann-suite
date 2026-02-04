@@ -14,6 +14,8 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from ann_suite.core.constants import STANDARD_PAGE_SIZE
+
 # =============================================================================
 # Output TypedDicts for type-safe JSON serialization
 # =============================================================================
@@ -127,6 +129,21 @@ class MetadataDict(TypedDict):
     query_end_timestamp: str | None
 
 
+class DebugArtifactsDict(TypedDict):
+    """Debug artifacts pointer for traceability without bloating results.json.
+
+    Raw metric samples are stored in a separate JSONL file to enable:
+    - Post-hoc verification of metric calculations
+    - Diagnosis of anomalous readings
+    - Custom time-window analysis on historical data
+
+    The pointer includes path and sample count for quick reference.
+    """
+
+    samples_path: str | None
+    samples_count: int
+
+
 class BenchmarkSummaryDict(TypedDict):
     """Complete phase-structured benchmark result output.
 
@@ -137,6 +154,7 @@ class BenchmarkSummaryDict(TypedDict):
     - search: Query execution phase (primary benchmark data)
     - latency: Query latency distribution
     - metadata: Run metadata and timestamps
+    - debug_artifacts: Pointers to separate debug files (samples.jsonl)
     """
 
     algorithm: str
@@ -148,6 +166,7 @@ class BenchmarkSummaryDict(TypedDict):
     search: SearchPhaseDict
     latency: LatencyDict
     metadata: MetadataDict
+    debug_artifacts: DebugArtifactsDict
     hyperparameters: dict[str, Any]
 
 
@@ -305,6 +324,10 @@ class BenchmarkConfig(BaseModel):
     monitor_interval_ms: int = Field(
         default=100, ge=50, le=1000, description="Resource monitor interval"
     )
+    include_raw_samples: bool = Field(
+        default=False,
+        description="Also include raw samples in results_detailed.json (debug JSONL always stored)",
+    )
 
     @property
     def enabled_algorithms(self) -> list[AlgorithmConfig]:
@@ -408,6 +431,10 @@ class ResourceSummary(BaseModel):
     )
     samples: list[ResourceSample] = Field(default_factory=list, description="Raw samples")
     block_size: int = Field(default=4096, ge=512, description="Detected system block size in bytes")
+    debug_samples_path: Path | None = Field(
+        default=None,
+        description="Path to JSONL file containing raw samples for debugging",
+    )
 
 
 # =============================================================================
@@ -513,7 +540,7 @@ class DiskIOMetrics(BaseModel):
 
     # Standard page size for research comparability (4KB)
     # This is NOT the physical block size - it's a standardized unit for metrics
-    STANDARD_PAGE_SIZE: int = 4096
+    STANDARD_PAGE_SIZE: int = STANDARD_PAGE_SIZE
 
     # WARMUP phase I/O metrics (index loading)
     warmup_read_mb: float = Field(
@@ -778,84 +805,119 @@ class BenchmarkResult(BaseModel):
             algorithm=self.algorithm,
             dataset=self.dataset,
             timestamp=self.timestamp.isoformat(),
-            quality=QualityMetricsDict(
-                recall=round(self.recall, 6) if self.recall is not None else None,
-                qps=self.qps,
-            ),
-            build=BuildPhaseDict(
-                duration_seconds=self.total_build_time_seconds,
-                index_size_bytes=self.index_size_bytes,
-                cpu_time_seconds=self.cpu.build_cpu_time_seconds,
-                peak_cpu_percent=self.cpu.build_peak_cpu_percent,
-                peak_rss_mb=self.memory.build_peak_rss_mb,
-                error=self.build_result.error_message if self.build_result else None,
-            ),
-            warmup=WarmupPhaseDict(
-                duration_seconds=self._get_time_base("warmup_duration_seconds"),
-                cpu_time_seconds=self.cpu.warmup_cpu_time_seconds,
-                peak_cpu_percent=self.cpu.warmup_peak_cpu_percent,
-                peak_rss_mb=self.memory.warmup_peak_rss_mb,
-                read_mb=self.disk_io.warmup_read_mb,
-                write_mb=self.disk_io.warmup_write_mb,
-                io_stall_percent=self.disk_io.warmup_io_stall_percent,
-                major_faults_per_second=self.disk_io.warmup_major_faults_per_second,
-                file_cache_avg_mb=self.disk_io.warmup_file_cache_avg_mb,
-                file_cache_peak_mb=self.disk_io.warmup_file_cache_peak_mb,
-            ),
-            search=SearchPhaseDict(
-                duration_seconds=self._get_time_base("query_duration_seconds"),
-                cpu_time_seconds=self.cpu.search_cpu_time_seconds,
-                cpu_time_per_query_ms=self.cpu.search_cpu_time_per_query_ms,
-                avg_cpu_percent=self.cpu.search_avg_cpu_percent,
-                peak_cpu_percent=self.cpu.search_peak_cpu_percent,
-                peak_rss_mb=self.memory.search_peak_rss_mb,
-                avg_rss_mb=self.memory.search_avg_rss_mb,
-                disk_io=DiskIODict(
-                    avg_read_iops=self.disk_io.search_avg_read_iops,
-                    avg_write_iops=self.disk_io.search_avg_write_iops,
-                    avg_read_throughput_mbps=self.disk_io.search_avg_read_throughput_mbps,
-                    avg_write_throughput_mbps=self.disk_io.search_avg_write_throughput_mbps,
-                    total_read_mb=self.disk_io.search_total_read_mb,
-                    total_pages_read=self.disk_io.search_total_pages_read,
-                    total_pages_written=self.disk_io.search_total_pages_written,
-                    pages_per_query=self.disk_io.search_pages_per_query,
-                    # Service time proxy / efficiency metrics
-                    avg_bytes_per_read_op=self.disk_io.search_avg_bytes_per_read_op,
-                    avg_bytes_per_write_op=self.disk_io.search_avg_bytes_per_write_op,
-                    avg_read_service_time_ms=self.disk_io.search_avg_read_service_time_ms,
-                    avg_write_service_time_ms=self.disk_io.search_avg_write_service_time_ms,
-                    # Tail metrics (p95/max IOPS)
-                    p95_read_iops=self.disk_io.search_p95_read_iops,
-                    max_read_iops=self.disk_io.search_max_read_iops,
-                    p95_read_mbps=self.disk_io.search_p95_read_mbps,
-                    max_read_mbps=self.disk_io.search_max_read_mbps,
-                    p95_read_service_time_ms=self.disk_io.search_p95_read_service_time_ms,
-                    max_read_service_time_ms=self.disk_io.search_max_read_service_time_ms,
-                    # PSI stall metrics
-                    io_stall_percent=self.disk_io.search_io_stall_percent,
-                ),
-                major_faults_per_query=self.disk_io.search_major_faults_per_query,
-                major_faults_per_second=self.disk_io.search_major_faults_per_second,
-                file_cache_avg_mb=self.disk_io.search_file_cache_avg_mb,
-                file_cache_peak_mb=self.disk_io.search_file_cache_peak_mb,
-                error=self.search_result.error_message if self.search_result else None,
-            ),
-            latency=LatencyDict(
-                mean_ms=self.latency.mean_ms,
-                p50_ms=self.latency.p50_ms,
-                p95_ms=self.latency.p95_ms,
-                p99_ms=self.latency.p99_ms,
-                max_ms=self.latency.max_ms,
-            ),
-            metadata=MetadataDict(
-                run_id=str(self.run_id),
-                physical_block_size=self.disk_io.physical_block_size,
-                sample_count=self.disk_io.sample_count,
-                query_start_timestamp=self._get_time_base("query_start_timestamp"),
-                query_end_timestamp=self._get_time_base("query_end_timestamp"),
-            ),
+            quality=self._build_quality_dict(),
+            build=self._build_build_phase_dict(),
+            warmup=self._build_warmup_phase_dict(),
+            search=self._build_search_phase_dict(),
+            latency=self._build_latency_dict(),
+            metadata=self._build_metadata_dict(),
+            debug_artifacts=self._build_debug_artifacts_dict(),
             hyperparameters=self.hyperparameters,
         )
+
+    def _build_quality_dict(self) -> QualityMetricsDict:
+        return QualityMetricsDict(
+            recall=round(self.recall, 6) if self.recall is not None else None,
+            qps=self.qps,
+        )
+
+    def _build_build_phase_dict(self) -> BuildPhaseDict:
+        return BuildPhaseDict(
+            duration_seconds=self.total_build_time_seconds,
+            index_size_bytes=self.index_size_bytes,
+            cpu_time_seconds=self.cpu.build_cpu_time_seconds,
+            peak_cpu_percent=self.cpu.build_peak_cpu_percent,
+            peak_rss_mb=self.memory.build_peak_rss_mb,
+            error=self.build_result.error_message if self.build_result else None,
+        )
+
+    def _build_warmup_phase_dict(self) -> WarmupPhaseDict:
+        return WarmupPhaseDict(
+            duration_seconds=self._get_time_base("warmup_duration_seconds"),
+            cpu_time_seconds=self.cpu.warmup_cpu_time_seconds,
+            peak_cpu_percent=self.cpu.warmup_peak_cpu_percent,
+            peak_rss_mb=self.memory.warmup_peak_rss_mb,
+            read_mb=self.disk_io.warmup_read_mb,
+            write_mb=self.disk_io.warmup_write_mb,
+            io_stall_percent=self.disk_io.warmup_io_stall_percent,
+            major_faults_per_second=self.disk_io.warmup_major_faults_per_second,
+            file_cache_avg_mb=self.disk_io.warmup_file_cache_avg_mb,
+            file_cache_peak_mb=self.disk_io.warmup_file_cache_peak_mb,
+        )
+
+    def _build_search_phase_dict(self) -> SearchPhaseDict:
+        return SearchPhaseDict(
+            duration_seconds=self._get_time_base("query_duration_seconds"),
+            cpu_time_seconds=self.cpu.search_cpu_time_seconds,
+            cpu_time_per_query_ms=self.cpu.search_cpu_time_per_query_ms,
+            avg_cpu_percent=self.cpu.search_avg_cpu_percent,
+            peak_cpu_percent=self.cpu.search_peak_cpu_percent,
+            peak_rss_mb=self.memory.search_peak_rss_mb,
+            avg_rss_mb=self.memory.search_avg_rss_mb,
+            disk_io=self._build_disk_io_dict(),
+            major_faults_per_query=self.disk_io.search_major_faults_per_query,
+            major_faults_per_second=self.disk_io.search_major_faults_per_second,
+            file_cache_avg_mb=self.disk_io.search_file_cache_avg_mb,
+            file_cache_peak_mb=self.disk_io.search_file_cache_peak_mb,
+            error=self.search_result.error_message if self.search_result else None,
+        )
+
+    def _build_disk_io_dict(self) -> DiskIODict:
+        return DiskIODict(
+            avg_read_iops=self.disk_io.search_avg_read_iops,
+            avg_write_iops=self.disk_io.search_avg_write_iops,
+            avg_read_throughput_mbps=self.disk_io.search_avg_read_throughput_mbps,
+            avg_write_throughput_mbps=self.disk_io.search_avg_write_throughput_mbps,
+            total_read_mb=self.disk_io.search_total_read_mb,
+            total_pages_read=self.disk_io.search_total_pages_read,
+            total_pages_written=self.disk_io.search_total_pages_written,
+            pages_per_query=self.disk_io.search_pages_per_query,
+            # Service time proxy / efficiency metrics
+            avg_bytes_per_read_op=self.disk_io.search_avg_bytes_per_read_op,
+            avg_bytes_per_write_op=self.disk_io.search_avg_bytes_per_write_op,
+            avg_read_service_time_ms=self.disk_io.search_avg_read_service_time_ms,
+            avg_write_service_time_ms=self.disk_io.search_avg_write_service_time_ms,
+            # Tail metrics (p95/max IOPS)
+            p95_read_iops=self.disk_io.search_p95_read_iops,
+            max_read_iops=self.disk_io.search_max_read_iops,
+            p95_read_mbps=self.disk_io.search_p95_read_mbps,
+            max_read_mbps=self.disk_io.search_max_read_mbps,
+            p95_read_service_time_ms=self.disk_io.search_p95_read_service_time_ms,
+            max_read_service_time_ms=self.disk_io.search_max_read_service_time_ms,
+            # PSI stall metrics
+            io_stall_percent=self.disk_io.search_io_stall_percent,
+        )
+
+    def _build_latency_dict(self) -> LatencyDict:
+        return LatencyDict(
+            mean_ms=self.latency.mean_ms,
+            p50_ms=self.latency.p50_ms,
+            p95_ms=self.latency.p95_ms,
+            p99_ms=self.latency.p99_ms,
+            max_ms=self.latency.max_ms,
+        )
+
+    def _build_metadata_dict(self) -> MetadataDict:
+        return MetadataDict(
+            run_id=str(self.run_id),
+            physical_block_size=self.disk_io.physical_block_size,
+            sample_count=self.disk_io.sample_count,
+            query_start_timestamp=self._get_time_base("query_start_timestamp"),
+            query_end_timestamp=self._get_time_base("query_end_timestamp"),
+        )
+
+    def _build_debug_artifacts_dict(self) -> DebugArtifactsDict:
+        return DebugArtifactsDict(
+            samples_path=self._get_debug_samples_path(),
+            samples_count=self.disk_io.sample_count,
+        )
+
+    def _get_debug_samples_path(self) -> str | None:
+        """Resolve debug samples path from phase results if available."""
+        for phase in [self.search_result, self.build_result]:
+            if phase and phase.resources.debug_samples_path:
+                return str(phase.resources.debug_samples_path)
+        return None
 
     def to_flat_dict(self) -> dict[str, Any]:
         """Convert to flat dictionary for DataFrame/CSV creation.

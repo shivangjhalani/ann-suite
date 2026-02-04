@@ -81,6 +81,52 @@ class TopDeviceSummary:
     total_read_ops: int = 0
     total_write_ops: int = 0
 
+    def to_dict(self) -> dict[str, int | str]:
+        """Convert to dictionary for ResourceSummary serialization."""
+        return {
+            "device": self.device,
+            "total_read_bytes": self.total_read_bytes,
+            "total_write_bytes": self.total_write_bytes,
+            "total_read_ops": self.total_read_ops,
+            "total_write_ops": self.total_write_ops,
+        }
+
+
+@dataclass
+class FilteredSamplesMeta:
+    """Metadata about samples filtered during aggregation.
+
+    Records counts and reasons for filtered samples to avoid silent bias
+    and provide transparency into data quality.
+    """
+
+    # Total samples before any filtering
+    total_samples: int = 0
+
+    # CPU filtering: zero/uninitialized counters at boundaries
+    cpu_filtered_count: int = 0
+    cpu_filter_reason: str = ""
+
+    # Memory filtering: zero/uninitialized values
+    memory_filtered_count: int = 0
+    memory_filter_reason: str = ""
+
+    # I/O filtering: zero/uninitialized counters at boundaries
+    io_filtered_count: int = 0
+    io_filter_reason: str = ""
+
+    def to_dict(self) -> dict[str, int | str]:
+        """Convert to dictionary for serialization."""
+        return {
+            "total_samples": self.total_samples,
+            "cpu_filtered_count": self.cpu_filtered_count,
+            "cpu_filter_reason": self.cpu_filter_reason,
+            "memory_filtered_count": self.memory_filtered_count,
+            "memory_filter_reason": self.memory_filter_reason,
+            "io_filtered_count": self.io_filtered_count,
+            "io_filter_reason": self.io_filter_reason,
+        }
+
 
 @dataclass
 class CollectorResult:
@@ -133,6 +179,8 @@ class CollectorResult:
     duration_seconds: float = 0.0
     sample_count: int = 0
     samples: list[CollectorSample] | None = None
+    # Filtering metadata: tracks samples filtered during aggregation
+    filtered_samples_meta: FilteredSamplesMeta | None = None
 
 
 class BaseCollector(ABC):

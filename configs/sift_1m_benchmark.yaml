@@ -9,7 +9,7 @@ monitor_interval_ms: 100
 
 algorithms:
   - name: HNSW
-    disabled: false
+    disabled: true
     docker_image: ann-suite/hnsw:latest
     algorithm_type: memory
     build:

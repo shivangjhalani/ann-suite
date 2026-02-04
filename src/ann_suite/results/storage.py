@@ -122,7 +122,7 @@ class ResultsStorage:
             json.dump(data, f, indent=2, default=str)
 
     def _save_detailed_json(self, results: list[BenchmarkResult], path: Path) -> None:
-        """Save results with full details including samples.
+        """Save results with full details including samples (when enabled).
 
         Uses compact JSON (no indent) to reduce file size, especially for
         results with many samples or large parameter sets.

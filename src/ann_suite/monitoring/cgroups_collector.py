@@ -17,6 +17,7 @@ import math
 import re
 import threading
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -25,10 +26,77 @@ from ann_suite.monitoring.base import (
     CollectorResult,
     CollectorSample,
     DeviceIOStat,
+    FilteredSamplesMeta,
     TopDeviceSummary,
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Sample filtering predicates
+#
+# Explicit predicates for filtering samples during aggregation. Each predicate
+# returns True if the sample is VALID for that metric type. Filtering is minimal:
+# only invalid/missing timestamps, zero/uninitialized counters at boundaries,
+# and negative deltas are filtered.
+# ---------------------------------------------------------------------------
+
+
+def is_valid_cpu_sample(sample: CollectorSample) -> bool:
+    """Check if sample has valid CPU data.
+
+    Filters out samples where cpu_time_ns is zero, which indicates:
+    - Cgroup was destroyed before the sample was taken
+    - CPU controller not enabled
+    - Uninitialized counter at collection boundary
+    """
+    return sample.cpu_time_ns > 0
+
+
+def is_valid_memory_sample(sample: CollectorSample) -> bool:
+    """Check if sample has valid memory data.
+
+    Filters out samples where memory_usage_bytes is zero, which indicates:
+    - Cgroup was destroyed before the sample was taken
+    - Uninitialized counter at collection boundary
+    """
+    return sample.memory_usage_bytes > 0
+
+
+def is_valid_io_sample(sample: CollectorSample) -> bool:
+    """Check if sample has valid I/O data.
+
+    Filters out samples where all I/O counters are zero, which indicates:
+    - Cgroup was destroyed before the sample was taken
+    - No I/O activity recorded yet (uninitialized at boundary)
+
+    Note: A sample with any non-zero I/O field is considered valid, as
+    some workloads may only read or only write.
+    """
+    return (
+        sample.blkio_read_bytes > 0
+        or sample.blkio_write_bytes > 0
+        or sample.blkio_read_ops > 0
+        or sample.blkio_write_ops > 0
+    )
+
+
+def filter_samples(
+    samples: list[CollectorSample],
+    predicate: Callable[[CollectorSample], bool],
+) -> tuple[list[CollectorSample], int]:
+    """Filter samples using a predicate and return valid samples with count of filtered.
+
+    Args:
+        samples: List of samples to filter
+        predicate: Function returning True for valid samples
+
+    Returns:
+        Tuple of (valid_samples, filtered_count)
+    """
+    valid = [s for s in samples if predicate(s)]
+    return valid, len(samples) - len(valid)
 
 
 class CgroupsV2Collector(BaseCollector):
@@ -118,6 +186,9 @@ class CgroupsV2Collector(BaseCollector):
 
         logger.debug(f"Found cgroup path: {self._cgroup_path}")
 
+        # Fail fast if CPU controller is not enabled (Issue #1)
+        self._validate_cpu_controller_enabled()
+
         self._running = True
         self._start_time = time.monotonic()
         self._samples = []
@@ -140,12 +211,18 @@ class CgroupsV2Collector(BaseCollector):
             self._thread = None
 
         # Collect final sample synchronously for accurate deltas
-        if self._cgroup_path is not None:
+        # NOTE: We check if cgroup path still exists because Docker may have
+        # already cleaned up the cgroup when the container exited.
+        if self._cgroup_path is not None and self._cgroup_path.exists():
             final_sample = self._collect_sample()
             if final_sample is not None:
                 with self._lock:
                     self._samples.append(final_sample)
                 logger.debug("Collected final cgroups sample")
+        elif self._cgroup_path is not None:
+            logger.debug(
+                f"Skipping final sample - cgroup path no longer exists: {self._cgroup_path}"
+            )
 
         return self._aggregate_samples()
 
@@ -178,6 +255,67 @@ class CgroupsV2Collector(BaseCollector):
 
         logger.warning(f"Failed to find cgroup path for {container_id}")
         return None
+
+    def _validate_cpu_controller_enabled(self) -> None:
+        """Validate that the CPU controller is enabled for this container's cgroup.
+
+        The cgroup v2 CPU controller must be enabled in the parent's subtree_control
+        for cpu.stat to report accurate usage_usec values. Without it, CPU time
+        metrics will always be zero.
+
+        Raises:
+            RuntimeError: If CPU controller is not enabled with remediation guidance.
+        """
+        if self._cgroup_path is None:
+            return
+
+        # Check the container's cgroup parent for subtree_control
+        # Docker places containers in e.g., /sys/fs/cgroup/system.slice/docker-<id>.scope
+        # The parent (system.slice) must have 'cpu' in its cgroup.subtree_control
+        parent_path = self._cgroup_path.parent
+        subtree_control_path = parent_path / "cgroup.subtree_control"
+
+        if not subtree_control_path.exists():
+            # Also check at the container level (less common but possible)
+            subtree_control_path = self._cgroup_path / "cgroup.subtree_control"
+            if not subtree_control_path.exists():
+                raise RuntimeError(
+                    "cgroup.subtree_control not found for container cgroup hierarchy. "
+                    "Cannot validate CPU controller. Ensure cgroups v2 is properly mounted and "
+                    "the container runtime uses a delegated cgroup slice with CPU enabled."
+                )
+
+        try:
+            subtree_control = subtree_control_path.read_text().strip()
+            controllers = subtree_control.split()
+            logger.debug(f"cgroup.subtree_control at {subtree_control_path.parent}: {controllers}")
+
+            if "cpu" not in controllers:
+                # CPU controller not enabled - fail fast with clear remediation
+                container_short_id = self._container_id[:12] if self._container_id else "unknown"
+                raise RuntimeError(
+                    f"CPU controller not enabled for container {container_short_id}. "
+                    f"The cgroup at '{parent_path}' has subtree_control='{subtree_control}' "
+                    "which does not include 'cpu'. CPU time metrics will be unreliable.\n\n"
+                    "Remediation:\n"
+                    "1. Enable the CPU controller in the parent cgroup:\n"
+                    f"   echo '+cpu' | sudo tee {subtree_control_path}\n"
+                    "2. Or configure Docker/systemd to use a cgroup slice with CPU enabled.\n"
+                    "3. For systemd-managed Docker, ensure docker.service has:\n"
+                    "   Delegate=cpu cpuset io memory pids\n"
+                    "4. See docs/METRICS.md for detailed setup instructions."
+                )
+
+        except PermissionError as e:
+            raise RuntimeError(
+                f"Permission denied reading {subtree_control_path}: {e}. "
+                "Cannot validate CPU controller for container metrics."
+            ) from e
+        except OSError as e:
+            raise RuntimeError(
+                f"Error reading {subtree_control_path}: {e}. "
+                "Cannot validate CPU controller for container metrics."
+            ) from e
 
     def _monitor_loop(self) -> None:
         """Background loop that samples cgroup stats."""
@@ -258,15 +396,32 @@ class CgroupsV2Collector(BaseCollector):
         """
         result: dict[str, int] = {}
         cpu_stat_path = self._cgroup_path / "cpu.stat"  # type: ignore
+        container_label = self._container_id[:12] if self._container_id else "unknown"
 
         try:
             content = cpu_stat_path.read_text()
+            logger.debug(f"cpu.stat content for {container_label}: {content.strip()!r}")
             for line in content.strip().split("\n"):
                 parts = line.split()
                 if len(parts) == 2:
                     result[parts[0]] = int(parts[1])
-        except (FileNotFoundError, PermissionError):
-            pass
+            logger.debug(f"Parsed cpu.stat for {container_label}: {result}")
+        except FileNotFoundError:
+            # cpu.stat missing is unusual after passing CPU controller validation.
+            # This may indicate the cgroup was destroyed mid-collection.
+            # If we have collected samples, this is likely just the container exiting race.
+            if len(self._samples) > 0:
+                logger.debug(
+                    f"cpu.stat not found for container {container_label} (final sample). "
+                    "Container likely exited normally."
+                )
+            else:
+                logger.warning(
+                    f"cpu.stat not found for container {container_label} at {cpu_stat_path}. "
+                    "The cgroup may have been destroyed (container exited) before any samples were collected."
+                )
+        except PermissionError:
+            logger.warning(f"Permission denied reading cpu.stat for container {container_label}")
 
         return result
 
@@ -559,8 +714,12 @@ class CgroupsV2Collector(BaseCollector):
         if len(samples) < 5:
             logger.debug(f"Low sample count ({len(samples)}) - metrics may have higher variance")
 
+        filtered_meta = FilteredSamplesMeta(total_samples=len(samples))
+
         # Filter samples with valid memory only for memory metrics
-        memory_samples = [s for s in samples if s.memory_usage_bytes > 0]
+        memory_samples, filtered_memory = filter_samples(samples, is_valid_memory_sample)
+        filtered_meta.memory_filtered_count = filtered_memory
+        filtered_meta.memory_filter_reason = "memory_usage_bytes <= 0"
         if memory_samples:
             memory_values = [s.memory_usage_bytes / (1024 * 1024) for s in memory_samples]
             peak_memory_mb = max(memory_values)
@@ -571,8 +730,33 @@ class CgroupsV2Collector(BaseCollector):
 
         # CPU metrics - use all samples for accurate duration
         # Clamp deltas to non-negative to handle counter edge cases (reset, wraparound)
-        cpu_time_delta_ns = max(0, last_sample.cpu_time_ns - first_sample.cpu_time_ns)
+        # Filter out samples with zero cpu_time_ns (can happen if cgroup was destroyed mid-collection)
+        valid_cpu_samples, filtered_cpu = filter_samples(samples, is_valid_cpu_sample)
+        filtered_meta.cpu_filtered_count = filtered_cpu
+        filtered_meta.cpu_filter_reason = "cpu_time_ns <= 0"
+
+        if len(valid_cpu_samples) >= 2:
+            first_cpu_sample = valid_cpu_samples[0]
+            last_cpu_sample = valid_cpu_samples[-1]
+            cpu_time_delta_ns = max(0, last_cpu_sample.cpu_time_ns - first_cpu_sample.cpu_time_ns)
+        else:
+            # Fall back to using all samples if we don't have enough valid ones
+            cpu_time_delta_ns = max(0, last_sample.cpu_time_ns - first_sample.cpu_time_ns)
+
         cpu_time_total_seconds = cpu_time_delta_ns / 1e9
+
+        # Log warning if CPU time is zero but we have samples (indicates cgroup issue)
+        if cpu_time_total_seconds == 0.0 and len(samples) > 1:
+            # Check if cgroup path still exists to diagnose container cleanup timing
+            cgroup_still_exists = self._cgroup_path.exists() if self._cgroup_path else False
+            logger.warning(
+                f"CPU time is zero despite {len(samples)} samples over {duration:.2f}s. "
+                f"First cpu_time_ns={first_sample.cpu_time_ns}, "
+                f"Last cpu_time_ns={last_sample.cpu_time_ns}. "
+                f"Valid CPU samples: {len(valid_cpu_samples)}. "
+                f"Cgroup path exists: {cgroup_still_exists}. "
+                "The container was likely destroyed before the final sample was collected."
+            )
 
         # Calculate average CPU percent
         avg_cpu_percent = (cpu_time_total_seconds / duration * 100) if duration > 0 else 0.0
@@ -580,16 +764,21 @@ class CgroupsV2Collector(BaseCollector):
         # Calculate peak CPU percent by checking each interval
         # NOTE: We ignore very short intervals (<< configured sampling interval) because
         # they can occur around start/stop and produce exaggerated peak estimates.
+        # Also skip intervals where cpu_time_ns is 0 (cgroup was destroyed)
         min_interval_seconds = max(0.01, self._interval_seconds * 0.5)
         peak_cpu_percent = 0.0
         for i in range(1, len(samples)):
             s1 = samples[i - 1]
             s2 = samples[i]
 
+            # Skip intervals where either sample has zero CPU time (cgroup destroyed)
+            if s1.cpu_time_ns == 0 or s2.cpu_time_ns == 0:
+                continue
+
             interval_ns = s2.cpu_time_ns - s1.cpu_time_ns
             interval_duration = _duration_seconds(s1, s2)
 
-            if interval_duration >= min_interval_seconds:
+            if interval_duration >= min_interval_seconds and interval_ns > 0:
                 interval_cpu = (interval_ns / 1e9) / interval_duration * 100
                 peak_cpu_percent = max(peak_cpu_percent, interval_cpu)
 
@@ -598,18 +787,37 @@ class CgroupsV2Collector(BaseCollector):
         if peak_cpu_percent == 0.0 and duration > 0:
             peak_cpu_percent = avg_cpu_percent
 
-        # Calculate I/O metrics (use all samples for accurate deltas)
+        # Calculate I/O metrics (use valid samples with non-zero I/O data)
+        # Filter out samples that likely have incomplete data (cgroup destroyed)
+        valid_io_samples, filtered_io = filter_samples(samples, is_valid_io_sample)
+        filtered_meta.io_filtered_count = filtered_io
+        filtered_meta.io_filter_reason = "blkio counters all zero"
+
+        if len(valid_io_samples) >= 2:
+            first_io_sample = valid_io_samples[0]
+            last_io_sample = valid_io_samples[-1]
+        else:
+            # Fall back to all samples if no valid I/O samples found
+            first_io_sample = first_sample
+            last_io_sample = last_sample
+
         # Clamp deltas to non-negative to handle counter edge cases (reset, wraparound)
-        read_bytes_delta = max(0, last_sample.blkio_read_bytes - first_sample.blkio_read_bytes)
-        write_bytes_delta = max(0, last_sample.blkio_write_bytes - first_sample.blkio_write_bytes)
-        read_ops_delta = max(0, last_sample.blkio_read_ops - first_sample.blkio_read_ops)
-        write_ops_delta = max(0, last_sample.blkio_write_ops - first_sample.blkio_write_ops)
+        read_bytes_delta = max(
+            0, last_io_sample.blkio_read_bytes - first_io_sample.blkio_read_bytes
+        )
+        write_bytes_delta = max(
+            0, last_io_sample.blkio_write_bytes - first_io_sample.blkio_write_bytes
+        )
+        read_ops_delta = max(0, last_io_sample.blkio_read_ops - first_io_sample.blkio_read_ops)
+        write_ops_delta = max(0, last_io_sample.blkio_write_ops - first_io_sample.blkio_write_ops)
         avg_read_iops = (read_ops_delta / duration) if duration > 0 else 0.0
         avg_write_iops = (write_ops_delta / duration) if duration > 0 else 0.0
 
         # I/O latency deltas (rusec/wusec)
-        read_usec_delta = max(0, last_sample.blkio_read_usec - first_sample.blkio_read_usec)
-        write_usec_delta = max(0, last_sample.blkio_write_usec - first_sample.blkio_write_usec)
+        read_usec_delta = max(0, last_io_sample.blkio_read_usec - first_io_sample.blkio_read_usec)
+        write_usec_delta = max(
+            0, last_io_sample.blkio_write_usec - first_io_sample.blkio_write_usec
+        )
 
         # I/O pressure deltas (PSI totals)
         io_pressure_some_delta = max(
@@ -729,4 +937,5 @@ class CgroupsV2Collector(BaseCollector):
             max_read_service_time_ms=max_read_service_time_ms,
             duration_seconds=duration,
             sample_count=len(samples),
+            filtered_samples_meta=filtered_meta,
         )

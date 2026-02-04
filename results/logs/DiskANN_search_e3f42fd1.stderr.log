@@ -1,4 +1,0 @@
-Loaded 10000 queries from /data/sift-128-euclidean/queries.npy
-Loaded ground truth from /data/sift-128-euclidean/ground_truth.npy
-Opened file : /data/index/DiskANN/sift-128-euclidean/ann_disk.index
-Loaded index from /data/index/DiskANN/sift-128-euclidean in 29.47s

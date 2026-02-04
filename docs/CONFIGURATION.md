@@ -29,6 +29,7 @@ datasets:
 | `results_dir` | path | `"./results"` | Results output directory |
 | `index_dir` | path | `"./indices"` | Index output directory |
 | `monitor_interval_ms` | int | `100` | Resource sampling interval (50-1000) |
+| `include_raw_samples` | bool | `false` | Also include raw samples in results_detailed.json (debug files always stored separately) |
 | `algorithms` | list | `[]` | Algorithm configurations |
 | `datasets` | list | `[]` | Dataset configurations |
 

@@ -36,7 +36,7 @@ Run a comparison using a declarative config file.
 
 ```bash
 # Run a comparison between HNSW and DiskANN
-uv run ann-suite run --config configs/example.yaml
+sudo -E env PYTHONPATH="$PYTHONPATH" uv run ann-suite run --config configs/example.yaml  # Run benchmark sudo and env needed for eBPF
 ```
 
 ---
