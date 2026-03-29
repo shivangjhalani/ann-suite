@@ -397,15 +397,21 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
         n_queries = len(queries)
         qps = n_queries / total_time
 
-        latencies_sorted = sorted(latencies)
         mean_latency = sum(latencies) / len(latencies)
-        p50_idx = int(len(latencies) * 0.50)
-        p95_idx = min(int(len(latencies) * 0.95), len(latencies) - 1)
-        p99_idx = min(int(len(latencies) * 0.99), len(latencies) - 1)
 
-        p50_latency = latencies_sorted[p50_idx]
-        p95_latency = latencies_sorted[p95_idx]
-        p99_latency = latencies_sorted[p99_idx]
+        if batch_mode:
+            # Batch mode cannot measure per-query latency distribution
+            p50_latency = None
+            p95_latency = None
+            p99_latency = None
+        else:
+            latencies_sorted = sorted(latencies)
+            p50_idx = int(len(latencies) * 0.50)
+            p95_idx = min(int(len(latencies) * 0.95), len(latencies) - 1)
+            p99_idx = min(int(len(latencies) * 0.99), len(latencies) - 1)
+            p50_latency = latencies_sorted[p50_idx]
+            p95_latency = latencies_sorted[p95_idx]
+            p99_latency = latencies_sorted[p99_idx]
 
         # Compute recall if ground truth available
         recall = None

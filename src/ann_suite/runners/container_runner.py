@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -125,22 +126,27 @@ class ContainerRunner:
                 "See docs/METRICS.md for setup instructions."
             )
 
+
         self._cgroups_collector = CgroupsV2Collector(interval_ms=monitor_interval_ms)
 
-        # Initialize eBPF collector (graceful fallback if unavailable)
-        self._ebpf_collector = EBPFCollector(interval_ms=monitor_interval_ms)
-        self._use_ebpf = self._ebpf_collector.is_available()
-        if self._use_ebpf:
-            logger.info("EBPFCollector available - will use for high-precision block I/O tracing")
+        # Initialize eBPF collector for per-operation latency metrics (optional)
+        # Note: eBPF provides LATENCY histograms, cgroups provides VOLUME metrics
+        # eBPF uses device-based filtering (not cgroup-based) for accurate tracking
+        self._ebpf_collector: EBPFCollector | None = None
+        _ebpf = EBPFCollector(interval_ms=monitor_interval_ms)
+        if _ebpf.is_available():
+            self._ebpf_collector = _ebpf
+            logger.info("EBPFCollector available - will use for per-operation I/O latency metrics")
         else:
             logger.warning(
-                "EBPFCollector not available - falling back to cgroups I/O metrics (mmap I/O may be missed)"
+                "EBPFCollector not available (BCC not installed or missing CAP_SYS_ADMIN). "
+                "Per-operation I/O latency metrics will not be collected."
             )
 
         # Detect system block size once at initialization
         self._block_size = get_system_block_size()
         logger.info(
-            f"CgroupsV2Collector available - will collect metrics (block_size={self._block_size}, "
+            f"CgroupsV2Collector available - will collect volume metrics (block_size={self._block_size}, "
             f"include_raw_samples={include_raw_samples})"
         )
 
@@ -265,6 +271,9 @@ class ContainerRunner:
             samples=samples_payload,
             block_size=self._block_size,
             debug_samples_path=debug_path,
+            filtered_samples_meta=(
+                result.filtered_samples_meta.to_dict() if result.filtered_samples_meta else None
+            ),
         )
 
     def _convert_samples(self, samples: list[CollectorSample]) -> list[ResourceSample]:
@@ -345,95 +354,11 @@ class ContainerRunner:
 
         return debug_path
 
-    def _merge_ebpf_io(self, cgroups_result: CollectorResult, ebpf_result: CollectorResult) -> None:
-        """Merge eBPF I/O metrics into a cgroups result (mutates in place).
 
-        eBPF provides more accurate I/O metrics for memory-mapped files and
-        per-request timings. This replaces the I/O totals and IOPS in the
-        cgroups result while preserving CPU, memory, and other cgroups-only metrics.
-
-        Also replaces tail metrics (p95/max IOPS, etc.) from eBPF samples if available,
-        or clears them for transparency if eBPF samples are insufficient.
-        """
-        logger.debug(
-            f"Merging eBPF I/O: read={ebpf_result.total_read_bytes}, "
-            f"write={ebpf_result.total_write_bytes}, samples={ebpf_result.sample_count}"
-        )
-
-        # Replace I/O totals with eBPF values
-        cgroups_result.total_read_bytes = ebpf_result.total_read_bytes
-        cgroups_result.total_write_bytes = ebpf_result.total_write_bytes
-        cgroups_result.total_read_ops = ebpf_result.total_read_ops
-        cgroups_result.total_write_ops = ebpf_result.total_write_ops
-        cgroups_result.total_read_usec = ebpf_result.total_read_usec
-        cgroups_result.total_write_usec = ebpf_result.total_write_usec
-        cgroups_result.avg_read_iops = ebpf_result.avg_read_iops
-        cgroups_result.avg_write_iops = ebpf_result.avg_write_iops
-
-        # Compute tail metrics from eBPF samples for consistency
-        # If eBPF has enough samples, derive p95/max from them; else set to None for transparency
-        if ebpf_result.samples and len(ebpf_result.samples) >= 2:
-            import math
-
-            samples = ebpf_result.samples
-            samples = sorted(
-                samples,
-                key=lambda s: s.monotonic_time if s.monotonic_time > 0 else s.timestamp.timestamp(),
-            )
-
-            def _duration_seconds(s1: CollectorSample, s2: CollectorSample) -> float:
-                if s1.monotonic_time > 0 and s2.monotonic_time > 0:
-                    return s2.monotonic_time - s1.monotonic_time
-                return (s2.timestamp - s1.timestamp).total_seconds()
-
-            def _percentile(values: list[float], percentile: float) -> float | None:
-                if not values:
-                    return None
-                values_sorted = sorted(values)
-                rank = math.ceil((percentile / 100) * len(values_sorted)) - 1
-                index = max(0, min(rank, len(values_sorted) - 1))
-                return values_sorted[index]
-
-            min_interval = 0.01
-            interval_read_iops: list[float] = []
-            interval_read_mbps: list[float] = []
-            interval_read_service_time_ms: list[float] = []
-
-            for i in range(1, len(samples)):
-                s1 = samples[i - 1]
-                s2 = samples[i]
-                interval_duration = _duration_seconds(s1, s2)
-                if interval_duration < min_interval:
-                    continue
-
-                read_ops_delta = max(0, s2.blkio_read_ops - s1.blkio_read_ops)
-                read_bytes_delta = max(0, s2.blkio_read_bytes - s1.blkio_read_bytes)
-                read_usec_delta = max(0, s2.blkio_read_usec - s1.blkio_read_usec)
-
-                interval_read_iops.append(read_ops_delta / interval_duration)
-                interval_read_mbps.append((read_bytes_delta / (1024 * 1024)) / interval_duration)
-
-                if read_ops_delta > 0 and read_usec_delta > 0:
-                    interval_read_service_time_ms.append(
-                        (read_usec_delta / read_ops_delta) / 1000.0
-                    )
-
-            cgroups_result.p95_read_iops = _percentile(interval_read_iops, 95)
-            cgroups_result.max_read_iops = max(interval_read_iops) if interval_read_iops else None
-            cgroups_result.p95_read_mbps = _percentile(interval_read_mbps, 95)
-            cgroups_result.max_read_mbps = max(interval_read_mbps) if interval_read_mbps else None
-            cgroups_result.p95_read_service_time_ms = _percentile(interval_read_service_time_ms, 95)
-            cgroups_result.max_read_service_time_ms = (
-                max(interval_read_service_time_ms) if interval_read_service_time_ms else None
-            )
-        else:
-            # Insufficient eBPF samples for tail metrics - set to None for transparency
-            cgroups_result.p95_read_iops = None
-            cgroups_result.max_read_iops = None
-            cgroups_result.p95_read_mbps = None
-            cgroups_result.max_read_mbps = None
-            cgroups_result.p95_read_service_time_ms = None
-            cgroups_result.max_read_service_time_ms = None
+    # NOTE: _select_io_source and _apply_io_source were removed.
+    # New architecture: cgroups provides VOLUME metrics (bytes, ops),
+    # eBPF provides LATENCY metrics (per-operation histograms).
+    # No source selection needed - they are complementary.
 
     def pull_image(self, image: str, force: bool = False) -> bool:
         """Pull a Docker image if not present.
@@ -511,6 +436,43 @@ class ContainerRunner:
 
         start_time = time.monotonic()
 
+        # Issue #X: Robustly flush buffered I/O by executing 'sync' inside the container before exit.
+        # This requires wrapping the entrypoint/command in a shell.
+        create_kwargs = {"command": command}
+        try:
+            img = self._client.images.get(algorithm.docker_image)
+            img_cfg = img.attrs.get("Config", {})
+            orig_entrypoint = img_cfg.get("Entrypoint") or []
+
+            # Ensure list
+            if isinstance(orig_entrypoint, str):
+                orig_entrypoint = [orig_entrypoint]
+
+            # Construct full command
+            full_cmd = list(orig_entrypoint)
+            if command:
+                full_cmd.extend(command)
+
+            if full_cmd:
+                # Wrap: /bin/sh -c "exec ... ; sync"
+                # Use shlex to quote each part to preserve arguments
+                cmd_str = " ".join(shlex.quote(s) for s in full_cmd)
+                # We use '; sync; sleep 1' to ensure flush AND allow kernel counters to update
+                # before the cgroup is destroyed.
+                wrapped = f"{cmd_str}; sync; sleep 1"
+
+                logger.debug(f"{log_prefix}Sync-wrapped command: {wrapped}")
+
+                # Override entrypoint and command.
+                # Note: We must override entrypoint because if we leave it, Docker prepends it
+                # to our command, but we want to RUN it ourselves inside sh.
+                create_kwargs = {
+                    "entrypoint": ["/bin/sh", "-c"],
+                    "command": [wrapped],
+                }
+        except Exception as e:
+            logger.warning(f"Failed to wrap command with sync: {e}. I/O metrics might be inaccurate.")
+
         try:
             # Issue #7 fix: Use create() + start() instead of run() to ensure
             # the cgroups collector starts BEFORE the container executes any code.
@@ -519,9 +481,9 @@ class ContainerRunner:
             logger.info(f"{log_prefix}Creating container for {algorithm.name} ({mode} phase)")
             container = self._client.containers.create(
                 algorithm.docker_image,
-                command=command,
                 volumes=volumes,
                 environment=algorithm.env_vars,
+                **create_kwargs,
                 **resource_limits,
             )
 
@@ -554,16 +516,17 @@ class ContainerRunner:
                 container.stop()
                 raise RuntimeError(f"Failed to start cgroups collector: {e}") from e
 
-            # Start eBPF collector (Optional / Best Effort)
-            if self._use_ebpf:
+
+            # Start eBPF collector for per-operation latency metrics (if available)
+            # Uses device-based filtering (traces all I/O to the storage device)
+            if self._ebpf_collector is not None:
                 try:
-                    self._ebpf_collector.start(container.id)
+                    self._ebpf_collector.start(self.data_dir)
                 except Exception as e:
-                    logger.warning(
-                        f"Failed to start eBPF collector: {e}. "
-                        "Continuing with cgroups-only metrics (mmap I/O may be missed)."
-                    )
-                    self._use_ebpf = False
+                    logger.error(f"Failed to start eBPF collector: {e}")
+                    self._cgroups_collector.stop()
+                    container.stop()
+                    raise RuntimeError(f"Failed to start eBPF collector: {e}") from e
 
             # Wait for container to complete
             try:
@@ -573,31 +536,37 @@ class ContainerRunner:
                 logger.warning(f"Container wait failed: {e}")
                 exit_code = -1
 
+
+
+
             # Stop monitoring and collect metrics
             cgroups_result = self._cgroups_collector.stop()
 
-            # Stop eBPF and merge results if utilized
-            if self._use_ebpf:
-                try:
-                    ebpf_result = self._ebpf_collector.stop()
-                    self._merge_ebpf_io(cgroups_result, ebpf_result)
-                except Exception as e:
-                    logger.warning(f"Failed to stop/merge eBPF metrics: {e}")
+            # Stop eBPF and collect latency metrics (separate from volume metrics)
+            ebpf_metrics = self._ebpf_collector.stop() if self._ebpf_collector is not None else None
 
-            # Build ResourceSummary from cgroups metrics
+            # Build ResourceSummary from cgroups metrics (volume, CPU, memory)
             resources = self._build_resource_summary(
                 cgroups_result,
                 run_id=run_id,
                 phase_label=f"{mode}/container",
             )
 
+            # Log metrics from both sources
             logger.debug(
-                f"Collected metrics from cgroups: "
+                f"Cgroups metrics: "
                 f"cpu_time={cgroups_result.cpu_time_total_seconds:.2f}s, "
                 f"avg_cpu={cgroups_result.avg_cpu_percent:.1f}%, "
-                f"peak_cpu={cgroups_result.peak_cpu_percent:.1f}%, "
-                f"read_iops={cgroups_result.avg_read_iops:.1f}"
+                f"read_bytes={cgroups_result.total_read_bytes}, "
+                f"read_ops={cgroups_result.total_read_ops}"
             )
+            if ebpf_metrics is not None and (ebpf_metrics.read_ops > 0 or ebpf_metrics.write_ops > 0):
+                logger.debug(
+                    f"eBPF latency: "
+                    f"read_ops={ebpf_metrics.read_ops}, "
+                    f"read_p50={ebpf_metrics.read_latency.percentile(50)}us, "
+                    f"read_p99={ebpf_metrics.read_latency.percentile(99)}us"
+                )
 
             # Stream logs directly to files to reduce memory usage, keeping only a tail
             # for parsing (JSON output is expected at the end of stdout)
@@ -632,6 +601,7 @@ class ContainerRunner:
                 try:
                     from datetime import datetime
 
+
                     start_dt = datetime.fromisoformat(query_start)
                     end_dt = datetime.fromisoformat(query_end)
 
@@ -640,19 +610,8 @@ class ContainerRunner:
                     )
 
                     # Re-aggregate cgroups metrics for the query window
+                    # Note: eBPF latency histograms are for the entire run (not time-windowed)
                     cgroups_result = self._cgroups_collector.get_summary(start_dt, end_dt)
-
-                    # Re-aggregate and merge eBPF I/O for the same window (preserves eBPF accuracy)
-                    if self._use_ebpf:
-                        try:
-                            ebpf_result = self._ebpf_collector.get_summary(start_dt, end_dt)
-                            self._merge_ebpf_io(cgroups_result, ebpf_result)
-                            logger.debug(
-                                f"Re-merged eBPF for query window: "
-                                f"read={ebpf_result.total_read_bytes}, write={ebpf_result.total_write_bytes}"
-                            )
-                        except Exception as e:
-                            logger.warning(f"Failed to re-merge eBPF for query window: {e}")
 
                     # Update the resources object with the refined metrics
                     resources = self._build_resource_summary(
@@ -682,6 +641,7 @@ class ContainerRunner:
             warmup_start = output.get("warmup_start_timestamp", output.get("load_start_timestamp"))
             warmup_end = output.get("warmup_end_timestamp", output.get("load_end_timestamp"))
             warmup_resources_obj = None
+
 
             if warmup_start and warmup_end:
                 try:

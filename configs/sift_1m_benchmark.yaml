@@ -77,7 +77,7 @@ algorithms:
         num_threads: 4
         # Cache frequently accessed nodes in RAM to reduce disk I/O
         # 10000 nodes = ~5-10MB of RAM, significantly reduces pages_per_query
-        num_nodes_to_cache: 10000
+        num_nodes_to_cache: 0
       # ============================================================================
       # WARMUP CONFIGURATION (for disk-based algorithms)
       # ============================================================================

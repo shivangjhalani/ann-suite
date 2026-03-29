@@ -329,9 +329,9 @@ def _show_results_table(results: list[BenchmarkResult]) -> None:
         main_table.add_row("", "")
         main_table.add_row("[yellow]Latency[/]", "")
         main_table.add_row("  Mean", f"{lat.mean_ms:.3f} ms" if lat.mean_ms > 0 else "N/A")
-        main_table.add_row("  P50", f"{lat.p50_ms:.3f} ms" if lat.p50_ms > 0 else "N/A")
-        main_table.add_row("  P95", f"{lat.p95_ms:.3f} ms" if lat.p95_ms > 0 else "N/A")
-        main_table.add_row("  P99", f"[yellow]{lat.p99_ms:.3f} ms[/]" if lat.p99_ms > 0 else "N/A")
+        main_table.add_row("  P50", f"{lat.p50_ms:.3f} ms" if lat.p50_ms else "N/A")
+        main_table.add_row("  P95", f"{lat.p95_ms:.3f} ms" if lat.p95_ms else "N/A")
+        main_table.add_row("  P99", f"[yellow]{lat.p99_ms:.3f} ms[/]" if lat.p99_ms else "N/A")
 
         # Resource metrics (phase-separated)
         main_table.add_row("", "")

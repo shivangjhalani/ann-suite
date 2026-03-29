@@ -14,8 +14,6 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from ann_suite.core.constants import STANDARD_PAGE_SIZE
-
 # =============================================================================
 # Output TypedDicts for type-safe JSON serialization
 # =============================================================================
@@ -368,11 +366,12 @@ class ResourceSummary(BaseModel):
     total_write_ops: int = Field(default=0, ge=0, description="Total write I/O operations")
     avg_read_iops: float = Field(ge=0, description="Average read IOPS")
     avg_write_iops: float = Field(ge=0, description="Average write IOPS")
-    total_read_usec: int = Field(
-        default=0, ge=0, description="Total read service time from io.stat (microseconds)"
+    # Issue #5 fix: None when kernel does not expose rusec/wusec in io.stat
+    total_read_usec: int | None = Field(
+        default=None, ge=0, description="Total read service time from io.stat (microseconds)"
     )
-    total_write_usec: int = Field(
-        default=0, ge=0, description="Total write service time from io.stat (microseconds)"
+    total_write_usec: int | None = Field(
+        default=None, ge=0, description="Total write service time from io.stat (microseconds)"
     )
     io_pressure_some_total_usec: int = Field(
         default=0, ge=0, description="Total PSI io.some time (microseconds)"
@@ -434,6 +433,10 @@ class ResourceSummary(BaseModel):
     debug_samples_path: Path | None = Field(
         default=None,
         description="Path to JSONL file containing raw samples for debugging",
+    )
+    filtered_samples_meta: dict[str, int | str] | None = Field(
+        default=None,
+        description="Counts and reasons for samples filtered during aggregation",
     )
 
 
@@ -518,8 +521,13 @@ class MemoryMetrics(BaseModel):
     search_major_faults: int | None = Field(
         default=None, ge=0, description="Major page faults during search (disk-backed pages)"
     )
-    search_page_cache_hit_ratio: float | None = Field(
-        default=None, ge=0, le=1, description="Page cache hit ratio (0-1) during search"
+    # Issue #4 fix: Renamed from search_page_cache_hit_ratio to clarify what it measures
+    search_non_major_fault_ratio: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="Fraction of page faults that were minor (not requiring disk I/O). "
+        "Computed as 1 - (pgmajfault / pgfault). This is NOT a true cache hit ratio.",
     )
 
 
@@ -537,10 +545,6 @@ class DiskIOMetrics(BaseModel):
     - WARMUP: I/O during index loading (may include sequential reads, mmap faults)
     - SEARCH: I/O during query execution (primary metric for disk-based algorithms)
     """
-
-    # Standard page size for research comparability (4KB)
-    # This is NOT the physical block size - it's a standardized unit for metrics
-    STANDARD_PAGE_SIZE: int = STANDARD_PAGE_SIZE
 
     # WARMUP phase I/O metrics (index loading)
     warmup_read_mb: float = Field(
@@ -677,9 +681,9 @@ class LatencyMetrics(BaseModel):
     """
 
     mean_ms: float = Field(default=0.0, ge=0, description="Mean query latency in ms")
-    p50_ms: float = Field(default=0.0, ge=0, description="Median (p50) latency in ms")
-    p95_ms: float = Field(default=0.0, ge=0, description="95th percentile latency in ms")
-    p99_ms: float = Field(default=0.0, ge=0, description="99th percentile latency in ms")
+    p50_ms: float | None = Field(default=None, ge=0, description="Median (p50) latency in ms")
+    p95_ms: float | None = Field(default=None, ge=0, description="95th percentile latency in ms")
+    p99_ms: float | None = Field(default=None, ge=0, description="99th percentile latency in ms")
     max_ms: float | None = Field(default=None, ge=0, description="Maximum query latency in ms")
 
 
@@ -944,7 +948,6 @@ class BenchmarkResult(BaseModel):
         }
 
         # Flatten nested metrics with prefix
-        # Skip STANDARD_PAGE_SIZE as it's a class constant, not an instance field
         for prefix, metrics in [
             ("cpu", self.cpu),
             ("memory", self.memory),
@@ -952,9 +955,6 @@ class BenchmarkResult(BaseModel):
             ("latency", self.latency),
         ]:
             for key, value in metrics.model_dump().items():
-                # Skip class constants (uppercase names)
-                if key.isupper():
-                    continue
                 data[f"{prefix}_{key}"] = value
 
         # Flatten time bases if available

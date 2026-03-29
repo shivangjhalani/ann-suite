@@ -874,9 +874,9 @@ class CgroupsV2Collector(BaseCollector):
         interval_read_mbps: list[float] = []
         interval_read_service_time_ms: list[float] = []
 
-        for i in range(1, len(samples)):
-            s1 = samples[i - 1]
-            s2 = samples[i]
+        for i in range(1, len(valid_io_samples)):
+            s1 = valid_io_samples[i - 1]
+            s2 = valid_io_samples[i]
             interval_duration = _duration_seconds(s1, s2)
             if interval_duration < min_interval_seconds:
                 continue

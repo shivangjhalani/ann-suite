@@ -518,6 +518,20 @@ class BenchmarkEvaluator:
         build_output = build_result.output
         build_res = build_result.resources
 
+        # Validate build phase I/O: non-zero index size should have non-zero I/O
+        index_size_bytes = build_output.get("index_size_bytes", 0)
+        build_total_io_bytes = (
+            (build_res.total_blkio_read_mb + build_res.total_blkio_write_mb) * 1024 * 1024
+        )
+        if index_size_bytes and index_size_bytes > 0 and build_total_io_bytes == 0:
+            logger.warning(
+                f"Build phase produced non-zero index ({index_size_bytes / (1024 * 1024):.1f} MB) "
+                "but reported zero I/O. This is physically implausible and indicates "
+                "I/O metrics collection failed to capture the actual disk writes. "
+                "Possible causes: cgroups io.stat not updated, container exited before "
+                "final sample, or I/O was buffered in page cache without sync."
+            )
+
         # Handle search failure: return result with build info but no search metrics
         if not search_result.success:
             logger.warning(
@@ -576,12 +590,7 @@ class BenchmarkEvaluator:
                     sample_count=0,
                 ),
                 # Empty Latency metrics
-                latency=LatencyMetrics(
-                    mean_ms=0.0,
-                    p50_ms=0.0,
-                    p95_ms=0.0,
-                    p99_ms=0.0,
-                ),
+                latency=LatencyMetrics(mean_ms=0.0),
                 # Quality metrics are None for failed search
                 recall=None,
                 qps=None,
@@ -632,15 +641,16 @@ class BenchmarkEvaluator:
             search_cpu_time_per_query_ms=cpu_time_per_query_ms,
         )
 
-        # Calculate page cache hit ratio from page fault counters
+        # Calculate non-major fault ratio from page fault counters
+        # Issue #4 fix: Renamed from page_cache_hit_ratio to clarify what it measures
         # pgfault = total page faults (major + minor)
         # pgmajfault = major page faults (disk reads)
-        # hit_ratio = 1 - (major_faults / total_faults)
-        page_cache_hit_ratio = None
+        # non_major_fault_ratio = 1 - (major_faults / total_faults)
+        non_major_fault_ratio = None
         if search_res.pgfault_delta > 0:
-            page_cache_hit_ratio = 1.0 - (search_res.pgmajfault_delta / search_res.pgfault_delta)
+            non_major_fault_ratio = 1.0 - (search_res.pgmajfault_delta / search_res.pgfault_delta)
             # Clamp to valid range [0, 1] to handle edge cases
-            page_cache_hit_ratio = max(0.0, min(1.0, page_cache_hit_ratio))
+            non_major_fault_ratio = max(0.0, min(1.0, non_major_fault_ratio))
 
         # Aggregate Memory metrics (separated by phase: BUILD, WARMUP, SEARCH)
         memory = MemoryMetrics(
@@ -649,7 +659,7 @@ class BenchmarkEvaluator:
             search_peak_rss_mb=search_res.peak_memory_mb,
             search_avg_rss_mb=search_res.avg_memory_mb,
             search_major_faults=search_res.pgmajfault_delta,
-            search_page_cache_hit_ratio=page_cache_hit_ratio,
+            search_non_major_fault_ratio=non_major_fault_ratio,
         )
 
         # Aggregate Disk I/O metrics (CRITICAL for disk-based algorithms)
@@ -686,19 +696,20 @@ class BenchmarkEvaluator:
             search_avg_write_iops = 0.0
 
         # Compute service time proxy metrics (bytes per operation + service time)
+        # Issue #5 fix: total_read_usec/total_write_usec may be None if kernel doesn't expose rusec/wusec
         search_avg_bytes_per_read_op: float | None = None
         search_avg_bytes_per_write_op: float | None = None
         search_avg_read_service_time_ms: float | None = None
         search_avg_write_service_time_ms: float | None = None
         if search_res.total_read_ops > 0:
             search_avg_bytes_per_read_op = search_total_read_bytes / search_res.total_read_ops
-            if search_res.total_read_usec > 0:
+            if search_res.total_read_usec is not None and search_res.total_read_usec > 0:
                 search_avg_read_service_time_ms = (
                     search_res.total_read_usec / search_res.total_read_ops
                 ) / 1000.0
         if search_res.total_write_ops > 0:
             search_avg_bytes_per_write_op = search_total_write_bytes / search_res.total_write_ops
-            if search_res.total_write_usec > 0:
+            if search_res.total_write_usec is not None and search_res.total_write_usec > 0:
                 search_avg_write_service_time_ms = (
                     search_res.total_write_usec / search_res.total_write_ops
                 ) / 1000.0
@@ -718,7 +729,7 @@ class BenchmarkEvaluator:
                 search_res.io_pressure_some_total_usec / (io_time_base * 1_000_000)
             ) * 100.0
 
-        # Per-device summary (top device only)
+        # Per-device summary (top device only) with consistency check
         per_device_summary: list[dict[str, Any]] | None = None
         if search_res.top_read_device:
             device_name = str(search_res.top_read_device.get("device", ""))
@@ -726,7 +737,17 @@ class BenchmarkEvaluator:
             write_bytes = float(search_res.top_read_device.get("total_write_bytes", 0))
             read_ops = int(search_res.top_read_device.get("total_read_ops", 0))
             write_ops = int(search_res.top_read_device.get("total_write_ops", 0))
-            if device_name:
+
+            # Sanity check: per-device delta should not exceed aggregate totals
+            # If per-device read is >2x aggregate, likely cumulative values leaked through
+            if search_total_read_bytes > 0 and read_bytes > search_total_read_bytes * 2:
+                logger.warning(
+                    f"Per-device read ({read_bytes / (1024 * 1024):.1f} MB) exceeds "
+                    f"aggregate total ({search_total_read_mb:.1f} MB) by >2x. "
+                    f"This may indicate cumulative counter reported as delta. "
+                    f"Dropping per-device summary for device '{device_name}'."
+                )
+            elif device_name:
                 per_device_summary = [
                     {
                         "device": device_name,
@@ -822,20 +843,11 @@ class BenchmarkEvaluator:
         # Latency metrics from container output
         latency = LatencyMetrics(
             mean_ms=search_output.get("mean_latency_ms", 0.0),
-            p50_ms=search_output.get("p50_latency_ms", 0.0),
-            p95_ms=search_output.get("p95_latency_ms", 0.0),
-            p99_ms=search_output.get("p99_latency_ms", 0.0),
-            max_ms=search_output.get("max_latency_ms"),  # Default None if not provided
+            p50_ms=search_output.get("p50_latency_ms"),
+            p95_ms=search_output.get("p95_latency_ms"),
+            p99_ms=search_output.get("p99_latency_ms"),
+            max_ms=search_output.get("max_latency_ms"),
         )
-
-        # Warn if latency percentiles appear to be estimated (all equal = batch_mode)
-        if latency.mean_ms > 0 and latency.p50_ms == latency.p95_ms == latency.p99_ms:
-            logger.warning(
-                f"Latency percentiles are identical (p50=p95=p99={latency.p50_ms:.3f}ms). "
-                "This typically indicates batch_mode=True was used, which estimates "
-                "per-query latency rather than measuring it. Set batch_mode=False in "
-                "search config for accurate latency distribution."
-            )
 
         # Combine hyperparameters - use override if provided (for parameter sweeps)
         hyperparameters = {
