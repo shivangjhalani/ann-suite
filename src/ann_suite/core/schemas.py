@@ -77,16 +77,16 @@ class DiskIODict(TypedDict):
     max_read_service_time_ms: float | None
     # PSI stall metrics (future)
     io_stall_percent: float | None
-
-
-class PerDeviceIODict(TypedDict):
-    """Per-device I/O summary for multi-device systems."""
-
-    device: str
-    read_mb: float
-    write_mb: float
-    read_ops: int
-    write_ops: int
+    ebpf_read_ops: int
+    ebpf_write_ops: int
+    ebpf_read_latency_p50_us: int | None
+    ebpf_read_latency_p95_us: int | None
+    ebpf_read_latency_p99_us: int | None
+    ebpf_read_latency_max_us: int | None
+    ebpf_write_latency_p50_us: int | None
+    ebpf_write_latency_p95_us: int | None
+    ebpf_write_latency_p99_us: int | None
+    ebpf_write_latency_max_us: int | None
 
 
 class SearchPhaseDict(TypedDict):
@@ -228,6 +228,11 @@ class SearchConfig(BaseModel):
 
     timeout_seconds: int = Field(default=600, ge=10, description="Search phase timeout")
     k: int = Field(default=10, ge=1, le=1000, description="Number of neighbors to retrieve")
+    query_rounds: int = Field(
+        default=1,
+        ge=1,
+        description="Number of timed passes over the full query set",
+    )
     args: dict[str, Any] = Field(
         default_factory=dict, description="Algorithm-specific search args (can be list for sweeps)"
     )
@@ -259,8 +264,19 @@ class AlgorithmConfig(BaseModel):
     search: SearchConfig = Field(default_factory=SearchConfig)
     disabled: bool = Field(default=False)
     env_vars: dict[str, str] = Field(default_factory=dict)
-    cpu_limit: str | None = Field(default=None, description="CPU limit (e.g., '4' or '0-3')")
-    memory_limit: str | None = Field(default=None, description="Memory limit (e.g., '8g')")
+    cpu_limit: str | None = Field(
+        default=None,
+        description="CPU affinity/cpuset (e.g., '0-3'); this is not a CPU-time quota",
+    )
+    cpu_quota: float | None = Field(
+        default=None,
+        gt=0,
+        description="Hard CPU quota in logical CPUs (e.g., 4.0 permits four CPUs of CPU time)",
+    )
+    memory_limit: str | None = Field(
+        default=None,
+        description="Hard container memory limit (e.g., '8g'); swap is capped to the same value",
+    )
     datasets: list[str] = Field(
         default_factory=list,
         description="Dataset names to run on. Empty = all datasets",
@@ -338,8 +354,8 @@ class ResourceSample(BaseModel):
 
     timestamp: datetime
     memory_usage_bytes: int = Field(ge=0)
-    memory_limit_bytes: int = Field(ge=0)
-    memory_percent: float = Field(ge=0, le=100)
+    memory_limit_bytes: int | None = Field(default=None, ge=0)
+    memory_percent: float | None = Field(default=None, ge=0, le=100)
     cpu_percent: float = Field(ge=0)
     blkio_read_bytes: int = Field(default=0, ge=0)
     blkio_write_bytes: int = Field(default=0, ge=0)
@@ -438,6 +454,16 @@ class ResourceSummary(BaseModel):
         default=None,
         description="Counts and reasons for samples filtered during aggregation",
     )
+    ebpf_read_ops: int = Field(default=0, ge=0)
+    ebpf_write_ops: int = Field(default=0, ge=0)
+    ebpf_read_latency_p50_us: int | None = Field(default=None, ge=0)
+    ebpf_read_latency_p95_us: int | None = Field(default=None, ge=0)
+    ebpf_read_latency_p99_us: int | None = Field(default=None, ge=0)
+    ebpf_read_latency_max_us: int | None = Field(default=None, ge=0)
+    ebpf_write_latency_p50_us: int | None = Field(default=None, ge=0)
+    ebpf_write_latency_p95_us: int | None = Field(default=None, ge=0)
+    ebpf_write_latency_p99_us: int | None = Field(default=None, ge=0)
+    ebpf_write_latency_max_us: int | None = Field(default=None, ge=0)
 
 
 # =============================================================================
@@ -660,10 +686,18 @@ class DiskIOMetrics(BaseModel):
         default=None, ge=0, description="Peak file cache size during search (MB)"
     )
 
-    # Per-device I/O summary for multi-device systems
-    per_device_summary: list[dict[str, Any]] | None = Field(
-        default=None, description="Per-device I/O breakdown [{device, read_mb, write_mb, ...}]"
-    )
+    # Device-scoped eBPF metrics. These may include unrelated host I/O when
+    # the benchmark device is shared.
+    ebpf_read_ops: int = Field(default=0, ge=0)
+    ebpf_write_ops: int = Field(default=0, ge=0)
+    ebpf_read_latency_p50_us: int | None = Field(default=None, ge=0)
+    ebpf_read_latency_p95_us: int | None = Field(default=None, ge=0)
+    ebpf_read_latency_p99_us: int | None = Field(default=None, ge=0)
+    ebpf_read_latency_max_us: int | None = Field(default=None, ge=0)
+    ebpf_write_latency_p50_us: int | None = Field(default=None, ge=0)
+    ebpf_write_latency_p95_us: int | None = Field(default=None, ge=0)
+    ebpf_write_latency_p99_us: int | None = Field(default=None, ge=0)
+    ebpf_write_latency_max_us: int | None = Field(default=None, ge=0)
 
     # Metadata for transparency
     physical_block_size: int = Field(
@@ -890,6 +924,16 @@ class BenchmarkResult(BaseModel):
             max_read_service_time_ms=self.disk_io.search_max_read_service_time_ms,
             # PSI stall metrics
             io_stall_percent=self.disk_io.search_io_stall_percent,
+            ebpf_read_ops=self.disk_io.ebpf_read_ops,
+            ebpf_write_ops=self.disk_io.ebpf_write_ops,
+            ebpf_read_latency_p50_us=self.disk_io.ebpf_read_latency_p50_us,
+            ebpf_read_latency_p95_us=self.disk_io.ebpf_read_latency_p95_us,
+            ebpf_read_latency_p99_us=self.disk_io.ebpf_read_latency_p99_us,
+            ebpf_read_latency_max_us=self.disk_io.ebpf_read_latency_max_us,
+            ebpf_write_latency_p50_us=self.disk_io.ebpf_write_latency_p50_us,
+            ebpf_write_latency_p95_us=self.disk_io.ebpf_write_latency_p95_us,
+            ebpf_write_latency_p99_us=self.disk_io.ebpf_write_latency_p99_us,
+            ebpf_write_latency_max_us=self.disk_io.ebpf_write_latency_max_us,
         )
 
     def _build_latency_dict(self) -> LatencyDict:
@@ -1000,6 +1044,7 @@ class ContainerProtocol(BaseModel):
         queries_path: str = Field(..., description="Path to query vectors")
         ground_truth_path: str | None = Field(default=None)
         k: int = Field(default=10, ge=1)
+        query_rounds: int = Field(default=1, ge=1)
         batch_mode: bool = Field(default=True)
         search_args: dict[str, Any] = Field(default_factory=dict)
         # Warmup configuration
@@ -1024,6 +1069,7 @@ class ContainerProtocol(BaseModel):
         p50_latency_ms: float | None = Field(default=None, ge=0)
         p95_latency_ms: float | None = Field(default=None, ge=0)
         p99_latency_ms: float | None = Field(default=None, ge=0)
+        max_latency_ms: float | None = Field(default=None, ge=0)
         error_message: str | None = Field(default=None)
         # Phase timing for resource window filtering
         warmup_duration_seconds: float | None = Field(default=None, ge=0)

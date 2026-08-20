@@ -52,6 +52,7 @@ class DiskANNIndex:
         "IP": "mips",
         "inner_product": "mips",
         "cosine": "cosine",
+        "angular": "cosine",
     }
 
     def __init__(
@@ -103,7 +104,9 @@ class DiskANNIndex:
         """
         n_vectors, dimension = data.shape
         self.dimension = dimension
-        self.metric = self.METRIC_MAP.get(metric, "l2")
+        if metric not in self.METRIC_MAP:
+            raise ValueError(f"Unsupported DiskANN metric: {metric}")
+        self.metric = self.METRIC_MAP[metric]
         self.index_path = Path(index_path)
 
         # Create index directory (clean if exists to avoid diskannpy errors)
@@ -134,9 +137,7 @@ class DiskANNIndex:
             num_threads=self.num_threads,
             pq_disk_bytes=pq_disk_bytes,
             build_memory_maximum=build_memory_maximum,
-            search_memory_maximum=kwargs.get(
-                "search_memory_maximum", 0.5
-            ),  # Default to 0.5GB for search index construction
+            search_memory_maximum=kwargs.get("search_memory_maximum", 0.5),
             vector_dtype=np.float32,
         )
 
@@ -166,7 +167,9 @@ class DiskANNIndex:
             num_nodes_to_cache: Number of nodes to cache in RAM
         """
         self.dimension = dimension
-        self.metric = self.METRIC_MAP.get(metric, "l2")
+        if metric not in self.METRIC_MAP:
+            raise ValueError(f"Unsupported DiskANN metric: {metric}")
+        self.metric = self.METRIC_MAP[metric]
         self.index_path = Path(index_path)
 
         # Load the index with required parameters for diskannpy
@@ -279,6 +282,7 @@ def run_build(config: dict[str, Any]) -> dict[str, Any]:
             metric,
             pq_disk_bytes=build_args.get("pq_disk_bytes", 0),
             build_memory_maximum=build_args.get("build_memory_maximum", 2.0),
+            search_memory_maximum=build_args.get("search_memory_maximum", 0.5),
         )
 
         return {
@@ -317,6 +321,7 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
 
         # Extract configuration
         k = config.get("k", 10)
+        query_rounds = int(config.get("query_rounds", 1))
         batch_mode = config.get("batch_mode", True)
         Ls = search_args.get("Ls", 100)
         beam_width = search_args.get("beam_width", 2)
@@ -387,40 +392,55 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
         # Run timed search - emit timestamps for resource window filtering
         query_start_timestamp = datetime.now(UTC).isoformat()
         start_time = time.perf_counter()
-        indices, distances, latencies = index.search(
-            queries, k=k, Ls=Ls, beam_width=beam_width, batch_mode=batch_mode
-        )
+        first_round_indices: np.ndarray | None = None
+        first_round_latencies: list[float] | None = None
+        for round_idx in range(query_rounds):
+            round_indices, _, round_latencies = index.search(
+                queries,
+                k=k,
+                Ls=Ls,
+                beam_width=beam_width,
+                batch_mode=batch_mode,
+            )
+            if round_idx == 0:
+                first_round_indices = round_indices
+                first_round_latencies = round_latencies
         total_time = time.perf_counter() - start_time
         query_end_timestamp = datetime.now(UTC).isoformat()
 
-        # Compute metrics
-        n_queries = len(queries)
-        qps = n_queries / total_time
+        if first_round_indices is None or first_round_latencies is None:
+            raise RuntimeError("Search produced no results")
 
-        mean_latency = sum(latencies) / len(latencies)
+        # Compute metrics
+        first_round_query_count = len(queries)
+        total_queries = first_round_query_count * query_rounds
+        qps = total_queries / total_time
+
+        mean_latency = sum(first_round_latencies) / len(first_round_latencies)
 
         if batch_mode:
-            # Batch mode cannot measure per-query latency distribution
             p50_latency = None
             p95_latency = None
             p99_latency = None
+            max_latency = None
         else:
-            latencies_sorted = sorted(latencies)
-            p50_idx = int(len(latencies) * 0.50)
-            p95_idx = min(int(len(latencies) * 0.95), len(latencies) - 1)
-            p99_idx = min(int(len(latencies) * 0.99), len(latencies) - 1)
+            latencies_sorted = sorted(first_round_latencies)
+            p50_idx = int(len(first_round_latencies) * 0.50)
+            p95_idx = min(int(len(first_round_latencies) * 0.95), len(first_round_latencies) - 1)
+            p99_idx = min(int(len(first_round_latencies) * 0.99), len(first_round_latencies) - 1)
             p50_latency = latencies_sorted[p50_idx]
             p95_latency = latencies_sorted[p95_idx]
             p99_latency = latencies_sorted[p99_idx]
+            max_latency = latencies_sorted[-1]
 
         # Compute recall if ground truth available
         recall = None
         if ground_truth is not None:
-            recall = compute_recall(indices, ground_truth, k)
+            recall = compute_recall(first_round_indices, ground_truth, k)
 
         return {
             "status": "success",
-            "total_queries": n_queries,
+            "total_queries": total_queries,
             "total_time_seconds": total_time,
             "qps": qps,
             "recall": recall,
@@ -428,6 +448,7 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
             "p50_latency_ms": p50_latency,
             "p95_latency_ms": p95_latency,
             "p99_latency_ms": p99_latency,
+            "max_latency_ms": max_latency,
             # Warmup window for resource-metric separation
             "warmup_duration_seconds": warmup_duration_seconds,
             "query_start_timestamp": query_start_timestamp,

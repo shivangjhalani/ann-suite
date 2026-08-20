@@ -57,10 +57,7 @@ class LatencyHistogram:
     def add(self, latency_us: int) -> None:
         """Add a latency sample."""
         # Log2 bucket (1us, 2us, 4us, ..., up to ~1s)
-        if latency_us <= 0:
-            bucket = 0
-        else:
-            bucket = latency_us.bit_length() - 1
+        bucket = 0 if latency_us <= 0 else latency_us.bit_length() - 1
         self.buckets[bucket] = self.buckets.get(bucket, 0) + 1
         self.total_count += 1
         self.total_us += latency_us
@@ -117,114 +114,90 @@ class EBPFCollector:
     target storage device during the container's lifetime.
     """
 
-    # BPF Program with device-based filtering and latency tracking
+    # BPF program with device filtering and stable block tracepoints.
     BPF_PROGRAM = r"""
     #include <uapi/linux/ptrace.h>
-    #include <linux/blkdev.h>
-    #include <linux/blk-mq.h>
-    #include <linux/genhd.h>
 
-    #ifndef REQ_OP_MASK
-    #define REQ_OP_MASK ((1 << 8) - 1)
-    #endif
-    #define REQ_OP_READ 0
-    #define REQ_OP_WRITE 1
+    #define DEV_MINOR_MASK ((1 << 20) - 1)
 
-    struct start_req_t {
+    struct io_key_t {
+        u32 dev;
+        u64 sector;
+    };
+
+    struct start_io_t {
         u64 ts;
         u32 bytes;
+        u8 rwflag;
     };
 
     struct data_t {
         u64 delta_us;
         u32 bytes;
-        u8 rwflag;  // 0=read, 1=write
+        u8 rwflag;
     };
 
-    // Track in-flight requests by request pointer
-    BPF_HASH(start, struct request *, struct start_req_t);
-
-    // Perf buffer for completed I/O events
+    BPF_HASH(start, struct io_key_t, struct start_io_t);
     BPF_PERF_OUTPUT(events);
-
-    // Target device (major:minor) - set from userspace
     BPF_ARRAY(target_dev_major, u32, 1);
     BPF_ARRAY(target_dev_minor, u32, 1);
 
-    // Helper to get device from request
-    static inline int get_req_dev(struct request *req, u32 *major, u32 *minor) {
-        struct gendisk *disk = NULL;
-        bpf_probe_read_kernel(&disk, sizeof(disk), &req->q->disk);
-        if (!disk) {
-            return -1;
-        }
-        bpf_probe_read_kernel(major, sizeof(*major), &disk->major);
-        bpf_probe_read_kernel(minor, sizeof(*minor), &disk->first_minor);
-        return 0;
-    }
-
-    // KPROBE: Trace request start
-    int trace_req_start(struct pt_regs *ctx, struct request *req) {
-        u32 major = 0, minor = 0;
-
-        // Get device info
-        if (get_req_dev(req, &major, &minor) < 0) {
-            return 0;
-        }
-
-        // Filter by target device
+    static inline int target_device(u32 dev) {
         int key = 0;
         u32 *target_major = target_dev_major.lookup(&key);
         u32 *target_minor = target_dev_minor.lookup(&key);
-
-        if (target_major && target_minor) {
-            if (*target_major != 0 && (*target_major != major || *target_minor != minor)) {
-                return 0;  // Not our target device
-            }
+        if (!target_major || !target_minor || *target_major == 0) {
+            return 1;
         }
-
-        // Record start time and size
-        struct start_req_t val = {};
-        val.ts = bpf_ktime_get_ns();
-        bpf_probe_read_kernel(&val.bytes, sizeof(val.bytes), &req->__data_len);
-
-        start.update(&req, &val);
-        return 0;
+        return *target_major == (dev >> 20) &&
+               *target_minor == (dev & DEV_MINOR_MASK);
     }
 
-    // KPROBE: Trace request completion
-    int trace_req_done(struct pt_regs *ctx, struct request *req) {
-        struct start_req_t *stp;
-
-        stp = start.lookup(&req);
-        if (!stp) {
-            return 0;  // Missed start or filtered out
-        }
-
-        // Extract op type
-        u32 cmd_flags = 0;
-        bpf_probe_read_kernel(&cmd_flags, sizeof(cmd_flags), &req->cmd_flags);
-        u32 op = cmd_flags & REQ_OP_MASK;
-
-        // Only process READ and WRITE
-        if (op != REQ_OP_READ && op != REQ_OP_WRITE) {
-            start.delete(&req);
+    TRACEPOINT_PROBE(block, block_rq_issue) {
+        if (!target_device(args->dev)) {
             return 0;
         }
 
-        // Calculate latency
-        u64 ts = bpf_ktime_get_ns();
-        u64 delta_us = (ts - stp->ts) / 1000;
+        u8 rwflag = 0;
+        if (args->rwbs[0] == 'R') {
+            rwflag = 0;
+        } else if (args->rwbs[0] == 'W') {
+            rwflag = 1;
+        } else {
+            return 0;
+        }
 
-        // Emit event
+        struct io_key_t key = {};
+        key.dev = args->dev;
+        key.sector = args->sector;
+
+        struct start_io_t value = {};
+        value.ts = bpf_ktime_get_ns();
+        value.bytes = args->bytes;
+        value.rwflag = rwflag;
+        start.update(&key, &value);
+        return 0;
+    }
+
+    TRACEPOINT_PROBE(block, block_rq_complete) {
+        if (!target_device(args->dev)) {
+            return 0;
+        }
+
+        struct io_key_t key = {};
+        key.dev = args->dev;
+        key.sector = args->sector;
+        struct start_io_t *stp = start.lookup(&key);
+        if (!stp) {
+            return 0;
+        }
+
         struct data_t data = {};
-        data.delta_us = delta_us;
+        data.delta_us = (bpf_ktime_get_ns() - stp->ts) / 1000;
         data.bytes = stp->bytes;
-        data.rwflag = (op == REQ_OP_WRITE) ? 1 : 0;
-
-        start.delete(&req);
-        events.perf_submit(ctx, &data, sizeof(data));
-
+        data.rwflag = stp->rwflag;
+        start.delete(&key);
+        events.perf_submit(args, &data, sizeof(data));
         return 0;
     }
     """
@@ -265,9 +238,18 @@ class EBPFCollector:
         stat_result = os.stat(path)
         dev = stat_result.st_dev
 
-        # Extract major/minor
+        # Block tracepoints report the parent disk for partition-backed filesystems
+        # on some kernels (for example, ext4 on nvme0n1p2 reports nvme0n1).
         major = os.major(dev)
         minor = os.minor(dev)
+        sysfs_device = Path(f"/sys/dev/block/{major}:{minor}")
+        if (sysfs_device / "partition").exists():
+            parent_dev = sysfs_device.resolve().parent / "dev"
+            try:
+                parent_major, parent_minor = parent_dev.read_text().strip().split(":")
+                major, minor = int(parent_major), int(parent_minor)
+            except (OSError, ValueError):
+                logger.debug("Could not resolve parent block device for %s", path, exc_info=True)
 
         logger.debug(f"Resolved {path} to device {major}:{minor}")
         return major, minor
@@ -299,43 +281,7 @@ class EBPFCollector:
         try:
             self._bpf = BPF(text=self.BPF_PROGRAM)
 
-            # Attach kprobes
-            start_fn = "trace_req_start"
-            done_fn = "trace_req_done"
-
-            # Try different symbols for request start
-            start_attached = False
-            for sym in [b"blk_mq_start_request", b"blk_account_io_start"]:
-                if self._bpf.get_kprobe_functions(sym):
-                    try:
-                        self._bpf.attach_kprobe(event=sym, fn_name=start_fn)
-                        logger.debug(f"Attached kprobe to {sym.decode()}")
-                        start_attached = True
-                        break
-                    except Exception as e:
-                        logger.debug(f"Failed to attach to {sym.decode()}: {e}")
-
-            if not start_attached:
-                raise RuntimeError("Could not attach to any block I/O start function")
-
-            # Try different symbols for request completion
-            done_attached = False
-            for sym in [
-                b"blk_mq_end_request",
-                b"__blk_mq_end_request",
-                b"blk_account_io_done",
-            ]:
-                if self._bpf.get_kprobe_functions(sym):
-                    try:
-                        self._bpf.attach_kprobe(event=sym, fn_name=done_fn)
-                        logger.debug(f"Attached kprobe to {sym.decode()}")
-                        done_attached = True
-                        break
-                    except Exception as e:
-                        logger.debug(f"Failed to attach to {sym.decode()}: {e}")
-
-            if not done_attached:
-                raise RuntimeError("Could not attach to any block I/O completion function")
+            logger.debug("Attached block_rq_issue and block_rq_complete tracepoints")
 
             # Set target device in BPF maps
             import ctypes

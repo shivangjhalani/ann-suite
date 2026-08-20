@@ -900,7 +900,7 @@ class CgroupsV2Collector(BaseCollector):
             max(interval_read_service_time_ms) if interval_read_service_time_ms else None
         )
 
-        return CollectorResult(
+        result = CollectorResult(
             cpu_time_total_seconds=cpu_time_total_seconds,
             avg_cpu_percent=avg_cpu_percent,
             peak_cpu_percent=peak_cpu_percent,
@@ -939,3 +939,5 @@ class CgroupsV2Collector(BaseCollector):
             sample_count=len(samples),
             filtered_samples_meta=filtered_meta,
         )
+        result.samples = samples
+        return result

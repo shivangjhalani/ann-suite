@@ -29,7 +29,7 @@ from ann_suite.core.constants import MAX_LOG_FILES_PER_TYPE
 from ann_suite.core.schemas import AlgorithmConfig, ResourceSample, ResourceSummary
 from ann_suite.monitoring.base import CollectorResult, CollectorSample, get_system_block_size
 from ann_suite.monitoring.cgroups_collector import CgroupsV2Collector
-from ann_suite.monitoring.ebpf_collector import EBPFCollector
+from ann_suite.monitoring.ebpf_collector import EBPFCollector, EBPFMetrics
 
 if TYPE_CHECKING:
     from docker.models.containers import Container
@@ -207,6 +207,7 @@ class ContainerRunner:
         *,
         persist_debug: bool = True,
         phase_label: str | None = None,
+        ebpf_metrics: EBPFMetrics | None = None,
     ) -> ResourceSummary:
         """Build a ResourceSummary from CollectorResult.
 
@@ -227,7 +228,10 @@ class ContainerRunner:
         samples_payload: list[ResourceSample] = []
         if result.samples:
             if persist_debug:
-                debug_path = self._persist_debug_samples(result.samples, run_id, phase_label)
+                try:
+                    debug_path = self._persist_debug_samples(result.samples, run_id, phase_label)
+                except OSError as exc:
+                    logger.warning("Unable to persist debug samples: %s", exc)
             if include_samples:
                 samples_payload = self._convert_samples(result.samples)
 
@@ -274,6 +278,16 @@ class ContainerRunner:
             filtered_samples_meta=(
                 result.filtered_samples_meta.to_dict() if result.filtered_samples_meta else None
             ),
+            ebpf_read_ops=ebpf_metrics.read_ops if ebpf_metrics else 0,
+            ebpf_write_ops=ebpf_metrics.write_ops if ebpf_metrics else 0,
+            ebpf_read_latency_p50_us=ebpf_metrics.read_latency.percentile(50) if ebpf_metrics else None,
+            ebpf_read_latency_p95_us=ebpf_metrics.read_latency.percentile(95) if ebpf_metrics else None,
+            ebpf_read_latency_p99_us=ebpf_metrics.read_latency.percentile(99) if ebpf_metrics else None,
+            ebpf_read_latency_max_us=ebpf_metrics.read_latency.max() if ebpf_metrics else None,
+            ebpf_write_latency_p50_us=ebpf_metrics.write_latency.percentile(50) if ebpf_metrics else None,
+            ebpf_write_latency_p95_us=ebpf_metrics.write_latency.percentile(95) if ebpf_metrics else None,
+            ebpf_write_latency_p99_us=ebpf_metrics.write_latency.percentile(99) if ebpf_metrics else None,
+            ebpf_write_latency_max_us=ebpf_metrics.write_latency.max() if ebpf_metrics else None,
         )
 
     def _convert_samples(self, samples: list[CollectorSample]) -> list[ResourceSample]:
@@ -282,8 +296,8 @@ class ContainerRunner:
             ResourceSample(
                 timestamp=s.timestamp,
                 memory_usage_bytes=s.memory_usage_bytes,
-                memory_limit_bytes=0,
-                memory_percent=0.0,
+                memory_limit_bytes=None,
+                memory_percent=None,
                 cpu_percent=s.cpu_percent,
                 blkio_read_bytes=s.blkio_read_bytes,
                 blkio_write_bytes=s.blkio_write_bytes,
@@ -523,10 +537,8 @@ class ContainerRunner:
                 try:
                     self._ebpf_collector.start(self.data_dir)
                 except Exception as e:
-                    logger.error(f"Failed to start eBPF collector: {e}")
-                    self._cgroups_collector.stop()
-                    container.stop()
-                    raise RuntimeError(f"Failed to start eBPF collector: {e}") from e
+                    logger.warning("Disabling eBPF for this phase; cgroup metrics remain enabled: %s", e)
+                    self._ebpf_collector = None
 
             # Wait for container to complete
             try:
@@ -550,6 +562,7 @@ class ContainerRunner:
                 cgroups_result,
                 run_id=run_id,
                 phase_label=f"{mode}/container",
+                ebpf_metrics=ebpf_metrics,
             )
 
             # Log metrics from both sources
@@ -618,6 +631,7 @@ class ContainerRunner:
                         cgroups_result,
                         run_id=run_id,
                         persist_debug=False,
+                        ebpf_metrics=ebpf_metrics,
                     )
                     logger.info(
                         f"{log_prefix}Refined metrics: cpu={resources.avg_cpu_percent:.1f}%, "
@@ -766,6 +780,10 @@ class ContainerRunner:
 
         if algorithm.memory_limit:
             limits["mem_limit"] = algorithm.memory_limit
+            limits["memswap_limit"] = algorithm.memory_limit
+
+        if algorithm.cpu_quota:
+            limits["nano_cpus"] = int(algorithm.cpu_quota * 1_000_000_000)
 
         return limits
 

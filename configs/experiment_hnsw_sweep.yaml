@@ -1,0 +1,35 @@
+name: "HNSW Parameter Sweep on SIFT-10K"
+description: "Sweep ef values to generate recall-QPS tradeoff curve"
+data_dir: "./library/datasets"
+results_dir: "./results"
+index_dir: "./indices"
+monitor_interval_ms: 50
+
+algorithms:
+  - name: HNSW
+    docker_image: ann-suite/hnsw:latest
+    algorithm_type: memory
+    cpu_limit: "0-3"
+    cpu_quota: 4.0
+    memory_limit: "4g"
+    build:
+      timeout_seconds: 600
+      args:
+        M: 16
+        ef_construction: 200
+        num_threads: 4
+    search:
+      timeout_seconds: 300
+      k: 10
+      query_rounds: 40
+      batch_mode: false
+      args:
+        ef: [10, 30, 50, 100, 200, 400]
+
+datasets:
+  - name: sift-10k
+    base_path: sift-10k/base.npy
+    query_path: sift-10k/queries.npy
+    ground_truth_path: sift-10k/ground_truth.npy
+    distance_metric: L2
+    dimension: 128

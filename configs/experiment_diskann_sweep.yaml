@@ -1,52 +1,35 @@
-name: "HNSW vs DiskANN on SIFT-10K"
-description: "Quick test benchmark comparing in-memory and disk-based algorithms"
+name: "DiskANN Parameter Sweep on SIFT-10K"
+description: "Sweep Ls values to generate recall-QPS tradeoff curve"
 data_dir: "./library/datasets"
 results_dir: "./results"
 index_dir: "./indices"
+monitor_interval_ms: 50
 
 algorithms:
-  # In-memory algorithm
-  - name: HNSW
-    docker_image: ann-suite/hnsw:latest
-    algorithm_type: memory
-    cpu_limit: "0-3"
-    cpu_quota: 4.0
-    memory_limit: "4g"
-    build:
-      timeout_seconds: 600
-      args:
-        M: 16
-        ef_construction: 200
-    search:
-      timeout_seconds: 600
-      k: 10
-      query_rounds: 40
-      args:
-        ef: 100
-
-  # Disk-based algorithm
   - name: DiskANN
     docker_image: ann-suite/diskann:latest
     algorithm_type: disk
     cpu_limit: "0-3"
     cpu_quota: 4.0
-    memory_limit: "4g"
+    memory_limit: "1g"
     build:
       timeout_seconds: 1800
       args:
         R: 64
         L: 100
+        alpha: 1.2
         num_threads: 4
-        # ADVISORY hints for index optimization (NOT hard limits)
         build_memory_maximum: 2.0
         search_memory_maximum: 0.5
     search:
-      timeout_seconds: 600
+      timeout_seconds: 300
       k: 10
+      batch_mode: false
       args:
-        Ls: 100
+        Ls: [30, 50, 100, 200]
         beam_width: 2
         num_threads: 4
+        num_nodes_to_cache: 0
 
 datasets:
   - name: sift-10k

@@ -443,6 +443,7 @@ class BenchmarkEvaluator:
             "index_path": f"/data/index/{algo_config.name}/{dataset_config.name}",
             "queries_path": f"/data/{dataset_config.name}/queries.npy",
             "k": algo_config.search.k,
+            "query_rounds": algo_config.search.query_rounds,
             "search_args": search_args,
             "dimension": dataset_config.dimension,
             "metric": dataset_config.distance_metric.value,
@@ -523,7 +524,12 @@ class BenchmarkEvaluator:
         build_total_io_bytes = (
             (build_res.total_blkio_read_mb + build_res.total_blkio_write_mb) * 1024 * 1024
         )
-        if index_size_bytes and index_size_bytes > 0 and build_total_io_bytes == 0:
+        if (
+            algo_config.algorithm_type.value == "disk"
+            and index_size_bytes
+            and index_size_bytes > 0
+            and build_total_io_bytes == 0
+        ):
             logger.warning(
                 f"Build phase produced non-zero index ({index_size_bytes / (1024 * 1024):.1f} MB) "
                 "but reported zero I/O. This is physically implausible and indicates "
@@ -729,35 +735,6 @@ class BenchmarkEvaluator:
                 search_res.io_pressure_some_total_usec / (io_time_base * 1_000_000)
             ) * 100.0
 
-        # Per-device summary (top device only) with consistency check
-        per_device_summary: list[dict[str, Any]] | None = None
-        if search_res.top_read_device:
-            device_name = str(search_res.top_read_device.get("device", ""))
-            read_bytes = float(search_res.top_read_device.get("total_read_bytes", 0))
-            write_bytes = float(search_res.top_read_device.get("total_write_bytes", 0))
-            read_ops = int(search_res.top_read_device.get("total_read_ops", 0))
-            write_ops = int(search_res.top_read_device.get("total_write_ops", 0))
-
-            # Sanity check: per-device delta should not exceed aggregate totals
-            # If per-device read is >2x aggregate, likely cumulative values leaked through
-            if search_total_read_bytes > 0 and read_bytes > search_total_read_bytes * 2:
-                logger.warning(
-                    f"Per-device read ({read_bytes / (1024 * 1024):.1f} MB) exceeds "
-                    f"aggregate total ({search_total_read_mb:.1f} MB) by >2x. "
-                    f"This may indicate cumulative counter reported as delta. "
-                    f"Dropping per-device summary for device '{device_name}'."
-                )
-            elif device_name:
-                per_device_summary = [
-                    {
-                        "device": device_name,
-                        "read_mb": read_bytes / (1024 * 1024),
-                        "write_mb": write_bytes / (1024 * 1024),
-                        "read_ops": read_ops,
-                        "write_ops": write_ops,
-                    }
-                ]
-
         search_major_faults_per_query: float | None = None
         if num_queries > 0:
             search_major_faults_per_query = search_res.pgmajfault_delta / num_queries
@@ -826,8 +803,16 @@ class BenchmarkEvaluator:
             search_major_faults_per_second=search_major_faults_per_second,
             search_file_cache_avg_mb=search_file_cache_avg_mb,
             search_file_cache_peak_mb=search_file_cache_peak_mb,
-            # Per-device summary
-            per_device_summary=per_device_summary,
+            ebpf_read_ops=search_res.ebpf_read_ops,
+            ebpf_write_ops=search_res.ebpf_write_ops,
+            ebpf_read_latency_p50_us=search_res.ebpf_read_latency_p50_us,
+            ebpf_read_latency_p95_us=search_res.ebpf_read_latency_p95_us,
+            ebpf_read_latency_p99_us=search_res.ebpf_read_latency_p99_us,
+            ebpf_read_latency_max_us=search_res.ebpf_read_latency_max_us,
+            ebpf_write_latency_p50_us=search_res.ebpf_write_latency_p50_us,
+            ebpf_write_latency_p95_us=search_res.ebpf_write_latency_p95_us,
+            ebpf_write_latency_p99_us=search_res.ebpf_write_latency_p99_us,
+            ebpf_write_latency_max_us=search_res.ebpf_write_latency_max_us,
             # Metadata for transparency
             physical_block_size=search_res.block_size,
             sample_count=search_res.sample_count,
@@ -871,7 +856,9 @@ class BenchmarkEvaluator:
             recall=search_output.get("recall"),
             qps=search_output.get("qps"),
             # Build summary
-            total_build_time_seconds=build_result.duration_seconds,
+            total_build_time_seconds=build_output.get(
+                "build_time_seconds", build_result.duration_seconds
+            ),
             index_size_bytes=build_output.get("index_size_bytes"),
             # Configuration
             hyperparameters=hyperparameters,

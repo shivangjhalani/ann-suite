@@ -109,6 +109,10 @@ class TestEBPFCollector:
             c = EBPFCollector()
             assert c.is_available() is False
 
+    def test_bcc_bindings_are_available(self) -> None:
+        """The development environment must expose the real BCC bindings."""
+        assert EBPFCollector().is_available() is True
+
     def test_handle_event(self, collector: EBPFCollector) -> None:
         event = MagicMock()
         event.rwflag = 0  # Read
