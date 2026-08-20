@@ -97,7 +97,7 @@ algorithms:
     #   - "0-3"     : Cores 0, 1, 2, 3
     #   - "0,2,4,6" : Specific cores only
     #   - "4"       : Single core limit
-    cpu_limit: "0-3"
+    cpu_affinity: "0-3"
 
     # Optional: Memory limit for the container (Docker memory constraint)
     # Formats: "8g", "4096m", "2g"
@@ -132,7 +132,7 @@ algorithms:
                               # - Default: 200
 
         num_threads: 4        # Threads for parallel construction
-                              # - Match to cpu_limit for best results
+                              # - Match to cpu_affinity for best results
 
     # SEARCH PHASE configuration
     search:
@@ -214,7 +214,7 @@ algorithms:
   - name: DiskANN
     docker_image: ann-suite/diskann:latest
     algorithm_type: disk
-    cpu_limit: "0-3"
+    cpu_affinity: "0-3"
 
     # DiskANN can run with limited RAM (index is on disk)
     # This is a hard container limit, not advisory

@@ -335,6 +335,11 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
         mean_latency = sum(first_round_latencies) / len(first_round_latencies)
 
         if batch_mode:
+            print(
+                "WARNING: batch_mode=true — latency percentiles (p50/p95/p99/max) "
+                "are not available; only mean latency is reported.",
+                file=sys.stderr,
+            )
             p50_latency = None
             p95_latency = None
             p99_latency = None

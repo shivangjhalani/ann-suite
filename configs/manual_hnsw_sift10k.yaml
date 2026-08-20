@@ -9,8 +9,7 @@ algorithms:
   - name: HNSW
     docker_image: ann-suite/hnsw:latest
     algorithm_type: memory
-    cpu_limit: "0-3"
-    cpu_quota: 4.0
+    cpu_affinity: "0-3"
     memory_limit: "4g"
     build:
       timeout_seconds: 600
@@ -28,8 +27,7 @@ algorithms:
   - name: DiskANN
     docker_image: ann-suite/diskann:latest
     algorithm_type: disk
-    cpu_limit: "0-3"
-    cpu_quota: 4.0
+    cpu_affinity: "0-3"
     memory_limit: "4g"
     build:
       timeout_seconds: 1800

@@ -33,7 +33,7 @@ Many high-performance numerical libraries (like Intel MKL, OpenBLAS, and FAISS) 
 
 ### 4. CPU Affinity (`cpuset_cpus`)
 OS schedulers constantly move processes between cores to balance heat and load. This "migration" wipes CPU caches (L1/L2), causing massive performance implementations.
-*   **The Setting**: `cpu_limit="0-3"` restricts placement to those logical CPUs. Add `cpu_quota: 4.0` when a hard CPU-time cap is required; affinity alone is not a quota.
+*   **The Setting**: `cpu_affinity="0-3"` restricts placement to those logical CPUs.
 
 ## Reproducing These Results
 All these optimizations are applied automatically by the `ContainerRunner`. You do not need to manually configure them. They are baked into the Python runner logic to ensuring that `ann-suite run` is always a valid scientific measurement.

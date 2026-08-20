@@ -146,9 +146,8 @@ class CollectorResult:
     avg_read_iops: float = 0.0
     avg_write_iops: float = 0.0
     # I/O latency totals (delta of rusec/wusec)
-    # Issue #5 fix: None when kernel does not expose rusec/wusec in io.stat
-    total_read_usec: int | None = None
-    total_write_usec: int | None = None
+    total_read_usec: int = 0
+    total_write_usec: int = 0
     # I/O pressure (PSI deltas)
     io_pressure_some_total_usec: int = 0
     io_pressure_full_total_usec: int = 0

@@ -60,6 +60,7 @@ class DiskIODict(TypedDict):
     avg_read_throughput_mbps: float
     avg_write_throughput_mbps: float
     total_read_mb: float
+    total_write_mb: float
     total_pages_read: int
     total_pages_written: int
     pages_per_query: float | None
@@ -75,8 +76,9 @@ class DiskIODict(TypedDict):
     max_read_mbps: float | None
     p95_read_service_time_ms: float | None
     max_read_service_time_ms: float | None
-    # PSI stall metrics (future)
+    # PSI stall metrics
     io_stall_percent: float | None
+    io_full_stall_percent: float | None
 
 
 class SearchPhaseDict(TypedDict):
@@ -92,8 +94,11 @@ class SearchPhaseDict(TypedDict):
     disk_io: DiskIODict
     major_faults_per_query: float | None
     major_faults_per_second: float | None
+    non_major_fault_ratio: float | None
     file_cache_avg_mb: float | None
     file_cache_peak_mb: float | None
+    cpu_nr_throttled: int
+    cpu_throttled_usec: int
     error: str | None
 
 
@@ -254,14 +259,9 @@ class AlgorithmConfig(BaseModel):
     search: SearchConfig = Field(default_factory=SearchConfig)
     disabled: bool = Field(default=False)
     env_vars: dict[str, str] = Field(default_factory=dict)
-    cpu_limit: str | None = Field(
+    cpu_affinity: str | None = Field(
         default=None,
-        description="CPU affinity/cpuset (e.g., '0-3'); this is not a CPU-time quota",
-    )
-    cpu_quota: float | None = Field(
-        default=None,
-        gt=0,
-        description="Hard CPU quota in logical CPUs (e.g., 4.0 permits four CPUs of CPU time)",
+        description="CPU core affinity/cpuset (e.g., '0-3'); pins container to these cores",
     )
     memory_limit: str | None = Field(
         default=None,
@@ -373,11 +373,11 @@ class ResourceSummary(BaseModel):
     avg_read_iops: float = Field(ge=0, description="Average read IOPS")
     avg_write_iops: float = Field(ge=0, description="Average write IOPS")
     # Issue #5 fix: None when kernel does not expose rusec/wusec in io.stat
-    total_read_usec: int | None = Field(
-        default=None, ge=0, description="Total read service time from io.stat (microseconds)"
+    total_read_usec: int = Field(
+        default=0, ge=0, description="Total read service time from io.stat (microseconds)"
     )
-    total_write_usec: int | None = Field(
-        default=None, ge=0, description="Total write service time from io.stat (microseconds)"
+    total_write_usec: int = Field(
+        default=0, ge=0, description="Total write service time from io.stat (microseconds)"
     )
     io_pressure_some_total_usec: int = Field(
         default=0, ge=0, description="Total PSI io.some time (microseconds)"
@@ -491,7 +491,22 @@ class CPUMetrics(BaseModel):
 
     # CPU time per query (stable comparison metric)
     search_cpu_time_per_query_ms: float = Field(
-        default=0.0, ge=0, description="CPU time per query in milliseconds (query window)"
+        default=0.0,
+        ge=0,
+        description="Aggregate CPU time per query in milliseconds (total CPU time across all "
+        "threads divided by query count; may exceed wall-clock latency on multi-threaded runs)",
+    )
+
+    # CPU throttling metrics (from cgroups cpu.stat)
+    search_nr_throttled: int = Field(
+        default=0,
+        ge=0,
+        description="Number of times the CPU was throttled during search phase",
+    )
+    search_throttled_usec: int = Field(
+        default=0,
+        ge=0,
+        description="Total microseconds the CPU was throttled during search phase",
     )
 
 
@@ -591,9 +606,12 @@ class DiskIOMetrics(BaseModel):
         default=0.0, ge=0, description="Average write throughput in MB/s during search phase"
     )
 
-    # SEARCH phase page-level metrics (standardized 4KB pages)
+    # SEARCH phase total volume metrics
     search_total_read_mb: float = Field(
         default=0.0, ge=0, description="Total MB read during search phase"
+    )
+    search_total_write_mb: float = Field(
+        default=0.0, ge=0, description="Total MB written during search phase"
     )
     search_total_pages_read: int = Field(
         default=0, ge=0, description="Total 4KB pages read during search phase"
@@ -651,7 +669,14 @@ class DiskIOMetrics(BaseModel):
 
     # PSI (Pressure Stall Information) metrics - Linux 4.20+
     search_io_stall_percent: float | None = Field(
-        default=None, ge=0, le=100, description="Percentage of time stalled on I/O (from PSI)"
+        default=None, ge=0, le=100, description="Percentage of time stalled on I/O (from PSI some)"
+    )
+    search_io_full_stall_percent: float | None = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description="Percentage of time ALL tasks stalled on I/O (from PSI full). "
+        "More severe than io_stall_percent; indicates complete I/O blockage.",
     )
     search_major_faults_per_query: float | None = Field(
         default=None, ge=0, description="Major page faults per query during search"
@@ -665,7 +690,16 @@ class DiskIOMetrics(BaseModel):
     search_file_cache_peak_mb: float | None = Field(
         default=None, ge=0, description="Peak file cache size during search (MB)"
     )
-
+    # File cache breakdown: mapped (page cache backed), active, inactive
+    search_file_mapped_avg_mb: float | None = Field(
+        default=None, ge=0, description="Average mapped file bytes during search (MB)"
+    )
+    search_file_active_avg_mb: float | None = Field(
+        default=None, ge=0, description="Average active file cache during search (MB)"
+    )
+    search_file_inactive_avg_mb: float | None = Field(
+        default=None, ge=0, description="Average inactive file cache during search (MB)"
+    )
 
     # Metadata for transparency
     physical_block_size: int = Field(
@@ -863,8 +897,11 @@ class BenchmarkResult(BaseModel):
             disk_io=self._build_disk_io_dict(),
             major_faults_per_query=self.disk_io.search_major_faults_per_query,
             major_faults_per_second=self.disk_io.search_major_faults_per_second,
+            non_major_fault_ratio=self.memory.search_non_major_fault_ratio,
             file_cache_avg_mb=self.disk_io.search_file_cache_avg_mb,
             file_cache_peak_mb=self.disk_io.search_file_cache_peak_mb,
+            cpu_nr_throttled=self.cpu.search_nr_throttled,
+            cpu_throttled_usec=self.cpu.search_throttled_usec,
             error=self.search_result.error_message if self.search_result else None,
         )
 
@@ -875,6 +912,7 @@ class BenchmarkResult(BaseModel):
             avg_read_throughput_mbps=self.disk_io.search_avg_read_throughput_mbps,
             avg_write_throughput_mbps=self.disk_io.search_avg_write_throughput_mbps,
             total_read_mb=self.disk_io.search_total_read_mb,
+            total_write_mb=self.disk_io.search_total_write_mb,
             total_pages_read=self.disk_io.search_total_pages_read,
             total_pages_written=self.disk_io.search_total_pages_written,
             pages_per_query=self.disk_io.search_pages_per_query,
@@ -892,6 +930,7 @@ class BenchmarkResult(BaseModel):
             max_read_service_time_ms=self.disk_io.search_max_read_service_time_ms,
             # PSI stall metrics
             io_stall_percent=self.disk_io.search_io_stall_percent,
+            io_full_stall_percent=self.disk_io.search_io_full_stall_percent,
         )
 
     def _build_latency_dict(self) -> LatencyDict:

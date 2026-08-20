@@ -572,6 +572,8 @@ class BenchmarkEvaluator:
                     search_avg_cpu_percent=0.0,
                     search_peak_cpu_percent=0.0,
                     search_cpu_time_per_query_ms=0.0,
+                    search_nr_throttled=0,
+                    search_throttled_usec=0,
                 ),
                 # Build-only Memory metrics
                 memory=MemoryMetrics(
@@ -589,6 +591,7 @@ class BenchmarkEvaluator:
                     search_avg_read_throughput_mbps=0.0,
                     search_avg_write_throughput_mbps=0.0,
                     search_total_read_mb=0.0,
+                    search_total_write_mb=0.0,
                     search_total_pages_read=0,
                     search_total_pages_written=0,
                     search_pages_per_query=None,
@@ -645,6 +648,9 @@ class BenchmarkEvaluator:
             search_avg_cpu_percent=search_res.avg_cpu_percent,
             search_peak_cpu_percent=search_res.peak_cpu_percent,
             search_cpu_time_per_query_ms=cpu_time_per_query_ms,
+            # CPU throttling (from cgroups cpu.stat)
+            search_nr_throttled=search_res.nr_throttled_delta,
+            search_throttled_usec=search_res.throttled_usec_delta,
         )
 
         # Calculate non-major fault ratio from page fault counters
@@ -669,8 +675,11 @@ class BenchmarkEvaluator:
         )
 
         # Aggregate Disk I/O metrics (CRITICAL for disk-based algorithms)
-        # Use query_duration as the CONSISTENT time base for all rate metrics
-        io_time_base = query_duration if query_duration > 0 else search_res.duration_seconds
+        # Use cgroups sample span as the PRIMARY time base for all rate metrics.
+        # This ensures consistency: numerators come from cgroups counters (measured over the
+        # sample span), so denominators must use the same window. Fall back to algorithm
+        # wall-clock only if cgroups duration is unavailable.
+        io_time_base = search_res.duration_seconds if search_res.duration_seconds > 0 else query_duration
 
         # Warn if we can't compute throughput
         if io_time_base <= 0:
@@ -709,13 +718,13 @@ class BenchmarkEvaluator:
         search_avg_write_service_time_ms: float | None = None
         if search_res.total_read_ops > 0:
             search_avg_bytes_per_read_op = search_total_read_bytes / search_res.total_read_ops
-            if search_res.total_read_usec is not None and search_res.total_read_usec > 0:
+            if search_res.total_read_usec > 0:
                 search_avg_read_service_time_ms = (
                     search_res.total_read_usec / search_res.total_read_ops
                 ) / 1000.0
         if search_res.total_write_ops > 0:
             search_avg_bytes_per_write_op = search_total_write_bytes / search_res.total_write_ops
-            if search_res.total_write_usec is not None and search_res.total_write_usec > 0:
+            if search_res.total_write_usec > 0:
                 search_avg_write_service_time_ms = (
                     search_res.total_write_usec / search_res.total_write_ops
                 ) / 1000.0
@@ -744,6 +753,24 @@ class BenchmarkEvaluator:
 
         search_file_cache_avg_mb = search_res.avg_file_bytes / (1024 * 1024)
         search_file_cache_peak_mb = search_res.peak_file_bytes / (1024 * 1024)
+
+        # File cache breakdown: mapped, active, inactive
+        search_file_mapped_avg_mb: float | None = None
+        search_file_active_avg_mb: float | None = None
+        search_file_inactive_avg_mb: float | None = None
+        if search_res.avg_file_mapped_bytes > 0:
+            search_file_mapped_avg_mb = search_res.avg_file_mapped_bytes / (1024 * 1024)
+        if search_res.avg_active_file_bytes > 0:
+            search_file_active_avg_mb = search_res.avg_active_file_bytes / (1024 * 1024)
+        if search_res.avg_inactive_file_bytes > 0:
+            search_file_inactive_avg_mb = search_res.avg_inactive_file_bytes / (1024 * 1024)
+
+        # PSI io.full stall percent (complete I/O blockage)
+        search_io_full_stall_percent: float | None = None
+        if io_time_base > 0 and search_res.io_pressure_full_total_usec > 0:
+            search_io_full_stall_percent = (
+                search_res.io_pressure_full_total_usec / (io_time_base * 1_000_000)
+            ) * 100.0
 
         warmup_io_stall_percent: float | None = None
         warmup_major_faults_per_second: float | None = None
@@ -780,6 +807,7 @@ class BenchmarkEvaluator:
             ),
             # SEARCH phase page metrics (standardized 4KB pages)
             search_total_read_mb=search_total_read_mb,
+            search_total_write_mb=search_total_write_mb,
             search_total_pages_read=search_total_pages_read,
             search_total_pages_written=search_total_pages_written,
             search_pages_per_query=(
@@ -799,10 +827,15 @@ class BenchmarkEvaluator:
             search_max_read_service_time_ms=search_max_read_service_time_ms,
             # PSI stall metrics
             search_io_stall_percent=search_io_stall_percent,
+            search_io_full_stall_percent=search_io_full_stall_percent,
             search_major_faults_per_query=search_major_faults_per_query,
             search_major_faults_per_second=search_major_faults_per_second,
             search_file_cache_avg_mb=search_file_cache_avg_mb,
             search_file_cache_peak_mb=search_file_cache_peak_mb,
+            # File cache breakdown
+            search_file_mapped_avg_mb=search_file_mapped_avg_mb,
+            search_file_active_avg_mb=search_file_active_avg_mb,
+            search_file_inactive_avg_mb=search_file_inactive_avg_mb,
             # Metadata for transparency
             physical_block_size=search_res.block_size,
             sample_count=search_res.sample_count,

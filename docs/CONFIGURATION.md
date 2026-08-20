@@ -42,8 +42,7 @@ algorithms:
   - name: HNSW
     docker_image: ann-suite/hnsw:latest
     algorithm_type: memory
-    cpu_limit: "0-3"
-    cpu_quota: 4.0
+    cpu_affinity: "0-3"
     memory_limit: "8g"
     disabled: false
     env_vars:
@@ -68,8 +67,7 @@ algorithms:
 | `docker_image` | string | yes | - | Docker image tag (missing tag defaults to `:latest`) |
 | `algorithm_type` | enum | no | `memory` | `memory`, `disk`, or `hybrid` (informational) |
 | `datasets` | list | no | `[]` | Dataset names to run on (empty means all) |
-| `cpu_limit` | string | no | `null` | CPU affinity only, not a CPU-time quota (e.g., `"0-3"` or `"0,2"`) |
-| `cpu_quota` | float | no | `null` | Hard CPU-time cap in logical CPUs; `4.0` permits up to four CPUs of CPU time |
+| `cpu_affinity` | string | no | `null` | CPU core affinity/cpuset (e.g., `"0-3"` or `"0,2"`); pins container to these cores |
 | `memory_limit` | string | no | `null` | Hard memory cap; swap is capped to the same value (e.g., `"8g"`, `"512m"`) |
 | `disabled` | bool | no | `false` | Skip this algorithm |
 | `env_vars` | dict | no | `{}` | Environment variables for the container |

@@ -574,6 +574,20 @@ class ContainerRunner:
                     # Re-aggregate cgroups metrics for the query window
                     cgroups_result = self._cgroups_collector.get_summary(start_dt, end_dt)
 
+                    # Validate time drift between container timestamps and cgroups sample span
+                    query_duration = output.get("total_time_seconds", 0.0)
+                    if cgroups_result.duration_seconds > 0 and query_duration > 0:
+                        drift = abs(cgroups_result.duration_seconds - query_duration)
+                        drift_pct = (drift / query_duration) * 100
+                        if drift_pct > 10:
+                            logger.warning(
+                                f"{log_prefix}Time drift detected: cgroups window "
+                                f"({cgroups_result.duration_seconds:.2f}s) differs from algorithm "
+                                f"wall-clock ({query_duration:.2f}s) by {drift_pct:.1f}%. "
+                                "Rate metrics may be inaccurate. Possible causes: NTP drift, "
+                                "container/host clock skew, or delayed cgroup cleanup."
+                            )
+
                     # Update the resources object with the refined metrics
                     resources = self._build_resource_summary(
                         cgroups_result,
@@ -722,15 +736,12 @@ class ContainerRunner:
             "security_opt": ["seccomp=unconfined"],  # Allow advanced syscalls (io_uring, mmap)
         }
 
-        if algorithm.cpu_limit:
-            limits["cpuset_cpus"] = algorithm.cpu_limit
+        if algorithm.cpu_affinity:
+            limits["cpuset_cpus"] = algorithm.cpu_affinity
 
         if algorithm.memory_limit:
             limits["mem_limit"] = algorithm.memory_limit
             limits["memswap_limit"] = algorithm.memory_limit
-
-        if algorithm.cpu_quota:
-            limits["nano_cpus"] = int(algorithm.cpu_quota * 1_000_000_000)
 
         return limits
 
