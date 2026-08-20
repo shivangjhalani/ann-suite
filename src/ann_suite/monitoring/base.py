@@ -1,7 +1,6 @@
 """Base collector abstract class for metrics collection.
 
-All collectors implement this interface to enable modular, swappable
-metrics collection strategies (Docker stats, cgroups v2, eBPF, etc.).
+The suite collects container metrics directly from cgroups v2.
 """
 
 from __future__ import annotations
@@ -189,7 +188,6 @@ class BaseCollector(ABC):
 
     Implementations:
     - CgroupsV2Collector: Direct cgroups v2 filesystem access
-    - EBPFCollector: eBPF-based deep I/O tracing (future)
     """
 
     @abstractmethod

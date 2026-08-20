@@ -248,7 +248,8 @@ class DiskIOMetrics:
 
 The suite reports **real block-layer I/O only** from `io.stat`. Memory-mapped workloads may show zero block I/O even when they trigger disk reads via page faults.
 
-For research-grade mmap I/O, use block-layer tracing (eBPF) rather than estimating from page faults.
+For mmap workloads, interpret `io.stat` together with page-fault metrics; the suite does not use
+block-layer tracing.
 
 ---
 

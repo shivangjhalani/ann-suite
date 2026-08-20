@@ -29,7 +29,6 @@ from ann_suite.core.constants import MAX_LOG_FILES_PER_TYPE
 from ann_suite.core.schemas import AlgorithmConfig, ResourceSample, ResourceSummary
 from ann_suite.monitoring.base import CollectorResult, CollectorSample, get_system_block_size
 from ann_suite.monitoring.cgroups_collector import CgroupsV2Collector
-from ann_suite.monitoring.ebpf_collector import EBPFCollector, EBPFMetrics
 
 if TYPE_CHECKING:
     from docker.models.containers import Container
@@ -129,20 +128,6 @@ class ContainerRunner:
 
         self._cgroups_collector = CgroupsV2Collector(interval_ms=monitor_interval_ms)
 
-        # Initialize eBPF collector for per-operation latency metrics (optional)
-        # Note: eBPF provides LATENCY histograms, cgroups provides VOLUME metrics
-        # eBPF uses device-based filtering (not cgroup-based) for accurate tracking
-        self._ebpf_collector: EBPFCollector | None = None
-        _ebpf = EBPFCollector(interval_ms=monitor_interval_ms)
-        if _ebpf.is_available():
-            self._ebpf_collector = _ebpf
-            logger.info("EBPFCollector available - will use for per-operation I/O latency metrics")
-        else:
-            logger.warning(
-                "EBPFCollector not available (BCC not installed or missing CAP_SYS_ADMIN). "
-                "Per-operation I/O latency metrics will not be collected."
-            )
-
         # Detect system block size once at initialization
         self._block_size = get_system_block_size()
         logger.info(
@@ -207,7 +192,6 @@ class ContainerRunner:
         *,
         persist_debug: bool = True,
         phase_label: str | None = None,
-        ebpf_metrics: EBPFMetrics | None = None,
     ) -> ResourceSummary:
         """Build a ResourceSummary from CollectorResult.
 
@@ -278,16 +262,6 @@ class ContainerRunner:
             filtered_samples_meta=(
                 result.filtered_samples_meta.to_dict() if result.filtered_samples_meta else None
             ),
-            ebpf_read_ops=ebpf_metrics.read_ops if ebpf_metrics else 0,
-            ebpf_write_ops=ebpf_metrics.write_ops if ebpf_metrics else 0,
-            ebpf_read_latency_p50_us=ebpf_metrics.read_latency.percentile(50) if ebpf_metrics else None,
-            ebpf_read_latency_p95_us=ebpf_metrics.read_latency.percentile(95) if ebpf_metrics else None,
-            ebpf_read_latency_p99_us=ebpf_metrics.read_latency.percentile(99) if ebpf_metrics else None,
-            ebpf_read_latency_max_us=ebpf_metrics.read_latency.max() if ebpf_metrics else None,
-            ebpf_write_latency_p50_us=ebpf_metrics.write_latency.percentile(50) if ebpf_metrics else None,
-            ebpf_write_latency_p95_us=ebpf_metrics.write_latency.percentile(95) if ebpf_metrics else None,
-            ebpf_write_latency_p99_us=ebpf_metrics.write_latency.percentile(99) if ebpf_metrics else None,
-            ebpf_write_latency_max_us=ebpf_metrics.write_latency.max() if ebpf_metrics else None,
         )
 
     def _convert_samples(self, samples: list[CollectorSample]) -> list[ResourceSample]:
@@ -369,10 +343,7 @@ class ContainerRunner:
         return debug_path
 
 
-    # NOTE: _select_io_source and _apply_io_source were removed.
-    # New architecture: cgroups provides VOLUME metrics (bytes, ops),
-    # eBPF provides LATENCY metrics (per-operation histograms).
-    # No source selection needed - they are complementary.
+    # cgroups provide the authoritative container resource metrics.
 
     def pull_image(self, image: str, force: bool = False) -> bool:
         """Pull a Docker image if not present.
@@ -530,16 +501,6 @@ class ContainerRunner:
                 container.stop()
                 raise RuntimeError(f"Failed to start cgroups collector: {e}") from e
 
-
-            # Start eBPF collector for per-operation latency metrics (if available)
-            # Uses device-based filtering (traces all I/O to the storage device)
-            if self._ebpf_collector is not None:
-                try:
-                    self._ebpf_collector.start(self.data_dir)
-                except Exception as e:
-                    logger.warning("Disabling eBPF for this phase; cgroup metrics remain enabled: %s", e)
-                    self._ebpf_collector = None
-
             # Wait for container to complete
             try:
                 result = container.wait(timeout=timeout_seconds)
@@ -554,15 +515,11 @@ class ContainerRunner:
             # Stop monitoring and collect metrics
             cgroups_result = self._cgroups_collector.stop()
 
-            # Stop eBPF and collect latency metrics (separate from volume metrics)
-            ebpf_metrics = self._ebpf_collector.stop() if self._ebpf_collector is not None else None
-
             # Build ResourceSummary from cgroups metrics (volume, CPU, memory)
             resources = self._build_resource_summary(
                 cgroups_result,
                 run_id=run_id,
                 phase_label=f"{mode}/container",
-                ebpf_metrics=ebpf_metrics,
             )
 
             # Log metrics from both sources
@@ -573,14 +530,6 @@ class ContainerRunner:
                 f"read_bytes={cgroups_result.total_read_bytes}, "
                 f"read_ops={cgroups_result.total_read_ops}"
             )
-            if ebpf_metrics is not None and (ebpf_metrics.read_ops > 0 or ebpf_metrics.write_ops > 0):
-                logger.debug(
-                    f"eBPF latency: "
-                    f"read_ops={ebpf_metrics.read_ops}, "
-                    f"read_p50={ebpf_metrics.read_latency.percentile(50)}us, "
-                    f"read_p99={ebpf_metrics.read_latency.percentile(99)}us"
-                )
-
             # Stream logs directly to files to reduce memory usage, keeping only a tail
             # for parsing (JSON output is expected at the end of stdout)
             logs_dir = self.results_dir / "logs"
@@ -623,7 +572,6 @@ class ContainerRunner:
                     )
 
                     # Re-aggregate cgroups metrics for the query window
-                    # Note: eBPF latency histograms are for the entire run (not time-windowed)
                     cgroups_result = self._cgroups_collector.get_summary(start_dt, end_dt)
 
                     # Update the resources object with the refined metrics
@@ -631,7 +579,6 @@ class ContainerRunner:
                         cgroups_result,
                         run_id=run_id,
                         persist_debug=False,
-                        ebpf_metrics=ebpf_metrics,
                     )
                     logger.info(
                         f"{log_prefix}Refined metrics: cpu={resources.avg_cpu_percent:.1f}%, "

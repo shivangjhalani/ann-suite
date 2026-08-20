@@ -77,16 +77,6 @@ class DiskIODict(TypedDict):
     max_read_service_time_ms: float | None
     # PSI stall metrics (future)
     io_stall_percent: float | None
-    ebpf_read_ops: int
-    ebpf_write_ops: int
-    ebpf_read_latency_p50_us: int | None
-    ebpf_read_latency_p95_us: int | None
-    ebpf_read_latency_p99_us: int | None
-    ebpf_read_latency_max_us: int | None
-    ebpf_write_latency_p50_us: int | None
-    ebpf_write_latency_p95_us: int | None
-    ebpf_write_latency_p99_us: int | None
-    ebpf_write_latency_max_us: int | None
 
 
 class SearchPhaseDict(TypedDict):
@@ -454,16 +444,6 @@ class ResourceSummary(BaseModel):
         default=None,
         description="Counts and reasons for samples filtered during aggregation",
     )
-    ebpf_read_ops: int = Field(default=0, ge=0)
-    ebpf_write_ops: int = Field(default=0, ge=0)
-    ebpf_read_latency_p50_us: int | None = Field(default=None, ge=0)
-    ebpf_read_latency_p95_us: int | None = Field(default=None, ge=0)
-    ebpf_read_latency_p99_us: int | None = Field(default=None, ge=0)
-    ebpf_read_latency_max_us: int | None = Field(default=None, ge=0)
-    ebpf_write_latency_p50_us: int | None = Field(default=None, ge=0)
-    ebpf_write_latency_p95_us: int | None = Field(default=None, ge=0)
-    ebpf_write_latency_p99_us: int | None = Field(default=None, ge=0)
-    ebpf_write_latency_max_us: int | None = Field(default=None, ge=0)
 
 
 # =============================================================================
@@ -686,18 +666,6 @@ class DiskIOMetrics(BaseModel):
         default=None, ge=0, description="Peak file cache size during search (MB)"
     )
 
-    # Device-scoped eBPF metrics. These may include unrelated host I/O when
-    # the benchmark device is shared.
-    ebpf_read_ops: int = Field(default=0, ge=0)
-    ebpf_write_ops: int = Field(default=0, ge=0)
-    ebpf_read_latency_p50_us: int | None = Field(default=None, ge=0)
-    ebpf_read_latency_p95_us: int | None = Field(default=None, ge=0)
-    ebpf_read_latency_p99_us: int | None = Field(default=None, ge=0)
-    ebpf_read_latency_max_us: int | None = Field(default=None, ge=0)
-    ebpf_write_latency_p50_us: int | None = Field(default=None, ge=0)
-    ebpf_write_latency_p95_us: int | None = Field(default=None, ge=0)
-    ebpf_write_latency_p99_us: int | None = Field(default=None, ge=0)
-    ebpf_write_latency_max_us: int | None = Field(default=None, ge=0)
 
     # Metadata for transparency
     physical_block_size: int = Field(
@@ -924,16 +892,6 @@ class BenchmarkResult(BaseModel):
             max_read_service_time_ms=self.disk_io.search_max_read_service_time_ms,
             # PSI stall metrics
             io_stall_percent=self.disk_io.search_io_stall_percent,
-            ebpf_read_ops=self.disk_io.ebpf_read_ops,
-            ebpf_write_ops=self.disk_io.ebpf_write_ops,
-            ebpf_read_latency_p50_us=self.disk_io.ebpf_read_latency_p50_us,
-            ebpf_read_latency_p95_us=self.disk_io.ebpf_read_latency_p95_us,
-            ebpf_read_latency_p99_us=self.disk_io.ebpf_read_latency_p99_us,
-            ebpf_read_latency_max_us=self.disk_io.ebpf_read_latency_max_us,
-            ebpf_write_latency_p50_us=self.disk_io.ebpf_write_latency_p50_us,
-            ebpf_write_latency_p95_us=self.disk_io.ebpf_write_latency_p95_us,
-            ebpf_write_latency_p99_us=self.disk_io.ebpf_write_latency_p99_us,
-            ebpf_write_latency_max_us=self.disk_io.ebpf_write_latency_max_us,
         )
 
     def _build_latency_dict(self) -> LatencyDict:

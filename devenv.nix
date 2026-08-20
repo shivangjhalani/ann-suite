@@ -9,18 +9,11 @@
 {
   # https://devenv.sh/basics/
   env.GREET = "Welcome to ann-suite development environment";
-  # BCC is provided by Nix, not PyPI.  Expose its bindings before uv's virtual
-  # environment so `from bcc import BPF` resolves to the real BCC module.
-  env.PYTHONPATH = "${pkgs.python312Packages.bcc}/${pkgs.python312.sitePackages}";
-
   # https://devenv.sh/packages/
   packages = [
     pkgs.git
     pkgs.docker
     pkgs.stdenv.cc.cc.lib # for many python wheels on linux
-    pkgs.bcc
-    pkgs.python312Packages.bcc
-    pkgs.kmod # lets BCC load CONFIG_IKHEADERS when needed
     pkgs.glib
     pkgs.gcc
   ];
