@@ -17,7 +17,9 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import shlex
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -29,6 +31,8 @@ from ann_suite.core.constants import MAX_LOG_FILES_PER_TYPE
 from ann_suite.core.schemas import AlgorithmConfig, ResourceSample, ResourceSummary
 from ann_suite.monitoring.base import CollectorResult, CollectorSample, get_system_block_size
 from ann_suite.monitoring.cgroups_collector import CgroupsV2Collector
+
+SUDO_PASSWORD_ENV = "ANN_SUITE_SUDO_PASSWORD"
 
 if TYPE_CHECKING:
     from docker.models.containers import Container
@@ -124,7 +128,6 @@ class ContainerRunner:
                 "Ensure your system uses unified cgroup v2 hierarchy. "
                 "See docs/METRICS.md for setup instructions."
             )
-
 
         self._cgroups_collector = CgroupsV2Collector(interval_ms=monitor_interval_ms)
 
@@ -342,8 +345,67 @@ class ContainerRunner:
 
         return debug_path
 
+    # Host-side cache control for cold-start benchmarking.
 
-    # cgroups provide the authoritative container resource metrics.
+    def _write_drop_caches_direct(self) -> bool:
+        """Write to /proc/sys/vm/drop_caches directly (succeeds only as root)."""
+        try:
+            with open("/proc/sys/vm/drop_caches", "w") as f:
+                f.write("3")
+            return True
+        except OSError:
+            return False
+
+    def _run_sudo_drop_caches(self, password: str | None) -> bool:
+        """Drop caches via sudo, optionally reading the password from stdin (-S)."""
+        command = ["sudo"]
+        if password is None:
+            command.append("-n")
+        else:
+            command.append("-S")
+        command.extend(["sh", "-c", "sync; echo 3 > /proc/sys/vm/drop_caches"])
+        try:
+            result = subprocess.run(
+                command,
+                input=f"{password}\n" if password is not None else None,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode == 0:
+                return True
+            logger.debug(f"sudo drop_caches failed (rc={result.returncode})")
+        except (subprocess.TimeoutExpired, OSError) as e:
+            logger.debug(f"sudo drop_caches failed: {e}")
+        return False
+
+    def drop_caches(self) -> bool:
+        """Drop the OS page cache so subsequent reads hit physical disk.
+
+        Attempts, in order:
+        1. Direct write to /proc/sys/vm/drop_caches (requires root)
+        2. Passwordless ``sudo -n sh -c '...'``
+        3. ``sudo -S`` with a password taken from the ANN_SUITE_SUDO_PASSWORD
+           environment variable (never logged, never persisted)
+
+        Returns:
+            True if the cache was dropped. On failure a loud warning is logged so
+            warm-cache results are not mistaken for cold-cache results.
+        """
+        if self._write_drop_caches_direct():
+            return True
+        if self._run_sudo_drop_caches(None):
+            return True
+        password = os.environ.get(SUDO_PASSWORD_ENV)
+        if password is not None and self._run_sudo_drop_caches(password):
+            return True
+
+        logger.warning(
+            "Page cache drop FAILED (not root, no passwordless sudo, and "
+            f"{SUDO_PASSWORD_ENV} not set). Search will run with a WARM page "
+            "cache; disk I/O metrics will under-report cold-cache behavior."
+        )
+        return False
 
     def pull_image(self, image: str, force: bool = False) -> bool:
         """Pull a Docker image if not present.
@@ -456,7 +518,9 @@ class ContainerRunner:
                     "command": [wrapped],
                 }
         except Exception as e:
-            logger.warning(f"Failed to wrap command with sync: {e}. I/O metrics might be inaccurate.")
+            logger.warning(
+                f"Failed to wrap command with sync: {e}. I/O metrics might be inaccurate."
+            )
 
         try:
             # Issue #7 fix: Use create() + start() instead of run() to ensure
@@ -509,9 +573,6 @@ class ContainerRunner:
                 logger.warning(f"Container wait failed: {e}")
                 exit_code = -1
 
-
-
-
             # Stop monitoring and collect metrics
             cgroups_result = self._cgroups_collector.stop()
 
@@ -562,7 +623,6 @@ class ContainerRunner:
             if query_start and query_end and mode == "search":
                 try:
                     from datetime import datetime
-
 
                     start_dt = datetime.fromisoformat(query_start)
                     end_dt = datetime.fromisoformat(query_end)
@@ -616,7 +676,6 @@ class ContainerRunner:
             warmup_start = output.get("warmup_start_timestamp", output.get("load_start_timestamp"))
             warmup_end = output.get("warmup_end_timestamp", output.get("load_end_timestamp"))
             warmup_resources_obj = None
-
 
             if warmup_start and warmup_end:
                 try:

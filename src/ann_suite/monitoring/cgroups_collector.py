@@ -881,15 +881,18 @@ class CgroupsV2Collector(BaseCollector):
             if interval_duration < min_interval_seconds:
                 continue
 
-            read_ops_delta = max(0, s2.blkio_read_ops - s1.blkio_read_ops)
-            read_bytes_delta = max(0, s2.blkio_read_bytes - s1.blkio_read_bytes)
-            read_usec_delta = max(0, s2.blkio_read_usec - s1.blkio_read_usec)
+            # NOTE: distinct names - must not shadow the cumulative deltas above
+            interval_ops_delta = max(0, s2.blkio_read_ops - s1.blkio_read_ops)
+            interval_bytes_delta = max(0, s2.blkio_read_bytes - s1.blkio_read_bytes)
+            interval_usec_delta = max(0, s2.blkio_read_usec - s1.blkio_read_usec)
 
-            interval_read_iops.append(read_ops_delta / interval_duration)
-            interval_read_mbps.append((read_bytes_delta / (1024 * 1024)) / interval_duration)
+            interval_read_iops.append(interval_ops_delta / interval_duration)
+            interval_read_mbps.append((interval_bytes_delta / (1024 * 1024)) / interval_duration)
 
-            if read_ops_delta > 0 and read_usec_delta > 0:
-                interval_read_service_time_ms.append((read_usec_delta / read_ops_delta) / 1000.0)
+            if interval_ops_delta > 0 and interval_usec_delta > 0:
+                interval_read_service_time_ms.append(
+                    (interval_usec_delta / interval_ops_delta) / 1000.0
+                )
 
         p95_read_iops = _percentile(interval_read_iops, 95)
         max_read_iops = max(interval_read_iops) if interval_read_iops else None

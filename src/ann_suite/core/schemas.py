@@ -185,6 +185,14 @@ class BuildConfig(BaseModel):
 
     timeout_seconds: int = Field(default=3600, ge=60, description="Build phase timeout")
     args: dict[str, Any] = Field(default_factory=dict, description="Algorithm-specific build args")
+    reuse_index: bool = Field(
+        default=True,
+        description=(
+            "Reuse a built index across search-phase sweep points within this run instead of "
+            "rebuilding it for every point. Set false to rebuild for each benchmark point "
+            "(legacy behavior; needed when build cost itself is under study)."
+        ),
+    )
 
     model_config = {"extra": "allow"}
 
@@ -195,12 +203,15 @@ class WarmupConfig(BaseModel):
     This controls how the index is prepared before timed query execution:
     - collect_metrics: Whether to collect and report warmup phase metrics
     - cache_warmup_queries: Number of untimed queries to warm OS/algorithm caches
-    - drop_caches_before: Reserved for future implementation (NOT YET IMPLEMENTED)
+    - drop_caches_before: Drop the OS page cache before each search phase so index
+      reads hit physical disk (cold-start benchmarking). Requires root or sudo;
+      a password may be supplied via the ANN_SUITE_SUDO_PASSWORD environment
+      variable. On failure the run continues with a warm cache and logs a warning.
 
     Example scenarios:
-    - Cold start benchmark: cache_warmup_queries=0 (manually clear caches before run)
+    - Cold start benchmark: drop_caches_before=True, cache_warmup_queries=0
     - Warm cache benchmark: cache_warmup_queries=1000
-    - Default (realistic): cache_warmup_queries=0, drop_caches_before=False
+    - Default (realistic): both disabled
     """
 
     collect_metrics: bool = Field(
@@ -214,7 +225,11 @@ class WarmupConfig(BaseModel):
     )
     drop_caches_before: bool = Field(
         default=False,
-        description="Reserved for future implementation. Currently has no effect.",
+        description=(
+            "Drop the OS page cache before each search phase (cold-start benchmarking). "
+            "Requires root or sudo; set ANN_SUITE_SUDO_PASSWORD for passworded sudo. "
+            "If the drop fails, the search runs with a warm cache and a warning is logged."
+        ),
     )
 
 

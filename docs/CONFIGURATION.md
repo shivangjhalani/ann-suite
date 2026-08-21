@@ -86,7 +86,8 @@ algorithms:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `timeout_seconds` | int | `3600` | Build timeout (>= 60) |
-| `args` | dict | `{}` | Algorithm-specific build arguments |
+| `args` | dict | `{}` | Algorithm-specific build arguments (supports sweeps) |
+| `reuse_index` | bool | `true` | Reuse a built index across search sweep points instead of rebuilding per point |
 
 ### Search Configuration
 
@@ -109,7 +110,7 @@ algorithms:
 |-------|------|---------|-------------|
 | `collect_metrics` | bool | `true` | Report warmup phase metrics |
 | `cache_warmup_queries` | int | `0` | Untimed queries after load |
-| `drop_caches_before` | bool | `false` | Reserved for future use |
+| `drop_caches_before` | bool | `false` | Drop the OS page cache before each search phase (cold-start benchmarking). Requires root or sudo; set the `ANN_SUITE_SUDO_PASSWORD` env var for passworded sudo. On failure the search runs with a warm cache and a warning is logged. |
 
 ## Dataset Configuration
 
@@ -158,16 +159,37 @@ relative. Absolute paths are used as-is.
 
 ## Parameter Sweeps
 
-List values in `build.args` or `search.args` expand to multiple runs.
+List values in `build.args` or `search.args` expand to multiple runs. The full
+benchmark grid is the cartesian product of build combinations x search combinations.
 
 ```yaml
+build:
+  args:
+    R: [32, 64]        # 2 distinct indices
 search:
   args:
-    ef: [50, 100]
-    num_threads: [1, 4]
+    Ls: [30, 50, 100]  # 3 search effort levels per index
 ```
 
-This produces a cartesian product of parameter combinations.
+This produces 6 benchmark points: each unique build combination is built **once**,
+then every search combination runs against it.
+
+### Index Reuse
+
+By default (`build.reuse_index: true`), an index built for one search sweep point is
+reused by the remaining points on the same build combination — a 4-point `Ls` sweep
+builds once instead of four times. Indices are stored per build combination at
+`index_dir/<algorithm>/<dataset>/<build-slug>/`, so different build parameters never
+collide.
+
+> [!NOTE]
+> With reuse enabled, later search points may observe a warmer OS page cache than the
+> first point (the index was just read by prior searches). For cold-cache studies set
+> `reuse_index: false` (legacy behavior: rebuild for every point) or clear caches
+> manually between runs.
+
+Set `build.reuse_index: false` when build cost itself is under study or you need
+identical cache conditions for every search point.
 
 ## Algorithm-Dataset Mapping
 

@@ -360,13 +360,22 @@ datasets:
 
 **Option B: Restrict container memory.** Set `memory_limit: "30m"` to force the 19.4 MB index to be evicted from page cache during search. This is artificial but works for validating disk I/O metrics.
 
-**Option C: Drop caches between runs.** Before each search phase:
+**Option C: Drop caches between runs.** Set `search.warmup.drop_caches_before: true` —
+the suite now drops the OS page cache before each search phase automatically
+(requires root or sudo; set the `ANN_SUITE_SUDO_PASSWORD` env var for passworded
+sudo). Manual alternative:
 
 ```bash
 sudo sync && echo 3 | sudo tee /proc/sys/vm/drop_caches
 ```
 
-The config already has a `drop_caches_before: false` field reserved for this. Implementing it would be a small addition to the container runner.
+> [!IMPORTANT]
+> **Index reuse interacts with page cache warmth.** Since `build.reuse_index` defaults to
+> `true`, only the first search sweep point follows a fresh index build; later points may
+> see a warmer page cache from prior searches, slightly inflating QPS and deflating
+> measured I/O across the sweep. For cold-cache comparisons either set
+> `build.reuse_index: false`, use larger-than-cache datasets (Option A), or drop caches
+> manually between runs.
 
 ---
 

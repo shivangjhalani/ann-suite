@@ -48,6 +48,41 @@ class TestCgroupsV2Collector:
         assert summary.avg_read_iops == pytest.approx(10.0, rel=0.01)
         assert summary.duration_seconds == pytest.approx(1.0, rel=0.01)
 
+    def test_totals_not_clobbered_by_interval_loop(self) -> None:
+        """Regression: per-interval loop must not shadow cumulative deltas.
+
+        The interval loop previously reassigned read_ops_delta/read_bytes_delta,
+        so total_read_ops/total_read_bytes held the LAST interval's values
+        instead of the full-window deltas.
+        """
+        collector = CgroupsV2Collector(interval_ms=100)
+
+        now = datetime.now()
+        n = 21  # 20 intervals of 1s each
+        ops_per_interval = 1000
+        bytes_per_interval = 4096 * ops_per_interval
+        collector._samples = [
+            CollectorSample(
+                timestamp=now + timedelta(seconds=i),
+                memory_usage_bytes=100 * 1024 * 1024,
+                cpu_time_ns=int(i * 0.5 * 1e9),
+                blkio_read_bytes=(i + 1) * bytes_per_interval,
+                blkio_write_bytes=0,
+                blkio_read_ops=(i + 1) * ops_per_interval,
+                blkio_write_ops=0,
+            )
+            for i in range(n)
+        ]
+
+        summary = collector._aggregate_samples()
+
+        expected_ops = (n - 1) * ops_per_interval
+        assert summary.total_read_ops == expected_ops
+        assert summary.total_read_bytes == (n - 1) * bytes_per_interval
+        assert summary.avg_read_iops == pytest.approx(float(ops_per_interval), rel=0.01)
+        # Tail metrics still computed from intervals
+        assert summary.p95_read_iops == pytest.approx(float(ops_per_interval), rel=0.01)
+
     def test_get_summary_filtering(self):
         """Test filtering samples by time window."""
         collector = CgroupsV2Collector(interval_ms=100)

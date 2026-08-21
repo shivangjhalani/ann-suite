@@ -14,9 +14,13 @@ The evaluator ensures fair comparison by:
 
 from __future__ import annotations
 
+import hashlib
 import itertools
+import json
 import logging
+import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -91,6 +95,54 @@ def expand_sweep_params(args: dict[str, Any]) -> list[dict[str, Any]]:
     return combinations
 
 
+def build_combo_slug(args: dict[str, Any]) -> str:
+    """Generate a deterministic, filesystem-safe slug for a build parameter combination.
+
+    The slug uniquely identifies an index build: identical args always produce the
+    same slug regardless of key order, so it can key on-disk index directories and
+    the in-run build cache.
+
+    Format: sanitized sorted "k=v" pairs (truncated) + short md5 suffix of the
+    canonical JSON form. Empty args produce "default".
+
+    Args:
+        args: Build parameter dictionary
+
+    Returns:
+        Filesystem-safe slug string
+    """
+    if not args:
+        return "default"
+
+    canonical = json.dumps(args, sort_keys=True, default=str)
+    digest = hashlib.md5(canonical.encode()).hexdigest()[:8]
+
+    parts = []
+    for key in sorted(args):
+        pair = re.sub(r"[^A-Za-z0-9]+", "-", f"{key}={args[key]}").strip("-")
+        parts.append(pair)
+    readable = "_".join(parts)[:48].strip("_-")
+
+    return f"{readable}-{digest}"
+
+
+@dataclass
+class _BuildContext:
+    """Context for one index build, shared by all search points that use it.
+
+    Attributes:
+        build_result: Phase result from the build container run.
+        host_index_dir: Host path where the index was written.
+        container_index_path: Corresponding path inside the container (/data/index/...).
+        build_params: The exact build arguments used for this index.
+    """
+
+    build_result: PhaseResult
+    host_index_dir: Path
+    container_index_path: str
+    build_params: dict[str, Any]
+
+
 class BenchmarkEvaluator:
     """Main evaluator class for running ANN benchmarks.
 
@@ -139,6 +191,11 @@ class BenchmarkEvaluator:
         )
         self.results_storage = ResultsStorage(self.results_dir)
 
+        # Cache of built indices within this evaluator's lifetime, keyed by
+        # (algorithm name, dataset name, build combo slug). Only populated when
+        # build.reuse_index is enabled; lets search sweep points share one build.
+        self._build_cache: dict[tuple[str, str, str], _BuildContext] = {}
+
     def run(self) -> list[BenchmarkResult]:
         """Run the complete benchmark suite.
 
@@ -164,16 +221,25 @@ class BenchmarkEvaluator:
 
         for algo_config in algorithms:
             # Filter datasets for this algorithm
-            if algo_config.datasets:
-                algo_datasets = [d for d in self.config.datasets if d.name in algo_config.datasets]
-                if not algo_datasets:
-                    logger.warning(
-                        f"Algorithm {algo_config.name} specifies datasets {algo_config.datasets} "
-                        f"but none match configured datasets"
-                    )
-                    continue
-            else:
-                algo_datasets = self.config.datasets  # All datasets
+            algo_datasets = self._datasets_for_algorithm(algo_config)
+            if not algo_datasets:
+                continue
+
+            # Ensure image is available once per algorithm (not per benchmark point)
+            if not self.container_runner.pull_image(algo_config.docker_image):
+                error_msg = f"Failed to pull image: {algo_config.docker_image}"
+                logger.error(f"[{self._run_id}] {error_msg}")
+                for dataset_config in algo_datasets:
+                    for search_params in expand_sweep_params(algo_config.search.args):
+                        results.append(
+                            self._failed_result(
+                                algo_config,
+                                dataset_config,
+                                dict(algo_config.build.args),
+                                search_params,
+                            )
+                        )
+                continue
 
             for dataset_config in algo_datasets:
                 logger.info(
@@ -192,51 +258,110 @@ class BenchmarkEvaluator:
 
                 base_vectors, query_vectors, ground_truth = dataset_cache[dataset_config.name]
 
-                # Expand parameter sweeps (e.g., ef: [50, 100, 200] -> 3 runs)
+                # Save container-accessible .npy files once per (algorithm, dataset)
+                base_path, queries_path, gt_path = self._prepare_dataset_files(
+                    dataset_config, base_vectors, query_vectors, ground_truth
+                )
+
+                # Expand build and search sweeps into their cartesian product.
+                # Each unique build combo builds its index once; every search combo
+                # then runs against it (subject to build.reuse_index).
+                build_param_combos = expand_sweep_params(algo_config.build.args)
                 search_param_combos = expand_sweep_params(algo_config.search.args)
-                n_combos = len(search_param_combos)
-                if n_combos > 1:
+                n_build_combos = len(build_param_combos)
+                n_search_combos = len(search_param_combos)
+                if n_build_combos > 1 or n_search_combos > 1:
                     logger.info(
-                        f"[{self._run_id}]   Running {n_combos} parameter combinations for sweep"
+                        f"[{self._run_id}]   Running {n_build_combos} build x "
+                        f"{n_search_combos} search parameter combinations"
                     )
 
-                for param_idx, search_params in enumerate(search_param_combos):
-                    # Create modified config with expanded params
-                    if n_combos > 1:
-                        sweep_info = ", ".join(f"{k}={v}" for k, v in search_params.items())
-                        logger.info(f"[{self._run_id}]   [{param_idx + 1}/{n_combos}] {sweep_info}")
+                # Memoize failed builds by slug so one failed attempt fans out to
+                # all of its search combos instead of re-running an expensive,
+                # known-bad build for each point. Reset per (algorithm, dataset).
+                failed_builds: dict[str, PhaseResult | None] = {}
 
-                    try:
-                        result = self._run_single_benchmark(
-                            algo_config,
-                            dataset_config,
-                            base_vectors,
-                            query_vectors,
-                            ground_truth,
-                            search_params_override=search_params,
-                        )
-                        results.append(result)
-                        logger.info(
-                            f"[{self._run_id}] Completed: {algo_config.name} - "
-                            f"recall={result.recall:.4f}, qps={result.qps:.1f}"
-                            if result.recall and result.qps
-                            else f"[{self._run_id}] Completed: {algo_config.name}"
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"[{self._run_id}] Benchmark failed for {algo_config.name}: {e}"
-                        )
-                        # Create a failed result
-                        results.append(
-                            BenchmarkResult(
-                                algorithm=algo_config.name,
-                                dataset=dataset_config.name,
-                                hyperparameters={
-                                    "build": algo_config.build.args,
-                                    "search": search_params,
-                                },
+                for build_params in build_param_combos:
+                    slug = build_combo_slug(build_params)
+
+                    for param_idx, search_params in enumerate(search_param_combos):
+                        if slug in failed_builds:
+                            results.append(
+                                self._failed_result(
+                                    algo_config,
+                                    dataset_config,
+                                    build_params,
+                                    search_params,
+                                    build_result=failed_builds[slug],
+                                )
                             )
+                            continue
+
+                        try:
+                            context = self._ensure_build(
+                                algo_config, dataset_config, base_path, build_params
+                            )
+                        except Exception as e:
+                            logger.error(
+                                f"[{self._run_id}] Build failed for {algo_config.name} "
+                                f"with args {build_params}: {e}"
+                            )
+                            failed_builds[slug] = None
+                            results.append(
+                                self._failed_result(
+                                    algo_config, dataset_config, build_params, search_params
+                                )
+                            )
+                            continue
+
+                        if not context.build_result.success:
+                            logger.warning(
+                                f"[{self._run_id}] Build phase failed for {algo_config.name}, "
+                                f"skipping search: {context.build_result.error_message}"
+                            )
+                            failed_builds[slug] = context.build_result
+                            results.append(
+                                self._failed_result(
+                                    algo_config,
+                                    dataset_config,
+                                    build_params,
+                                    search_params,
+                                    build_result=context.build_result,
+                                )
+                            )
+                            continue
+
+                        sweep_info = ", ".join(f"{k}={v}" for k, v in search_params.items())
+                        logger.info(
+                            f"[{self._run_id}]   Search [{param_idx + 1}/{n_search_combos}] "
+                            f"build={context.container_index_path} ({sweep_info})"
                         )
+
+                        try:
+                            result = self._run_benchmark_point(
+                                algo_config,
+                                dataset_config,
+                                context,
+                                queries_path,
+                                gt_path,
+                                search_params,
+                            )
+                            results.append(result)
+                            logger.info(
+                                f"[{self._run_id}] Completed: {algo_config.name} - "
+                                f"recall={result.recall:.4f}, qps={result.qps:.1f}"
+                                if result.recall and result.qps
+                                else f"[{self._run_id}] Completed: {algo_config.name}"
+                            )
+                        except Exception as e:
+                            logger.error(
+                                f"[{self._run_id}] Benchmark failed for {algo_config.name}: {e}"
+                            )
+                            results.append(
+                                self._failed_result(
+                                    algo_config, dataset_config, build_params, search_params
+                                )
+                            )
 
         # Store results
         if results:
@@ -290,31 +415,33 @@ class BenchmarkEvaluator:
 
         return self.dataset_loader.load(config)
 
-    def _run_single_benchmark(
+    def _datasets_for_algorithm(self, algo_config: AlgorithmConfig) -> list[DatasetConfig]:
+        """Return the datasets an algorithm should run on, honoring its dataset filter."""
+        if algo_config.datasets:
+            algo_datasets = [d for d in self.config.datasets if d.name in algo_config.datasets]
+            if not algo_datasets:
+                logger.warning(
+                    f"Algorithm {algo_config.name} specifies datasets {algo_config.datasets} "
+                    f"but none match configured datasets"
+                )
+            return algo_datasets
+        return self.config.datasets  # All datasets
+
+    def _prepare_dataset_files(
         self,
-        algo_config: AlgorithmConfig,
         dataset_config: DatasetConfig,
         base_vectors: NDArray[np.float32],
         query_vectors: NDArray[np.float32],
         ground_truth: NDArray[np.int32] | None,
-        search_params_override: dict[str, Any] | None = None,
-    ) -> BenchmarkResult:
-        """Run a single algorithm/dataset benchmark.
+    ) -> tuple[Path, Path, Path]:
+        """Save container-accessible .npy copies of the dataset (idempotent).
 
-        Args:
-            search_params_override: Optional dict to override search.args for parameter sweeps
-
-        Executes build and search phases, collecting metrics throughout.
+        Returns:
+            Tuple of (base_path, queries_path, ground_truth_path)
         """
-        # Ensure image is available
-        if not self.container_runner.pull_image(algo_config.docker_image):
-            raise RuntimeError(f"Failed to pull image: {algo_config.docker_image}")
-
-        # Prepare paths (relative to container's /data mount)
         dataset_dir = self.data_dir / dataset_config.name
         dataset_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save vectors if needed (for container access)
         base_path = dataset_dir / "base.npy"
         queries_path = dataset_dir / "queries.npy"
         gt_path = dataset_dir / "ground_truth.npy"
@@ -326,54 +453,113 @@ class BenchmarkEvaluator:
         if ground_truth is not None and not gt_path.exists():
             np.save(gt_path, ground_truth)
 
-        # Create index directory for this algorithm
-        algo_index_dir = self.index_dir / algo_config.name / dataset_config.name
-        algo_index_dir.mkdir(parents=True, exist_ok=True)
+        return base_path, queries_path, gt_path
 
-        # Build phase
+    def _failed_result(
+        self,
+        algo_config: AlgorithmConfig,
+        dataset_config: DatasetConfig,
+        build_params: dict[str, Any],
+        search_params: dict[str, Any],
+        build_result: PhaseResult | None = None,
+    ) -> BenchmarkResult:
+        """Create a placeholder result for a failed benchmark point.
+
+        Preserves row-count semantics (one row per planned search combo) and
+        records the intended hyperparameters for debugging. Errors are surfaced
+        via ``build_result.error_message`` and the run log.
+        """
+        return BenchmarkResult(
+            algorithm=algo_config.name,
+            dataset=dataset_config.name,
+            build_result=build_result,
+            hyperparameters={
+                "build": build_params,
+                "search": search_params,
+                "k": algo_config.search.k,
+            },
+        )
+
+    def _ensure_build(
+        self,
+        algo_config: AlgorithmConfig,
+        dataset_config: DatasetConfig,
+        base_path: Path,
+        build_params: dict[str, Any],
+    ) -> _BuildContext:
+        """Ensure an index exists for this build combo, building it if necessary.
+
+        When build.reuse_index is enabled and this exact combo was already built
+        during this run, returns the cached context without rebuilding.
+
+        Args:
+            algo_config: Algorithm configuration
+            dataset_config: Dataset configuration
+            base_path: Host path to base vectors (.npy)
+            build_params: Build arguments for this combination
+
+        Returns:
+            Build context (build result may still be unsuccessful; callers must check)
+        """
+        slug = build_combo_slug(build_params)
+        cache_key = (algo_config.name, dataset_config.name, slug)
+        host_index_dir = self.index_dir / algo_config.name / dataset_config.name / slug
+        container_index_path = f"/data/index/{algo_config.name}/{dataset_config.name}/{slug}"
+
+        if algo_config.build.reuse_index and cache_key in self._build_cache:
+            logger.info(f"[{self._run_id}] Reusing index built at {host_index_dir}")
+            return self._build_cache[cache_key]
+
+        host_index_dir.mkdir(parents=True, exist_ok=True)
         build_result = self._run_build_phase(
             algo_config,
             dataset_config,
             base_path,
-            algo_index_dir,
+            host_index_dir,
+            container_index_path,
+            build_params,
         )
 
-        # Check if build succeeded before attempting search
-        if not build_result.success:
-            logger.warning(
-                f"Build phase failed for {algo_config.name}, skipping search phase: "
-                f"{build_result.error_message}"
-            )
-            # Return result with only build phase (no search attempted)
-            return BenchmarkResult(
-                algorithm=algo_config.name,
-                dataset=dataset_config.name,
-                build_result=build_result,
-                hyperparameters={
-                    "build": algo_config.build.args,
-                    "search": search_params_override
-                    if search_params_override
-                    else algo_config.search.args,
-                },
-            )
+        context = _BuildContext(
+            build_result=build_result,
+            host_index_dir=host_index_dir,
+            container_index_path=container_index_path,
+            build_params=build_params,
+        )
+        # Cache only successful builds so failures are retried per search point
+        if algo_config.build.reuse_index and build_result.success:
+            self._build_cache[cache_key] = context
+        return context
 
-        # Search phase (only if build succeeded)
+    def _run_benchmark_point(
+        self,
+        algo_config: AlgorithmConfig,
+        dataset_config: DatasetConfig,
+        context: _BuildContext,
+        queries_path: Path,
+        gt_path: Path | None,
+        search_params: dict[str, Any],
+    ) -> BenchmarkResult:
+        """Run one search point against a built index and aggregate with its build metrics.
+
+        Caller must guarantee the build in ``context`` succeeded.
+        """
         search_result = self._run_search_phase(
             algo_config,
             dataset_config,
-            algo_index_dir,
+            context.container_index_path,
             queries_path,
-            gt_path if ground_truth is not None else None,
-            search_params_override=search_params_override,
+            gt_path,
+            search_params_override=search_params,
         )
 
-        # Aggregate results
         return self._aggregate_results(
             algo_config,
             dataset_config,
-            build_result,
+            context.build_result,
             search_result,
-            search_params_override=search_params_override,
+            build_params=context.build_params,
+            search_params_override=search_params,
         )
 
     def _run_build_phase(
@@ -382,15 +568,26 @@ class BenchmarkEvaluator:
         dataset_config: DatasetConfig,
         base_path: Path,
         index_dir: Path,
+        container_index_path: str,
+        build_args: dict[str, Any],
     ) -> PhaseResult:
-        """Run the index building phase."""
+        """Run the index building phase.
+
+        Args:
+            algo_config: Algorithm configuration
+            dataset_config: Dataset configuration
+            base_path: Host path to base vectors
+            index_dir: Host directory where the index should be written
+            container_index_path: Index path as seen inside the container
+            build_args: Build arguments for this specific build combination
+        """
         # Build config for container
         build_config = {
             "dataset_path": f"/data/{dataset_config.name}/base.npy",
-            "index_path": f"/data/index/{algo_config.name}/{dataset_config.name}",
+            "index_path": container_index_path,
             "dimension": dataset_config.dimension,
             "metric": dataset_config.distance_metric.value,
-            "build_args": algo_config.build.args,
+            "build_args": build_args,
         }
 
         container_result, resources = self.container_runner.run_phase(
@@ -423,7 +620,7 @@ class BenchmarkEvaluator:
         self,
         algo_config: AlgorithmConfig,
         dataset_config: DatasetConfig,
-        index_dir: Path,
+        container_index_path: str,
         queries_path: Path,
         gt_path: Path | None,
         search_params_override: dict[str, Any] | None = None,
@@ -431,6 +628,11 @@ class BenchmarkEvaluator:
         """Run the search/query phase.
 
         Args:
+            algo_config: Algorithm configuration
+            dataset_config: Dataset configuration
+            container_index_path: Index path as seen inside the container
+            queries_path: Host path to query vectors
+            gt_path: Host path to ground truth (optional)
             search_params_override: Optional dict to override search.args for parameter sweeps
         """
         # Use override if provided (for parameter sweeps), otherwise use config
@@ -440,7 +642,7 @@ class BenchmarkEvaluator:
         warmup_config = algo_config.search.warmup
 
         search_config: dict[str, Any] = {
-            "index_path": f"/data/index/{algo_config.name}/{dataset_config.name}",
+            "index_path": container_index_path,
             "queries_path": f"/data/{dataset_config.name}/queries.npy",
             "k": algo_config.search.k,
             "query_rounds": algo_config.search.query_rounds,
@@ -461,6 +663,16 @@ class BenchmarkEvaluator:
                 f"[{self._run_id}] Cache warming enabled: {warmup_config.cache_warmup_queries} "
                 "untimed queries before benchmark"
             )
+
+        # Cold-start benchmarking: drop the OS page cache so index reads hit disk
+        if warmup_config.drop_caches_before:
+            if self.container_runner.drop_caches():
+                logger.info(f"[{self._run_id}] Dropped OS page caches before search phase")
+            else:
+                logger.warning(
+                    f"[{self._run_id}] drop_caches_before=true but the cache drop FAILED; "
+                    "this search point will run with a warm page cache"
+                )
 
         container_result, resources = self.container_runner.run_phase(
             algorithm=algo_config,
@@ -503,6 +715,7 @@ class BenchmarkEvaluator:
         dataset_config: DatasetConfig,
         build_result: PhaseResult,
         search_result: PhaseResult,
+        build_params: dict[str, Any] | None = None,
         search_params_override: dict[str, Any] | None = None,
     ) -> BenchmarkResult:
         """Aggregate build and search results into a single BenchmarkResult.
@@ -516,6 +729,11 @@ class BenchmarkEvaluator:
         If the search phase failed, quality metrics (recall, qps) are set to None,
         and latency/resource metrics are zeroed to avoid emitting invalid data.
         """
+        # Record the exact build combo used (may differ from algo_config.build.args
+        # when sweeping build parameters)
+        effective_build_params = (
+            build_params if build_params is not None else dict(algo_config.build.args)
+        )
         build_output = build_result.output
         build_res = build_result.resources
 
@@ -547,7 +765,7 @@ class BenchmarkEvaluator:
 
             # Combine hyperparameters
             hyperparameters = {
-                "build": algo_config.build.args,
+                "build": effective_build_params,
                 "search": search_params_override
                 if search_params_override
                 else algo_config.search.args,
@@ -679,7 +897,9 @@ class BenchmarkEvaluator:
         # This ensures consistency: numerators come from cgroups counters (measured over the
         # sample span), so denominators must use the same window. Fall back to algorithm
         # wall-clock only if cgroups duration is unavailable.
-        io_time_base = search_res.duration_seconds if search_res.duration_seconds > 0 else query_duration
+        io_time_base = (
+            search_res.duration_seconds if search_res.duration_seconds > 0 else query_duration
+        )
 
         # Warn if we can't compute throughput
         if io_time_base <= 0:
@@ -859,7 +1079,7 @@ class BenchmarkEvaluator:
 
         # Combine hyperparameters - use override if provided (for parameter sweeps)
         hyperparameters = {
-            "build": algo_config.build.args,
+            "build": effective_build_params,
             "search": search_params_override if search_params_override else algo_config.search.args,
             "k": algo_config.search.k,
         }

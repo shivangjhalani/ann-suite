@@ -123,9 +123,22 @@ results = evaluator.run()  # Returns List[BenchmarkResult]
 
 **Responsibilities:**
 - Iterates through all (algorithm, dataset) combinations
+- Expands build and search parameter sweeps into their cartesian product
+- Builds each unique index once per build combination and reuses it across
+  search sweep points (when `build.reuse_index` is enabled)
 - Manages container lifecycle via ContainerRunner
 - Coordinates resource monitoring
 - Aggregates results
+
+**Execution order per (algorithm, dataset):**
+
+```
+for each build combination (expanded from build.args):
+    ensure index is built once (cached by algorithm + dataset + build slug)
+    for each search combination (expanded from search.args):
+        run search phase against that index
+        aggregate build + search metrics into one BenchmarkResult
+```
 
 ---
 
@@ -161,7 +174,7 @@ search_result, resources = runner.run_phase(
 | Host Path | Container Path | Purpose |
 |-----------|----------------|---------|
 | `config.data_dir` | `/data` | Datasets |
-| `config.index_dir/<algo>/<dataset>` | `/data/index` | Index storage |
+| `config.index_dir/<algo>/<dataset>/<build-slug>` | `/data/index` | Index storage (one subdir per build parameter combination) |
 | `config.results_dir` | `/results` | Optional outputs |
 
 > **CRITICAL**: Disk-based algorithms MUST write indices to `/data/index/` for accurate I/O metrics.

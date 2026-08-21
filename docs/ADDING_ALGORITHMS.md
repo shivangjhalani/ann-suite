@@ -27,7 +27,7 @@ python -m algorithm.runner --mode <build|search> --config '<json_string>'
 ```json
 {
     "dataset_path": "/data/dataset_name/base.npy",
-    "index_path": "/data/index/algorithm_name/dataset_name",
+    "index_path": "/data/index/algorithm_name/dataset_name/<build-slug>",
     "dimension": 128,
     "metric": "L2",
     "build_args": {
@@ -36,6 +36,11 @@ python -m algorithm.runner --mode <build|search> --config '<json_string>'
     }
 }
 ```
+
+> The `<build-slug>` segment is a deterministic identifier of the build parameter
+> combination (e.g., `M-16_ef_construction-200-a1b2c3d4`), allowing multiple build
+> combinations to coexist. Treat `index_path` as opaque: always write to the exact
+> path provided.
 
 **Expected Output (stdout):**
 ```json
@@ -51,7 +56,7 @@ python -m algorithm.runner --mode <build|search> --config '<json_string>'
 **Input JSON:**
 ```json
 {
-    "index_path": "/data/index/algorithm_name/dataset_name",
+    "index_path": "/data/index/algorithm_name/dataset_name/<build-slug>",
     "queries_path": "/data/dataset_name/queries.npy",
     "ground_truth_path": "/data/dataset_name/ground_truth.npy",
     "k": 10,
@@ -108,7 +113,7 @@ The suite mounts host directories into containers:
 **Example with default config:**
 ```
 Host: ./data/sift-10k/base.npy    → Container: /data/sift-10k/base.npy
-Host: ./indices/HNSW/sift-10k/    → Container: /data/index/HNSW/sift-10k/
+Host: ./indices/HNSW/sift-10k/<build-slug>/    → Container: /data/index/HNSW/sift-10k/<build-slug>/
 Host: ./results/metrics.json      → Container: /results/metrics.json
 ```
 
@@ -122,8 +127,8 @@ Host: ./results/metrics.json      → Container: /results/metrics.json
 
 **Example:**
 ```python
-# CORRECT - writes to host-mounted directory
-index_path = Path("/data/index/my_algo/dataset")
+# CORRECT - writes to host-mounted directory (use the exact index_path from the config)
+index_path = Path(config["index_path"])
 np.save(index_path / "graph.bin", graph_data)
 
 # WRONG - writes to container overlay (not tracked)

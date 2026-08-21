@@ -660,7 +660,8 @@ include_raw_samples: true  # Also include raw samples in results_detailed.json
 
 1. **Volume Mounting**: Index must be written to `/data/index/` (host-mounted volume)
 2. **cgroups v2**: Ensure cgroups v2 is enabled (default on modern Linux)
-3. **Clear Page Cache** (optional, for reproducibility):
+3. **Clear Page Cache** (optional, for cold-start reproducibility): set
+   `search.warmup.drop_caches_before: true` in the algorithm config, or manually:
    ```bash
    echo 3 | sudo tee /proc/sys/vm/drop_caches
    ```

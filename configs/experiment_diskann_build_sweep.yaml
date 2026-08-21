@@ -1,0 +1,43 @@
+name: "DiskANN Build x Search Sweep on SIFT-10K"
+description: >
+  Sweep build params (R, L) and search params (Ls) to map the recall/QPS frontier
+  across multiple index structures. Each unique (R, L) index is built once
+  (build.reuse_index: true, default); all Ls values run against it.
+data_dir: "./library/datasets"
+results_dir: "./results"
+index_dir: "./indices"
+monitor_interval_ms: 50
+
+algorithms:
+  - name: DiskANN
+    docker_image: ann-suite/diskann:latest
+    algorithm_type: disk
+    cpu_affinity: "0-3"
+    memory_limit: "1g"
+    build:
+      timeout_seconds: 1800
+      reuse_index: true
+      args:
+        R: [32, 64]
+        L: [50, 100]
+        alpha: 1.2
+        num_threads: 4
+        build_memory_maximum: 2.0
+        search_memory_maximum: 0.5
+    search:
+      timeout_seconds: 300
+      k: 10
+      batch_mode: false
+      args:
+        Ls: [30, 50, 100]
+        beam_width: 2
+        num_threads: 4
+        num_nodes_to_cache: 0
+
+datasets:
+  - name: sift-10k
+    base_path: sift-10k/base.npy
+    query_path: sift-10k/queries.npy
+    ground_truth_path: sift-10k/ground_truth.npy
+    distance_metric: L2
+    dimension: 128
