@@ -68,6 +68,8 @@ class CollectorSample:
     # CPU throttling (from cpu.stat)
     nr_throttled: int = 0
     throttled_usec: int = 0
+    # Queue depth (in-flight I/O ops summed over physical block devices, from /sys/block)
+    queue_depth: int = 0
 
 
 @dataclass
@@ -174,6 +176,10 @@ class CollectorResult:
     max_read_mbps: float | None = None
     p95_read_service_time_ms: float | None = None
     max_read_service_time_ms: float | None = None
+    # Queue depth (in-flight I/O ops, sampled from /sys/block)
+    avg_queue_depth: float = 0.0
+    max_queue_depth: int = 0
+    p95_queue_depth: float | None = None
     # Meta
     duration_seconds: float = 0.0
     sample_count: int = 0
@@ -221,6 +227,42 @@ class BaseCollector(ABC):
     def name(self) -> str:
         """Human-readable name of this collector."""
         pass
+
+
+def read_system_queue_depth() -> int:
+    """Read the current system-wide block I/O queue depth.
+
+    Sums in-flight read and write operations across all physical block devices
+    via /sys/block/<dev>/inflight. This is a system-level gauge (not per-cgroup),
+    so it is most accurate when the benchmark host is otherwise idle.
+
+    Returns:
+        Total in-flight I/O operations; 0 if unreadable or no activity.
+    """
+    sys_block = Path("/sys/block")
+    if not sys_block.exists():
+        return 0
+
+    total = 0
+    try:
+        for device_dir in sys_block.iterdir():
+            # Skip virtual/loop devices (same filter as get_system_block_size)
+            if device_dir.name.startswith(("loop", "ram", "dm-", "sr", "fd")):
+                continue
+
+            inflight_path = device_dir / "inflight"
+            if not inflight_path.exists():
+                continue
+            try:
+                # Format: one line "<in-flight reads> <in-flight writes>"
+                parts = inflight_path.read_text().split()
+                total += sum(int(p) for p in parts)
+            except (ValueError, PermissionError, OSError):
+                continue
+    except (PermissionError, OSError):
+        return 0
+
+    return total
 
 
 def get_system_block_size() -> int:

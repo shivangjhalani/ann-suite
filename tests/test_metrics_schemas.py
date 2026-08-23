@@ -1,6 +1,7 @@
 """Tests for new metrics schemas and parameter sweep functionality."""
 
 from ann_suite.core.schemas import (
+    AlgorithmStats,
     BenchmarkResult,
     CPUMetrics,
     DiskIOMetrics,
@@ -225,6 +226,120 @@ class TestBenchmarkResultStructured:
         # Check hyperparameters
         assert summary["hyperparameters"]["build"]["R"] == 64
         assert summary["hyperparameters"]["k"] == 10
+
+
+class TestAlgorithmStats:
+    """Tests for algorithm-reported search statistics."""
+
+    def test_from_output_maps_known_keys(self) -> None:
+        stats = AlgorithmStats.from_output(
+            {
+                "distance_computations": 1000,
+                "hops": 500,
+                "candidates_explored": 800,
+                "cache_hits": 700,
+                "cache_misses": 100,
+                "io_reads": 300,
+                "io_bytes_read": 4096000,
+            }
+        )
+        assert stats.distance_computations == 1000
+        assert stats.hops == 500
+        assert stats.candidates_explored == 800
+        assert stats.cache_hits == 700
+        assert stats.cache_misses == 100
+        assert stats.io_reads == 300
+        assert stats.io_bytes_read == 4096000
+
+    def test_from_output_preserves_unknown_keys(self) -> None:
+        stats = AlgorithmStats.from_output({"custom_ctr": 5.5})
+        assert stats.extra == {"custom_ctr": 5.5}
+
+    def test_from_output_ignores_non_numeric(self) -> None:
+        stats = AlgorithmStats.from_output({"bad": "x", "negative": -1, "hops": 10})
+        assert stats.hops == 10
+        assert "bad" not in stats.extra
+        assert "negative" not in stats.extra
+
+    def test_to_dict_omits_none(self) -> None:
+        stats = AlgorithmStats(distance_computations=42)
+        assert stats.to_dict() == {"distance_computations": 42}
+
+    def test_with_per_query_normalizes_totals(self) -> None:
+        stats = AlgorithmStats.from_output(
+            {"distance_computations": 1000, "hops": 500, "candidates_explored": 800}
+        ).with_per_query(100)
+        assert stats.distance_computations_per_query == 10.0
+        assert stats.hops_per_query == 5.0
+        assert stats.candidates_explored_per_query == 8.0
+
+    def test_with_per_query_zero_queries_is_noop(self) -> None:
+        stats = AlgorithmStats.from_output({"distance_computations": 100}).with_per_query(0)
+        assert stats.distance_computations_per_query is None
+
+    def test_summary_dict_includes_algorithm_stats(self) -> None:
+        result = BenchmarkResult(
+            algorithm="HNSW",
+            dataset="test",
+            algorithm_stats=AlgorithmStats.from_output({"distance_computations": 100, "hops": 50}),
+        )
+        summary = result.to_summary_dict()
+        assert summary["algorithm_stats"] == {"distance_computations": 100, "hops": 50}
+
+    def test_summary_dict_none_without_stats(self) -> None:
+        result = BenchmarkResult(algorithm="HNSW", dataset="test")
+        assert result.to_summary_dict()["algorithm_stats"] is None
+
+
+class TestNewPerQueryAndSystemMetrics:
+    """Tests for per-query I/O metrics, queue depth, and page-cache hit rate."""
+
+    def test_disk_io_per_query_and_queue_depth(self) -> None:
+        disk = DiskIOMetrics(
+            search_reads_per_query=12.5,
+            search_bytes_read_per_query=51200.0,
+            search_avg_queue_depth=3.2,
+            search_p95_queue_depth=8.0,
+            search_max_queue_depth=16,
+        )
+        assert disk.search_reads_per_query == 12.5
+        assert disk.search_bytes_read_per_query == 51200.0
+        assert disk.search_avg_queue_depth == 3.2
+        assert disk.search_p95_queue_depth == 8.0
+        assert disk.search_max_queue_depth == 16
+
+    def test_disk_io_dict_includes_new_fields(self) -> None:
+        result = BenchmarkResult(
+            algorithm="DiskANN",
+            dataset="sift-1m",
+            disk_io=DiskIOMetrics(
+                search_pages_per_query=750.0,
+                search_reads_per_query=100.0,
+                search_bytes_read_per_query=409600.0,
+                search_avg_queue_depth=4.0,
+                search_max_queue_depth=32,
+            ),
+        )
+        io = result.to_summary_dict()["search"]["disk_io"]
+        assert io["reads_per_query"] == 100.0
+        assert io["bytes_read_per_query"] == 409600.0
+        assert io["avg_queue_depth"] == 4.0
+        assert io["max_queue_depth"] == 32
+
+    def test_page_cache_hit_rate(self) -> None:
+        mem = MemoryMetrics(search_page_cache_hit_rate=0.97)
+        assert mem.search_page_cache_hit_rate == 0.97
+
+    def test_flat_dict_contains_new_metrics(self) -> None:
+        result = BenchmarkResult(
+            algorithm="HNSW",
+            dataset="test",
+            disk_io=DiskIOMetrics(search_reads_per_query=1.0),
+            memory=MemoryMetrics(search_page_cache_hit_rate=0.99),
+        )
+        flat = result.to_flat_dict()
+        assert flat["disk_io_search_reads_per_query"] == 1.0
+        assert flat["memory_search_page_cache_hit_rate"] == 0.99
 
 
 class TestParameterSweeps:

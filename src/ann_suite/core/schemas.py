@@ -6,6 +6,7 @@ including algorithm configurations, dataset definitions, and result structures.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -13,6 +14,8 @@ from typing import Any, TypedDict
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # Output TypedDicts for type-safe JSON serialization
@@ -64,6 +67,12 @@ class DiskIODict(TypedDict):
     total_pages_read: int
     total_pages_written: int
     pages_per_query: float | None
+    reads_per_query: float | None
+    bytes_read_per_query: float | None
+    # Queue depth (system-wide in-flight I/O, sampled per interval)
+    avg_queue_depth: float | None
+    max_queue_depth: int | None
+    p95_queue_depth: float | None
     # Service time proxy / efficiency metrics
     avg_bytes_per_read_op: float | None
     avg_bytes_per_write_op: float | None
@@ -94,7 +103,7 @@ class SearchPhaseDict(TypedDict):
     disk_io: DiskIODict
     major_faults_per_query: float | None
     major_faults_per_second: float | None
-    non_major_fault_ratio: float | None
+    page_cache_hit_rate: float | None
     file_cache_avg_mb: float | None
     file_cache_peak_mb: float | None
     cpu_nr_throttled: int
@@ -158,6 +167,7 @@ class BenchmarkSummaryDict(TypedDict):
     warmup: WarmupPhaseDict
     search: SearchPhaseDict
     latency: LatencyDict
+    algorithm_stats: dict[str, Any] | None
     metadata: MetadataDict
     debug_artifacts: DebugArtifactsDict
     hyperparameters: dict[str, Any]
@@ -444,6 +454,10 @@ class ResourceSummary(BaseModel):
     max_read_service_time_ms: float | None = Field(
         default=None, ge=0, description="Max read service time (ms/op)"
     )
+    # Queue depth (system-wide in-flight I/O, sampled per interval)
+    avg_queue_depth: float | None = Field(default=None, ge=0)
+    max_queue_depth: int | None = Field(default=None, ge=0)
+    p95_queue_depth: float | None = Field(default=None, ge=0)
     sample_count: int = Field(ge=0, description="Number of samples collected")
     duration_seconds: float = Field(
         ge=0,
@@ -557,13 +571,16 @@ class MemoryMetrics(BaseModel):
     search_major_faults: int | None = Field(
         default=None, ge=0, description="Major page faults during search (disk-backed pages)"
     )
-    # Issue #4 fix: Renamed from search_page_cache_hit_ratio to clarify what it measures
-    search_non_major_fault_ratio: float | None = Field(
+    search_page_cache_hit_rate: float | None = Field(
         default=None,
         ge=0,
         le=1,
-        description="Fraction of page faults that were minor (not requiring disk I/O). "
-        "Computed as 1 - (pgmajfault / pgfault). This is NOT a true cache hit ratio.",
+        description=(
+            "Fraction of page-fault accesses served without disk I/O, computed as "
+            "1 - (pgmajfault / pgfault) from cgroup memory.stat. This is the OS "
+            "page-cache hit rate for faulted pages; algorithm-internal caches that "
+            "avoid syscalls/mmap faults are not visible here (see algorithm_stats)."
+        ),
     )
 
 
@@ -636,6 +653,29 @@ class DiskIOMetrics(BaseModel):
     )
     search_pages_per_query: float | None = Field(
         default=None, ge=0, description="Average 4KB pages read per query (search phase only)"
+    )
+    search_reads_per_query: float | None = Field(
+        default=None,
+        ge=0,
+        description="Average block-device read operations per query (search phase only)",
+    )
+    search_bytes_read_per_query: float | None = Field(
+        default=None,
+        ge=0,
+        description="Average bytes read from block devices per query (search phase only)",
+    )
+
+    # Queue depth (system-wide in-flight I/O, sampled per interval)
+    search_avg_queue_depth: float | None = Field(
+        default=None,
+        ge=0,
+        description="Average in-flight I/O operations during search (from /sys/block/*/inflight)",
+    )
+    search_p95_queue_depth: float | None = Field(
+        default=None, ge=0, description="95th percentile in-flight I/O ops across samples"
+    )
+    search_max_queue_depth: int | None = Field(
+        default=None, ge=0, description="Maximum in-flight I/O ops observed in any sample"
     )
 
     # Service time proxy metrics (bytes per operation - indicates I/O pattern efficiency)
@@ -738,6 +778,124 @@ class LatencyMetrics(BaseModel):
     max_ms: float | None = Field(default=None, ge=0, description="Maximum query latency in ms")
 
 
+class AlgorithmStats(BaseModel):
+    """Algorithm-reported search statistics (optional container protocol extension).
+
+    Algorithms report raw totals for the whole timed run via the ``stats`` key of
+    ``ContainerProtocol.SearchOutput``. Well-known keys (all optional):
+
+    - ``distance_computations``: vector distance evaluations performed
+    - ``hops``: graph edges traversed during search
+    - ``candidates_explored``: candidate nodes expanded/visited
+    - ``cache_hits`` / ``cache_misses``: algorithm-internal cache accesses
+    - ``io_reads`` / ``io_bytes_read``: algorithm-level storage reads
+
+    Unknown keys are preserved in ``extra`` so any custom counter survives the
+    round trip. Per-query normalizations are computed by the evaluator.
+    """
+
+    # Raw totals reported by the algorithm (whole timed run)
+    distance_computations: int | None = Field(
+        default=None, ge=0, description="Total distance computations during search"
+    )
+    hops: int | None = Field(
+        default=None, ge=0, description="Total graph hops/edges traversed during search"
+    )
+    candidates_explored: int | None = Field(
+        default=None, ge=0, description="Total candidate nodes explored during search"
+    )
+    cache_hits: int | None = Field(
+        default=None, ge=0, description="Algorithm-level cache hits during search"
+    )
+    cache_misses: int | None = Field(
+        default=None, ge=0, description="Algorithm-level cache misses during search"
+    )
+    io_reads: int | None = Field(
+        default=None,
+        ge=0,
+        description="Algorithm-level storage read operations (e.g., SSD node reads)",
+    )
+    io_bytes_read: int | None = Field(
+        default=None, ge=0, description="Algorithm-level bytes read from storage"
+    )
+
+    # Any additional counters emitted by the algorithm
+    extra: dict[str, float] = Field(
+        default_factory=dict, description="Additional algorithm-reported counters"
+    )
+
+    # Per-query normalizations (computed by the evaluator, not reported)
+    distance_computations_per_query: float | None = Field(
+        default=None, ge=0, description="Distance computations per query"
+    )
+    hops_per_query: float | None = Field(default=None, ge=0, description="Graph hops per query")
+    candidates_explored_per_query: float | None = Field(
+        default=None, ge=0, description="Candidates explored per query"
+    )
+
+    @classmethod
+    def from_output(cls, stats: dict[str, Any]) -> AlgorithmStats:
+        """Build AlgorithmStats from a container-reported stats dict.
+
+        Known keys map to typed fields; unknown numeric keys land in ``extra``.
+        Non-numeric or negative values are ignored with a warning.
+        """
+        known = {
+            "distance_computations",
+            "hops",
+            "candidates_explored",
+            "cache_hits",
+            "cache_misses",
+            "io_reads",
+            "io_bytes_read",
+        }
+        fields: dict[str, Any] = {"extra": {}}
+        for key, value in stats.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                logger.warning(f"Ignoring non-numeric/negative algorithm stat: {key}={value!r}")
+                continue
+            if key in known:
+                fields[key] = int(value)
+            else:
+                fields["extra"][key] = float(value)
+        return cls(**fields)
+
+    def with_per_query(self, num_queries: int) -> AlgorithmStats:
+        """Return a copy with per-query normalizations of the well-known totals.
+
+        Args:
+            num_queries: Total queries executed in the timed run (0 disables).
+        """
+        if num_queries <= 0:
+            return self
+        normalized = self.model_copy()
+        if normalized.distance_computations is not None:
+            normalized.distance_computations_per_query = (
+                normalized.distance_computations / num_queries
+            )
+        if normalized.hops is not None:
+            normalized.hops_per_query = normalized.hops / num_queries
+        if normalized.candidates_explored is not None:
+            normalized.candidates_explored_per_query = (
+                normalized.candidates_explored / num_queries
+            )
+        return normalized
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a flat dict for results output (None fields omitted)."""
+        values: dict[str, Any] = {
+            "distance_computations": self.distance_computations,
+            "hops": self.hops,
+            "candidates_explored": self.candidates_explored,
+            "cache_hits": self.cache_hits,
+            "cache_misses": self.cache_misses,
+            "io_reads": self.io_reads,
+            "io_bytes_read": self.io_bytes_read,
+            **self.extra,
+        }
+        return {k: v for k, v in values.items() if v is not None}
+
+
 class TimeBases(BaseModel):
     """Explicit time bases for rate metric calculation.
 
@@ -824,6 +982,11 @@ class BenchmarkResult(BaseModel):
         default_factory=LatencyMetrics, description="Query latency distribution"
     )
 
+    # Optional algorithm-reported statistics (distance comps, hops, candidates, ...)
+    algorithm_stats: AlgorithmStats | None = Field(
+        default=None, description="Algorithm-reported search statistics (if provided)"
+    )
+
     # Quality metrics
     recall: float | None = Field(default=None, ge=0, le=1, description="Recall@k")
     qps: float | None = Field(default=None, ge=0, description="Queries per second")
@@ -865,6 +1028,7 @@ class BenchmarkResult(BaseModel):
             warmup=self._build_warmup_phase_dict(),
             search=self._build_search_phase_dict(),
             latency=self._build_latency_dict(),
+            algorithm_stats=self.algorithm_stats.to_dict() if self.algorithm_stats else None,
             metadata=self._build_metadata_dict(),
             debug_artifacts=self._build_debug_artifacts_dict(),
             hyperparameters=self.hyperparameters,
@@ -912,7 +1076,7 @@ class BenchmarkResult(BaseModel):
             disk_io=self._build_disk_io_dict(),
             major_faults_per_query=self.disk_io.search_major_faults_per_query,
             major_faults_per_second=self.disk_io.search_major_faults_per_second,
-            non_major_fault_ratio=self.memory.search_non_major_fault_ratio,
+            page_cache_hit_rate=self.memory.search_page_cache_hit_rate,
             file_cache_avg_mb=self.disk_io.search_file_cache_avg_mb,
             file_cache_peak_mb=self.disk_io.search_file_cache_peak_mb,
             cpu_nr_throttled=self.cpu.search_nr_throttled,
@@ -931,6 +1095,11 @@ class BenchmarkResult(BaseModel):
             total_pages_read=self.disk_io.search_total_pages_read,
             total_pages_written=self.disk_io.search_total_pages_written,
             pages_per_query=self.disk_io.search_pages_per_query,
+            reads_per_query=self.disk_io.search_reads_per_query,
+            bytes_read_per_query=self.disk_io.search_bytes_read_per_query,
+            avg_queue_depth=self.disk_io.search_avg_queue_depth,
+            max_queue_depth=self.disk_io.search_max_queue_depth,
+            p95_queue_depth=self.disk_io.search_p95_queue_depth,
             # Service time proxy / efficiency metrics
             avg_bytes_per_read_op=self.disk_io.search_avg_bytes_per_read_op,
             avg_bytes_per_write_op=self.disk_io.search_avg_bytes_per_write_op,
@@ -1073,6 +1242,8 @@ class ContainerProtocol(BaseModel):
         """
 
         status: str
+        # Optional algorithm-reported counters; see AlgorithmStats for well-known keys.
+        stats: dict[str, float] | None = Field(default=None)
         total_queries: int = Field(ge=0)
         total_time_seconds: float = Field(ge=0)
         qps: float = Field(ge=0)

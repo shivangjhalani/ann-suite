@@ -28,6 +28,7 @@ from ann_suite.monitoring.base import (
     DeviceIOStat,
     FilteredSamplesMeta,
     TopDeviceSummary,
+    read_system_queue_depth,
 )
 
 logger = logging.getLogger(__name__)
@@ -377,6 +378,7 @@ class CgroupsV2Collector(BaseCollector):
             inactive_file_bytes=memory_stat.get("inactive_file", 0),
             nr_throttled=cpu_stat.get("nr_throttled", 0),
             throttled_usec=cpu_stat.get("throttled_usec", 0),
+            queue_depth=read_system_queue_depth(),
         )
 
     def _read_single_value(self, path: Path) -> int:
@@ -903,6 +905,12 @@ class CgroupsV2Collector(BaseCollector):
             max(interval_read_service_time_ms) if interval_read_service_time_ms else None
         )
 
+        # Queue depth stats (system-wide gauge sampled per interval)
+        queue_depth_values = [s.queue_depth for s in samples]
+        avg_queue_depth = sum(queue_depth_values) / len(queue_depth_values)
+        max_queue_depth = max(queue_depth_values)
+        p95_queue_depth = _percentile([float(v) for v in queue_depth_values], 95)
+
         result = CollectorResult(
             cpu_time_total_seconds=cpu_time_total_seconds,
             avg_cpu_percent=avg_cpu_percent,
@@ -938,6 +946,9 @@ class CgroupsV2Collector(BaseCollector):
             max_read_mbps=max_read_mbps,
             p95_read_service_time_ms=p95_read_service_time_ms,
             max_read_service_time_ms=max_read_service_time_ms,
+            avg_queue_depth=avg_queue_depth,
+            max_queue_depth=max_queue_depth,
+            p95_queue_depth=p95_queue_depth,
             duration_seconds=duration,
             sample_count=len(samples),
             filtered_samples_meta=filtered_meta,

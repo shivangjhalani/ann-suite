@@ -30,6 +30,7 @@ import numpy as np
 from ann_suite.core.constants import STANDARD_PAGE_SIZE
 from ann_suite.core.schemas import (
     AlgorithmConfig,
+    AlgorithmStats,
     BenchmarkConfig,
     BenchmarkResult,
     CPUMetrics,
@@ -871,16 +872,16 @@ class BenchmarkEvaluator:
             search_throttled_usec=search_res.throttled_usec_delta,
         )
 
-        # Calculate non-major fault ratio from page fault counters
-        # Issue #4 fix: Renamed from page_cache_hit_ratio to clarify what it measures
-        # pgfault = total page faults (major + minor)
-        # pgmajfault = major page faults (disk reads)
-        # non_major_fault_ratio = 1 - (major_faults / total_faults)
-        non_major_fault_ratio = None
+        # Page-cache hit rate from cgroup page-fault counters.
+        # pgfault = total page faults (major + minor); pgmajfault = major faults (served
+        # from disk). The hit rate is the fraction of faulted accesses served without
+        # disk I/O. Algorithm-internal caches that avoid faults entirely are not
+        # visible at this level (those arrive via algorithm_stats.cache_hits/misses).
+        page_cache_hit_rate = None
         if search_res.pgfault_delta > 0:
-            non_major_fault_ratio = 1.0 - (search_res.pgmajfault_delta / search_res.pgfault_delta)
+            page_cache_hit_rate = 1.0 - (search_res.pgmajfault_delta / search_res.pgfault_delta)
             # Clamp to valid range [0, 1] to handle edge cases
-            non_major_fault_ratio = max(0.0, min(1.0, non_major_fault_ratio))
+            page_cache_hit_rate = max(0.0, min(1.0, page_cache_hit_rate))
 
         # Aggregate Memory metrics (separated by phase: BUILD, WARMUP, SEARCH)
         memory = MemoryMetrics(
@@ -889,7 +890,7 @@ class BenchmarkEvaluator:
             search_peak_rss_mb=search_res.peak_memory_mb,
             search_avg_rss_mb=search_res.avg_memory_mb,
             search_major_faults=search_res.pgmajfault_delta,
-            search_non_major_fault_ratio=non_major_fault_ratio,
+            search_page_cache_hit_rate=page_cache_hit_rate,
         )
 
         # Aggregate Disk I/O metrics (CRITICAL for disk-based algorithms)
@@ -1033,6 +1034,16 @@ class BenchmarkEvaluator:
             search_pages_per_query=(
                 search_total_pages_read / num_queries if num_queries > 0 else None
             ),
+            search_reads_per_query=(
+                search_res.total_read_ops / num_queries if num_queries > 0 else None
+            ),
+            search_bytes_read_per_query=(
+                search_total_read_bytes / num_queries if num_queries > 0 else None
+            ),
+            # Queue depth (system-wide gauge sampled per monitor interval)
+            search_avg_queue_depth=search_res.avg_queue_depth,
+            search_p95_queue_depth=search_res.p95_queue_depth,
+            search_max_queue_depth=search_res.max_queue_depth,
             # Service time proxy metrics (bytes per operation)
             search_avg_bytes_per_read_op=search_avg_bytes_per_read_op,
             search_avg_bytes_per_write_op=search_avg_bytes_per_write_op,
@@ -1077,6 +1088,13 @@ class BenchmarkEvaluator:
             max_ms=search_output.get("max_latency_ms"),
         )
 
+        # Algorithm-reported stats (optional protocol extension). Normalize the
+        # well-known totals to per-query values; unknown counters pass through.
+        algorithm_stats: AlgorithmStats | None = None
+        raw_stats = search_output.get("stats")
+        if isinstance(raw_stats, dict) and raw_stats:
+            algorithm_stats = AlgorithmStats.from_output(raw_stats).with_per_query(num_queries)
+
         # Combine hyperparameters - use override if provided (for parameter sweeps)
         hyperparameters = {
             "build": effective_build_params,
@@ -1095,6 +1113,7 @@ class BenchmarkEvaluator:
             memory=memory,
             disk_io=disk_io,
             latency=latency,
+            algorithm_stats=algorithm_stats,
             # Quality metrics
             recall=search_output.get("recall"),
             qps=search_output.get("qps"),

@@ -186,6 +186,9 @@ class MemoryMetrics:
     # Search phase (query execution)
     search_peak_rss_mb: float  # Peak RSS during search phase in MB
     search_avg_rss_mb: float   # Average RSS during search phase in MB
+
+    # Page-cache hit rate (search phase)
+    search_page_cache_hit_rate: float | None  # 1 - pgmajfault/pgfault (see note below)
 ```
 
 **How it's measured:**
@@ -225,6 +228,13 @@ class DiskIOMetrics:
     search_total_pages_read: int         # Total 4KB pages read
     search_total_pages_written: int      # Total 4KB pages written
     search_pages_per_query: float | None # Average pages read per query
+    search_reads_per_query: float | None       # Block-device read ops per query
+    search_bytes_read_per_query: float | None  # Bytes read from block devices per query
+
+    # Queue depth (system-wide in-flight I/O, sampled per monitor interval)
+    search_avg_queue_depth: float | None   # Average in-flight I/O ops
+    search_p95_queue_depth: float | None   # 95th percentile in-flight I/O ops
+    search_max_queue_depth: int | None     # Max in-flight I/O ops observed
 
     # Metadata
     physical_block_size: int      # Detected physical block size of storage device
@@ -280,6 +290,56 @@ qps: float | None       # Queries per second
 
 ---
 
+### AlgorithmStats (Algorithm-Reported Search Statistics)
+
+Some metrics are only observable inside the algorithm (distance computations, graph hops,
+candidates explored, algorithm-level cache hits). The suite collects these through an optional
+extension of the container protocol: algorithms attach a ``stats`` dict to their search output
+JSON. The evaluator normalizes well-known totals to per-query values and preserves unknown
+counters in ``extra``.
+
+```python
+result.algorithm_stats: AlgorithmStats | None
+# Well-known keys (totals over the timed run):
+distance_computations: int            # Vector distance evaluations performed
+hops: int                             # Graph edges traversed
+candidates_explored: int              # Candidate nodes expanded/visited
+cache_hits / cache_misses: int        # Algorithm-level cache accesses
+io_reads: int                         # Algorithm-level storage read ops (e.g., SSD node reads)
+io_bytes_read: int                    # Algorithm-level bytes read from storage
+
+# Computed by the evaluator:
+distance_computations_per_query / hops_per_query / candidates_explored_per_query: float | None
+```
+
+**Well-known keys** (any other numeric key is preserved under ``algorithm_stats.extra``):
+
+| Key | Per-query form |
+|-----|----------------|
+| `distance_computations` | `distance_computations_per_query` |
+| `hops` | `hops_per_query` |
+| `candidates_explored` | `candidates_explored_per_query` |
+| `cache_hits`, `cache_misses` | — |
+| `io_reads`, `io_bytes_read` | — |
+
+**For algorithm authors:** use the shared `SearchCounters` helper from
+`library/algorithms/utils.py` to accumulate counters during the timed run and emit them:
+
+```python
+from utils import SearchCounters
+
+stats = SearchCounters()
+...  # stats.add_distances(n); stats.add_hops(); stats.add_cache_access(hit)
+result["stats"] = stats.to_dict()
+```
+
+> [!NOTE]
+> The bundled HNSW (hnswlib) and DiskANN (diskannpy) runners cannot emit these counters:
+> their C++ cores expose no instrumentation hooks. Counters appear automatically for any
+> algorithm that reports them — no suite changes required.
+
+---
+
 ## Extended Metrics (Diagnostic-Grade)
 
 The suite supports additional diagnostic metrics for deep I/O analysis. These are collected when available from the kernel and provide insights into disk-based algorithm performance.
@@ -329,7 +389,7 @@ class MemoryFaultMetrics:
     file_mapped_mb: float        # Memory-mapped file bytes
     active_file_mb: float        # Active file cache
     inactive_file_mb: float      # Inactive file cache
-    page_cache_hit_ratio: float | None  # Page cache hit ratio (0.0-1.0)
+    page_cache_hit_rate: float | None  # Page cache hit rate (0.0-1.0)
 ```
 
 **Source:** cgroups v2 `memory.stat`
@@ -349,15 +409,15 @@ class MemoryFaultMetrics:
 - **Minor faults** are memory-only (copy-on-write, zero-fill) and don't indicate I/O
 - **High `major_faults_per_query`** suggests index doesn't fit in memory or cache is cold
 
-**Page Cache Hit Ratio:**
+**Page Cache Hit Rate:**
 
-The `page_cache_hit_ratio` indicates the fraction of page faults that were satisfied from cache (minor faults) versus requiring disk access (major faults):
+The `page_cache_hit_rate` indicates the fraction of page faults that were satisfied from cache (minor faults) versus requiring disk access (major faults):
 
 ```python
-page_cache_hit_ratio = 1.0 - (pgmajfault_delta / pgfault_delta)
+page_cache_hit_rate = 1.0 - (pgmajfault_delta / pgfault_delta)
 ```
 
-| Hit Ratio | Interpretation |
+| Hit Rate  | Interpretation |
 |-----------|----------------|
 | 0.95-1.0  | Excellent - Most accesses from cache |
 | 0.80-0.95 | Good - Some cache misses |
@@ -365,7 +425,9 @@ page_cache_hit_ratio = 1.0 - (pgmajfault_delta / pgfault_delta)
 | < 0.50    | Poor - Mostly cold cache/disk-bound |
 
 > [!NOTE]
-> `page_cache_hit_ratio` is `None` when `pgfault_delta` is 0 (no page faults occurred).
+> `page_cache_hit_rate` is `None` when `pgfault_delta` is 0 (no page faults occurred). It
+> measures the OS page cache only; algorithm-internal caches that avoid page faults entirely
+> must be reported via `algorithm_stats` (`cache_hits`/`cache_misses`).
 
 ---
 
@@ -486,6 +548,23 @@ throttled_percent = (throttled_usec / container_duration_usec) * 100
 
 > [!NOTE]
 > Throttling only occurs when a CPU limit is configured. Without limits, these values are 0.
+
+---
+
+### Queue Depth
+
+```python
+search_avg_queue_depth: float | None   # Average in-flight I/O ops across samples
+search_p95_queue_depth: float | None   # 95th percentile
+search_max_queue_depth: int | None     # Maximum observed
+```
+
+**Source:** `/sys/block/<dev>/inflight`, summed over physical block devices (reads + writes),
+sampled once per monitor interval alongside cgroups metrics.
+
+> [!NOTE]
+> Queue depth is a **system-wide** gauge, not per-container: the kernel does not attribute
+> in-flight I/O to cgroups. It is most meaningful on an otherwise idle benchmark host.
 
 ---
 
