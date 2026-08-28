@@ -411,7 +411,7 @@ ann-suite download [OPTIONS]
 | Option | Short | Default | Description |
 |--------|-------|---------|-------------|
 | `--dataset` | | *none* | Dataset name to download |
-| `--output` | | `library/datasets/` | Output directory |
+| `--output` | | `./data` | Output directory |
 | `--list` | | `false` | List available datasets |
 | `--quiet` | | `false` | Suppress output |
 

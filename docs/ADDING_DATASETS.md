@@ -4,10 +4,10 @@ This guide explains how to add new datasets to the ANN Benchmarking Suite.
 
 ## Overview
 
-Datasets are managed through the `library/datasets/` directory with:
-- **Registry** (`registry.yaml`): Declarative manifest of available datasets
-- **Download Utility** (`download.py`): Script to fetch and prepare datasets
-- **Local Storage**: Downloaded datasets stored in `library/datasets/<name>/`
+Datasets are managed through the registry and prepared into a data directory:
+- **Registry** (`library/datasets/registry.yaml`): Declarative manifest of available datasets
+- **Download Utility** (`ann-suite download`): Command to fetch and prepare datasets
+- **Local Storage**: Prepared datasets stored in `./data/<name>/` by default
 
 ## Quick Start
 
@@ -32,7 +32,7 @@ uv run ann-suite download --dataset sift-10k --output ./data
 Each prepared dataset has this structure:
 
 ```
-library/datasets/<dataset-name>/
+data/<dataset-name>/
 ├── base.npy          # Base vectors (N x D, float32)
 ├── queries.npy       # Query vectors (Q x D, float32)
 ├── ground_truth.npy  # Ground truth neighbors (Q x K, int32)
@@ -125,9 +125,9 @@ If you already have NumPy files:
 import numpy as np
 
 # Save your data
-np.save("library/datasets/my-dataset/base.npy", base_vectors)
-np.save("library/datasets/my-dataset/queries.npy", queries)
-np.save("library/datasets/my-dataset/ground_truth.npy", ground_truth)
+np.save("data/my-dataset/base.npy", base_vectors)
+np.save("data/my-dataset/queries.npy", queries)
+np.save("data/my-dataset/ground_truth.npy", ground_truth)
 ```
 
 Create `metadata.yaml`:
@@ -147,7 +147,7 @@ point_type: float32
 For datasets not from ann-benchmarks.com, create a custom download script:
 
 ```python
-# library/datasets/download_custom.py
+# data/download_custom.py
 import numpy as np
 from pathlib import Path
 
@@ -162,7 +162,7 @@ def download_my_dataset(output_dir: Path):
     queries = ...  # shape: (Q, D), dtype: float32
 
     # 3. Compute ground truth if not available
-    from library.datasets.download import compute_ground_truth
+    from ann_suite.datasets import compute_ground_truth
     ground_truth = compute_ground_truth(base, queries, k=100, metric="L2")
 
     # 4. Save
@@ -179,7 +179,7 @@ def download_my_dataset(output_dir: Path):
 If your dataset doesn't include ground truth, the suite can compute it:
 
 ```python
-from library.datasets.download import compute_ground_truth
+from ann_suite.datasets import compute_ground_truth
 
 # Compute k=100 nearest neighbors for each query
 ground_truth = compute_ground_truth(
@@ -199,7 +199,7 @@ ground_truth = compute_ground_truth(
 Reference your dataset in the benchmark configuration:
 
 ```yaml
-data_dir: "./library/datasets"
+data_dir: "./data"
 
 datasets:
   - name: my-dataset
@@ -294,8 +294,8 @@ Validate your dataset:
 ```python
 import numpy as np
 
-base = np.load("library/datasets/my-dataset/base.npy")
-queries = np.load("library/datasets/my-dataset/queries.npy")
+base = np.load("data/my-dataset/base.npy")
+queries = np.load("data/my-dataset/queries.npy")
 
 print(f"Base: {base.shape}, dtype: {base.dtype}")
 print(f"Queries: {queries.shape}, dtype: {queries.dtype}")

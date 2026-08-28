@@ -1,5 +1,6 @@
-"""Dataset utilities for ANN benchmarking suite."""
+"""Dataset assets for ANN benchmarking.
 
-from .download import download_dataset, list_datasets, load_registry
-
-__all__ = ["download_dataset", "list_datasets", "load_registry"]
+This directory holds the dataset registry (``registry.yaml``) and downloaded /
+prepared datasets. It is a *data* directory, not an importable Python package:
+dataset logic lives in :mod:`ann_suite.datasets`.
+"""

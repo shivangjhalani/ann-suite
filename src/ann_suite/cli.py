@@ -17,7 +17,8 @@ from rich.table import Table
 
 from ann_suite.core.config import load_config
 from ann_suite.core.schemas import BenchmarkConfig, BenchmarkResult
-from ann_suite.datasets.download import download_dataset
+from ann_suite.datasets import DEFAULT_DATA_DIR, prepare_dataset
+from ann_suite.datasets import list_datasets as list_registered_datasets
 from ann_suite.evaluator import BenchmarkEvaluator
 from ann_suite.results.storage import ResultsStorage
 from ann_suite.runners.container_runner import ContainerRunner
@@ -253,15 +254,13 @@ def build(
 @app.command()
 def download(
     dataset: str | None = typer.Option(None, help="Dataset name to download"),
-    output: Path | None = typer.Option(None, help="Output directory (default: library/datasets/)"),
+    output: Path | None = typer.Option(None, help="Output directory (default: ./data)"),
     list_datasets: bool = typer.Option(False, "--list", help="List available datasets"),
     quiet: bool = typer.Option(False, help="Suppress output"),
 ) -> None:
     """Download and prepare datasets used by the benchmark."""
-    from ann_suite.datasets.download import list_datasets as list_ds
-
     if list_datasets:
-        list_ds()
+        list_registered_datasets()
         return
 
     if dataset is None:
@@ -269,11 +268,10 @@ def download(
         raise typer.Exit(1)
 
     if output is None:
-        # Default to library/datasets relative to CWD if not specified
-        output = Path("library/datasets")
+        output = DEFAULT_DATA_DIR
 
     try:
-        download_dataset(name=dataset, output_dir=output, quiet=quiet)
+        prepare_dataset(name=dataset, output_dir=output, quiet=quiet)
     except Exception as e:
         console.print(f"[bold red]Error:[/] {e}")
         raise typer.Exit(1) from None
@@ -292,7 +290,7 @@ name: "HNSW vs DiskANN Benchmark"
 description: "Comparing In-Memory HNSW with Disk-Based DiskANN"
 
 # Directories
-data_dir: "./library/datasets"
+data_dir: "./data"
 results_dir: "./results"
 index_dir: "./indices"
 
