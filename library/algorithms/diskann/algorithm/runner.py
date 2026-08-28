@@ -253,6 +253,38 @@ class DiskANNIndex:
 
         return np.asarray(all_indices), np.asarray(all_distances), latencies
 
+    def _native_index(self) -> Any:
+        """Return the underlying native (pybind11) index object.
+
+        ``diskannpy.StaticDiskIndex`` is a pure-Python wrapper that delegates to a
+        native ``_index`` attribute (e.g. ``StaticDiskFloatIndex``). The stats
+        instrumentation lives on the native class; the wrapper does not forward it.
+        """
+        if self.index is None:
+            return None
+        native = getattr(self.index, "_index", None)
+        return native if native is not None else self.index
+
+    def get_search_stats(self) -> dict[str, int] | None:
+        """Return aggregated search statistics, or None if the index isn't instrumented.
+
+        Stats collection is optional: the patched (instrumented) diskannpy build
+        exposes ``get_search_stats()`` on the native pybind11 index (which may be
+        wrapped by ``diskannpy.StaticDiskIndex``); the stock build does not expose
+        it at all. Degrade to None so the benchmark still runs on unpatched
+        bindings.
+        """
+        native = self._native_index()
+        if native is None or not hasattr(native, "get_search_stats"):
+            return None
+        return {k: int(v) for k, v in native.get_search_stats().items()}
+
+    def reset_search_stats(self) -> None:
+        """Reset search statistics if the index supports it (no-op otherwise)."""
+        native = self._native_index()
+        if native is not None and hasattr(native, "reset_search_stats"):
+            native.reset_search_stats()
+
 
 def run_build(config: dict[str, Any]) -> dict[str, Any]:
     """Execute the build phase.
@@ -390,6 +422,10 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
         warmup_end_timestamp = datetime.now(UTC).isoformat()
 
         # Run timed search - emit timestamps for resource window filtering
+        # Reset instrumented counters so stats cover only the timed window.
+        # Optional: index objects without stats instrumentation are skipped.
+        if hasattr(index, "reset_search_stats"):
+            index.reset_search_stats()
         query_start_timestamp = datetime.now(UTC).isoformat()
         start_time = time.perf_counter()
         first_round_indices: np.ndarray | None = None
@@ -443,6 +479,12 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
         if ground_truth is not None:
             recall = compute_recall(first_round_indices, ground_truth, k)
 
+        # Algorithm-level search statistics (SSD reads, bytes, dist comps, hops,
+        # cache hits — sourced from diskann::QueryStats)
+        search_stats: dict[str, int] | None = None
+        if hasattr(index, "get_search_stats"):
+            search_stats = index.get_search_stats() or None
+
         return {
             "status": "success",
             "total_queries": total_queries,
@@ -454,6 +496,8 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
             "p95_latency_ms": p95_latency,
             "p99_latency_ms": p99_latency,
             "max_latency_ms": max_latency,
+            # Algorithm-reported counters (see ContainerProtocol.SearchOutput.stats)
+            "stats": search_stats,
             # Warmup window for resource-metric separation
             "warmup_duration_seconds": warmup_duration_seconds,
             "query_start_timestamp": query_start_timestamp,

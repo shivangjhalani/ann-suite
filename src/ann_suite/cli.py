@@ -132,6 +132,79 @@ def report(
 
 
 @app.command()
+def dashboard(
+    results_dir: Path = typer.Option(
+        Path("./results"), "--results", "-r", help="Results directory"
+    ),
+    output: Path | None = typer.Option(
+        None, "--output", "-o", help="Destination for the exported data JSON"
+    ),
+    open_browser: bool = typer.Option(
+        False, "--open", help="Open the dashboard in the default web browser"
+    ),
+) -> None:
+    """Export all runs to a flat JSON file for the web dashboard.
+
+    Writes ``dashboard_data.json`` (or ``--output``) next to the results and, with
+    ``--open``, launches the self-contained dashboard page (``tools/dashboard/
+    dashboard.html``) that reads it. The page also works by opening the HTML
+    directly and using the "Load data file…" button to pick the JSON.
+    """
+    from ann_suite.export import export_dashboard_json
+
+    try:
+        path = export_dashboard_json(results_dir, output)
+    except Exception as e:
+        console.print(f"[bold red]Error exporting dashboard data: {e}[/]")
+        raise typer.Exit(1) from e
+
+    console.print(f"[bold green]Dashboard data written to[/] {path}")
+
+    if open_browser:
+        import threading
+        import webbrowser
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        html_dir = Path(__file__).resolve().parents[2] / "tools" / "dashboard"
+        data_file = path.name
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 (http.server API)
+                if self.path in ("/", "/dashboard.html"):
+                    body = (html_dir / "dashboard.html").read_bytes()
+                    ctype = "text/html"
+                    self.send_response(200)
+                elif self.path.lstrip("/") == data_file:
+                    body = path.read_bytes()
+                    ctype = "application/json"
+                    self.send_response(200)
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args: object, **kwargs: object) -> None:
+                pass  # silence request logs
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+
+        url = f"http://127.0.0.1:{port}/dashboard.html"
+        console.print(f"[bold blue]Serving dashboard at[/] {url}")
+        console.print("[dim]Press Ctrl+C to stop the server when done.[/]")
+        try:
+            webbrowser.open(url)
+            threading.Event().wait()  # keep serving until interrupted
+        except KeyboardInterrupt:
+            server.shutdown()
+
+
+@app.command()
 def build(
     algorithm: str = typer.Option(..., "--algorithm", "-a", help="Algorithm name to build"),
     algorithms_dir: Path = typer.Option(

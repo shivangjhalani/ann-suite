@@ -238,6 +238,7 @@ class ContainerRunner:
             total_write_usec=result.total_write_usec,
             io_pressure_some_total_usec=result.io_pressure_some_total_usec,
             io_pressure_full_total_usec=result.io_pressure_full_total_usec,
+            psi_available=result.psi_available,
             pgmajfault_delta=result.pgmajfault_delta,
             pgfault_delta=result.pgfault_delta,
             avg_file_bytes=result.avg_file_bytes,
@@ -796,10 +797,21 @@ class ContainerRunner:
             "network_mode": "host",  # Eliminate NAT overhead for accurate latency
             "shm_size": "2g",  # Large workloads (FAISS, etc.) need more than 64MB default
             "security_opt": ["seccomp=unconfined"],  # Allow advanced syscalls (io_uring, mmap)
+            # Run as the host user so files written to the bind-mounted /data and
+            # /data/index volumes (e.g. built indices, metrics.json) are owned by the
+            # invoking user rather than root. Otherwise leftover indices cannot be
+            # removed without sudo/docker. Images that genuinely need root can opt out
+            # in the future; the benchmark algorithm runners do not.
+            "user": f"{os.getuid()}:{os.getgid()}",
         }
 
         if algorithm.cpu_affinity:
             limits["cpuset_cpus"] = algorithm.cpu_affinity
+
+        if algorithm.cpu_limit is not None:
+            # Docker's `nano_cpus` expects quota in 1e-9 CPU units (cores). A float
+            # like 8.0 caps the container at 8 logical cores regardless of cpuset.
+            limits["nano_cpus"] = int(algorithm.cpu_limit * 1e9)
 
         if algorithm.memory_limit:
             limits["mem_limit"] = algorithm.memory_limit

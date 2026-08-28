@@ -130,6 +130,76 @@ class TestCgroupsV2Collector:
         assert summary.sample_count == 0
         assert summary.peak_memory_mb == 0.0
 
+    def test_monotonic_deltas_survive_post_exit_reset(self) -> None:
+        """Regression: PSI/page-fault/throttle deltas must not zero out on teardown.
+
+        The final sample collected after the container exits reads all cgroup
+        counters back as 0 (cgroup torn down). A naive last-first delta would
+        collapse the cumulative PSI / page-fault / throttle deltas to 0.
+        """
+        collector = CgroupsV2Collector(interval_ms=100)
+        now = datetime.now()
+
+        def sample(i: int, *, some: int, full: int, pgmajfault: int, pgfault: int,
+                   nr_throttled: int, throttled_usec: int) -> CollectorSample:
+            return CollectorSample(
+                timestamp=now + timedelta(seconds=i),
+                memory_usage_bytes=100 * 1024 * 1024,
+                cpu_time_ns=int(i * 0.5 * 1e9),
+                blkio_read_bytes=i * 4096,
+                blkio_write_bytes=0,
+                blkio_read_ops=i * 10,
+                blkio_write_ops=0,
+                io_pressure_some_total_usec=some,
+                io_pressure_full_total_usec=full,
+                pgmajfault=pgmajfault,
+                pgfault=pgfault,
+                nr_throttled=nr_throttled,
+                throttled_usec=throttled_usec,
+            )
+
+        # Healthy run: counters increase, then a final post-exit sample reads zeros.
+        collector._samples = [
+            sample(0, some=1000, full=500, pgmajfault=10, pgfault=1000, nr_throttled=0, throttled_usec=0),
+            sample(1, some=5000, full=2500, pgmajfault=50, pgfault=5000, nr_throttled=2, throttled_usec=4000),
+            sample(2, some=9000, full=4500, pgmajfault=90, pgfault=9000, nr_throttled=4, throttled_usec=8000),
+            # post-exit teardown sample: all counters reset to zero
+            sample(3, some=0, full=0, pgmajfault=0, pgfault=0, nr_throttled=0, throttled_usec=0),
+        ]
+
+        summary = collector._aggregate_samples()
+
+        assert summary.io_pressure_some_total_usec == 8000  # 9000 - 1000, not zeroed
+        assert summary.io_pressure_full_total_usec == 4000  # 4500 - 500
+        assert summary.pgmajfault_delta == 80  # 90 - 10
+        assert summary.pgfault_delta == 8000  # 9000 - 1000
+        assert summary.nr_throttled_delta == 4
+        assert summary.throttled_usec_delta == 8000
+        assert summary.psi_available is True
+
+    def test_psi_available_false_when_no_psi_observed(self) -> None:
+        """PSI is flagged unavailable when no sample ever reports a non-zero counter."""
+        collector = CgroupsV2Collector(interval_ms=100)
+        now = datetime.now()
+        # All PSI counters zero across the whole window (e.g. kernel without PSI).
+        collector._samples = [
+            CollectorSample(
+                timestamp=now + timedelta(seconds=i),
+                memory_usage_bytes=100 * 1024 * 1024,
+                cpu_time_ns=int(i * 0.5 * 1e9),
+                blkio_read_bytes=i * 4096,
+                blkio_write_bytes=0,
+                blkio_read_ops=i * 10,
+                blkio_write_ops=0,
+                io_pressure_some_total_usec=0,
+                io_pressure_full_total_usec=0,
+            )
+            for i in range(5)
+        ]
+        summary = collector._aggregate_samples()
+        assert summary.io_pressure_some_total_usec == 0
+        assert summary.psi_available is False
+
 
 class TestIOStatParsing:
     """Tests for io.stat parsing with extended fields."""

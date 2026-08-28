@@ -11,6 +11,7 @@ Welcome to the ANN Benchmarking Suite documentation. This suite provides product
 | [Adding Algorithms](./ADDING_ALGORITHMS.md) | How to add new algorithm implementations |
 | [Adding Datasets](./ADDING_DATASETS.md) | How to add and manage datasets |
 | [Metrics Reference](./METRICS.md) | All metrics collected and how they're measured |
+| [Visualization Dashboard](./DASHBOARD.md) | Web dashboard for exploring and comparing results |
 | [API Reference](./API.md) | Python API for programmatic usage |
 | [Docker Optimizations](./DOCKER_OPTIMIZATIONS.md) | Runtime settings for research-grade performance |
 

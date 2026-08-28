@@ -1,0 +1,87 @@
+# ==============================================================================
+# SIFT-128 (1M) Light Sweep — HNSW vs DiskANN
+# ==============================================================================
+# Dataset: 1,000,000 base vectors, 128D, Euclidean (L2)
+# Sweeps:  HNSW ef:[50,100,200]    DiskANN Ls:[50,100,200]
+# Generated for the visualization dashboard test.
+# ==============================================================================
+
+name: "sift1m-light-sweep"
+description: "SIFT-128 1M light sweep: HNSW ef and DiskANN Ls"
+
+data_dir: "./library/datasets"
+results_dir: "./results"
+index_dir: "./indices"
+
+monitor_interval_ms: 100
+
+algorithms:
+  # ----------------------------------------------------------------------------
+  # HNSW — in-memory
+  # ----------------------------------------------------------------------------
+  - name: HNSW
+    docker_image: ann-suite/hnsw:latest
+    algorithm_type: memory
+    cpu_limit: 8.0
+    memory_limit: "8g"
+    env_vars:
+      OMP_NUM_THREADS: "4"
+    build:
+      timeout_seconds: 7200
+      args:
+        M: 16
+        ef_construction: 200
+        num_threads: 4
+    search:
+      timeout_seconds: 600
+      k: 10
+      batch_mode: false
+      args:
+        ef: [50, 100, 200]
+        num_threads: 4
+      warmup:
+        collect_metrics: true
+        cache_warmup_queries: 0
+        drop_caches_before: false
+
+  # ----------------------------------------------------------------------------
+  # DiskANN — disk-based
+  # ----------------------------------------------------------------------------
+  - name: DiskANN
+    docker_image: ann-suite/diskann:latest
+    algorithm_type: disk
+    cpu_limit: 8.0
+    memory_limit: "8g"
+    env_vars:
+      OMP_NUM_THREADS: "4"
+    build:
+      timeout_seconds: 14400
+      args:
+        R: 64
+        L: 100
+        alpha: 1.2
+        num_threads: 4
+        build_memory_maximum: 0.6
+        search_memory_maximum: 0.5
+    search:
+      timeout_seconds: 600
+      k: 10
+      batch_mode: false
+      args:
+        Ls: [50, 100, 200]
+        beam_width: 2
+        num_threads: 4
+        num_nodes_to_cache: 10000
+      warmup:
+        collect_metrics: true
+        cache_warmup_queries: 200
+        drop_caches_before: false
+
+datasets:
+  - name: sift-128-euclidean
+    base_path: sift-128-euclidean/base.npy
+    query_path: sift-128-euclidean/queries.npy
+    ground_truth_path: sift-128-euclidean/ground_truth.npy
+    distance_metric: L2
+    dimension: 128
+    point_type: float32

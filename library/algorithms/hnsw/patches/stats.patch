@@ -1,0 +1,67 @@
+--- a/hnswlib/hnswalg.h	2023-12-03 09:21:14.000000000 +0530
++++ b/hnswlib/hnswalg.h	2026-08-23 23:24:58.960220769 +0530
+@@ -64,6 +64,7 @@
+ 
+     mutable std::atomic<long> metric_distance_computations{0};
+     mutable std::atomic<long> metric_hops{0};
++    mutable std::atomic<long> metric_candidates_explored{0};
+ 
+     bool allow_replace_deleted_ = false;  // flag to replace deleted elements (marked as deleted) during insertions
+ 
+@@ -365,6 +366,7 @@
+             if (collect_metrics) {
+                 metric_hops++;
+                 metric_distance_computations+=size;
++                metric_candidates_explored++;
+             }
+ 
+ #ifdef USE_SSE
+@@ -1305,10 +1307,10 @@
+         std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
+         bool bare_bone_search = !num_deleted_ && !isIdAllowed;
+         if (bare_bone_search) {
+-            top_candidates = searchBaseLayerST<true>(
++            top_candidates = searchBaseLayerST<true, true>(
+                     currObj, query_data, std::max(ef_, k), isIdAllowed);
+         } else {
+-            top_candidates = searchBaseLayerST<false>(
++            top_candidates = searchBaseLayerST<false, true>(
+                     currObj, query_data, std::max(ef_, k), isIdAllowed);
+         }
+ 
+--- a/python_bindings/bindings.cpp	2023-12-03 09:21:14.000000000 +0530
++++ b/python_bindings/bindings.cpp	2026-08-23 23:51:13.589785106 +0530
+@@ -218,6 +218,24 @@
+         this->num_threads_default = num_threads;
+     }
+ 
++    py::dict getSearchStats() const {
++        if (!index_inited)
++            throw std::runtime_error("Index not initialized.");
++        py::dict stats;
++        stats["distance_computations"] = appr_alg->metric_distance_computations.load();
++        stats["hops"] = appr_alg->metric_hops.load();
++        stats["candidates_explored"] = appr_alg->metric_candidates_explored.load();
++        return stats;
++    }
++
++    void resetSearchStats() {
++        if (!index_inited)
++            throw std::runtime_error("Index not initialized.");
++        appr_alg->metric_distance_computations = 0;
++        appr_alg->metric_hops = 0;
++        appr_alg->metric_candidates_explored = 0;
++    }
++
+     size_t indexFileSize() const {
+         return appr_alg->indexFileSize();
+     }
+@@ -950,6 +968,8 @@
+         .def("resize_index", &Index<float>::resizeIndex, py::arg("new_size"))
+         .def("get_max_elements", &Index<float>::getMaxElements)
+         .def("get_current_count", &Index<float>::getCurrentCount)
++        .def("get_search_stats", &Index<float>::getSearchStats)
++        .def("reset_search_stats", &Index<float>::resetSearchStats)
+         .def_readonly("space", &Index<float>::space_name)
+         .def_readonly("dim", &Index<float>::dim)
+         .def_readwrite("num_threads", &Index<float>::num_threads_default)

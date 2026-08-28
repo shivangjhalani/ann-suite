@@ -153,6 +153,9 @@ class CollectorResult:
     # I/O pressure (PSI deltas)
     io_pressure_some_total_usec: int = 0
     io_pressure_full_total_usec: int = 0
+    # Whether PSI counters were observed as non-zero in any sample in this window.
+    # Distinguishes "measured zero stall" (True) from "PSI unavailable" (False).
+    psi_available: bool = False
     # Memory stats deltas
     pgmajfault_delta: int = 0
     pgfault_delta: int = 0

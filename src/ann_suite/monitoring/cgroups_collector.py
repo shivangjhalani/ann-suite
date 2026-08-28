@@ -100,6 +100,32 @@ def filter_samples(
     return valid, len(samples) - len(valid)
 
 
+def _monotonic_delta(samples: list[CollectorSample], field: str) -> int:
+    """Compute the delta of a monotone cgroup counter across a sample window.
+
+    cgroup counters (PSI totals, page-fault counts, CPU throttling) only ever
+    increase during the container's lifetime, but the collector's final sample is
+    often taken after the cgroup has been torn down and reads back as 0. A naive
+    ``last - first`` delta would then collapse to 0, discarding the real activity.
+
+    Because the counters are monotone, the peak value observed in the window equals
+    the final healthy value, so we compute ``max(value) - first value``, clamping any
+    negative result (the very-early ``first`` sample may itself be zero) to zero.
+
+    Args:
+        samples: Ordered samples for the window.
+        field: Name of the ``CollectorSample`` attribute to delta.
+
+    Returns:
+        Non-negative cumulative counter delta.
+    """
+    if not samples:
+        return 0
+    first = int(getattr(samples[0], field, 0))
+    peak = max(int(getattr(s, field, 0)) for s in samples)
+    return max(0, peak - first)
+
+
 class CgroupsV2Collector(BaseCollector):
     """Collector that reads metrics directly from cgroups v2 filesystem.
 
@@ -821,19 +847,28 @@ class CgroupsV2Collector(BaseCollector):
             0, last_io_sample.blkio_write_usec - first_io_sample.blkio_write_usec
         )
 
-        # I/O pressure deltas (PSI totals)
-        io_pressure_some_delta = max(
-            0,
-            last_sample.io_pressure_some_total_usec - first_sample.io_pressure_some_total_usec,
+        # I/O pressure deltas (PSI totals). These counters only ever increase during
+        # the container's lifetime but are read back as 0 once the cgroup is torn down
+        # (the final post-exit sample). Deducting 0 would zero out the real cumulative
+        # delta, so compute the delta from the peak observed value instead of the last
+        # sample (monotonic counters => peak == final healthy value).
+        io_pressure_some_delta = _monotonic_delta(
+            samples, "io_pressure_some_total_usec"
         )
-        io_pressure_full_delta = max(
-            0,
-            last_sample.io_pressure_full_total_usec - first_sample.io_pressure_full_total_usec,
+        io_pressure_full_delta = _monotonic_delta(
+            samples, "io_pressure_full_total_usec"
+        )
+        # PSI is "available" if any sample observed a non-zero stall counter; this
+        # lets callers report a measured 0.0% stall rather than a misleading None.
+        psi_available = any(
+            s.io_pressure_some_total_usec > 0 or s.io_pressure_full_total_usec > 0
+            for s in samples
         )
 
-        # Memory stat deltas (page faults are counters, file stats are gauges)
-        pgmajfault_delta = max(0, last_sample.pgmajfault - first_sample.pgmajfault)
-        pgfault_delta = max(0, last_sample.pgfault - first_sample.pgfault)
+        # Memory stat deltas (page faults are counters, file stats are gauges).
+        # Same reset-to-zero hazard as PSI: use the peak value for the delta.
+        pgmajfault_delta = _monotonic_delta(samples, "pgmajfault")
+        pgfault_delta = _monotonic_delta(samples, "pgfault")
 
         # File cache stats (gauges)
         file_bytes_values = [s.file_bytes for s in samples]
@@ -857,9 +892,9 @@ class CgroupsV2Collector(BaseCollector):
         peak_active_file_bytes = max(active_file_values) if active_file_values else 0
         peak_inactive_file_bytes = max(inactive_file_values) if inactive_file_values else 0
 
-        # CPU throttling deltas
-        nr_throttled_delta = max(0, last_sample.nr_throttled - first_sample.nr_throttled)
-        throttled_usec_delta = max(0, last_sample.throttled_usec - first_sample.throttled_usec)
+        # CPU throttling deltas (monotonic counters; same reset hazard as PSI).
+        nr_throttled_delta = _monotonic_delta(samples, "nr_throttled")
+        throttled_usec_delta = _monotonic_delta(samples, "throttled_usec")
 
         # Per-device I/O: compute top device by read bytes delta
         top_read_device = self._compute_top_read_device(first_sample, last_sample)
@@ -927,6 +962,7 @@ class CgroupsV2Collector(BaseCollector):
             total_write_usec=write_usec_delta,
             io_pressure_some_total_usec=io_pressure_some_delta,
             io_pressure_full_total_usec=io_pressure_full_delta,
+            psi_available=psi_available,
             pgmajfault_delta=pgmajfault_delta,
             pgfault_delta=pgfault_delta,
             avg_file_bytes=avg_file_bytes,

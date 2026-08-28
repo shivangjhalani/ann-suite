@@ -334,9 +334,12 @@ result["stats"] = stats.to_dict()
 ```
 
 > [!NOTE]
-> The bundled HNSW (hnswlib) and DiskANN (diskannpy) runners cannot emit these counters:
-> their C++ cores expose no instrumentation hooks. Counters appear automatically for any
-> algorithm that reports them — no suite changes required.
+> The bundled HNSW and DiskANN runners are built from instrumented sources
+> (`library/algorithms/*/patches/stats.patch`) and report these counters natively:
+> hnswlib emits `distance_computations`/`hops`/`candidates_explored`; DiskANN emits
+> `io_reads`/`io_bytes_read`/`distance_computations`/`hops`/`cache_hits` from
+> `diskann::QueryStats`. Counters are reset before each timed window so they cover
+> only query execution.
 
 ---
 
@@ -408,6 +411,15 @@ class MemoryFaultMetrics:
 - **Major faults** indicate disk reads due to page cache misses — critical for disk-based ANN
 - **Minor faults** are memory-only (copy-on-write, zero-fill) and don't indicate I/O
 - **High `major_faults_per_query`** suggests index doesn't fit in memory or cache is cold
+
+> [!IMPORTANT]
+> **Fault metrics are fault-based only.** They count `mmap` page faults, NOT raw disk
+> traffic. Algorithms that read via `O_DIRECT`/`pread` (e.g. DiskANN's `StaticDiskIndex`)
+> bypass the page cache entirely, so `pgmajfault`/`pgfault` are ~0 and
+> `major_faults_per_query` will read `0` while `pages_per_query` (from `io.stat`) correctly
+> reports hundreds of disk pages per query. For O_DIRECT workloads, ignore the fault metrics
+> and use `search_pages_per_query`, `search_bytes_read_per_query`, and IOPS as the
+> authoritative disk-access metrics.
 
 **Page Cache Hit Rate:**
 
@@ -655,6 +667,14 @@ def get_system_block_size() -> int:
 | HDD | 512 bytes |
 | SSD/NVMe | 4096 bytes (4KB) |
 | Default fallback | 4096 bytes |
+
+> [!NOTE]
+> `physical_block_size` reports the raw device logical/physical block size (e.g. `512` on a
+> 512e drive), while all `*_pages_*` metrics are computed against a **standardized 4 KB page**
+> (`STANDARD_PAGE_SIZE = 4096`) for cross-system comparability. A device that reports
+> `physical_block_size=512` will therefore have `total_pages_read = total_read_bytes / 4096`,
+> not `/ 512`. Treat `physical_block_size` as device metadata only; treat page counts as
+> 4 KB units.
 
 ---
 

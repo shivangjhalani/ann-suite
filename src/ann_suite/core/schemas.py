@@ -17,6 +17,24 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
+
+def _flatten_dict(d: dict[str, Any], prefix: str = "", sep: str = "_") -> dict[str, Any]:
+    """Recursively flatten a nested dict into dot/sep-prefixed scalar keys.
+
+    Nested mappings become prefixed keys (e.g. {"search": {"ef": 100}} ->
+    {"search_ef": 100}). Lists and scalar values are kept as-is under their key so
+    they remain available for inspection without being mangled.
+    """
+    flat: dict[str, Any] = {}
+    for key, value in d.items():
+        full_key = f"{prefix}{sep}{key}" if prefix else key
+        if isinstance(value, dict):
+            flat.update(_flatten_dict(value, prefix=full_key, sep=sep))
+        else:
+            flat[full_key] = value
+    return flat
+
+
 # =============================================================================
 # Output TypedDicts for type-safe JSON serialization
 # =============================================================================
@@ -288,6 +306,14 @@ class AlgorithmConfig(BaseModel):
         default=None,
         description="CPU core affinity/cpuset (e.g., '0-3'); pins container to these cores",
     )
+    cpu_limit: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Hard CPU utilization cap in cores (e.g., 8.0); maps to Docker's nano_cpus "
+            "computed over the available cores. Mutually exclusive in effect with cpu_affinity."
+        ),
+    )
     memory_limit: str | None = Field(
         default=None,
         description="Hard container memory limit (e.g., '8g'); swap is capped to the same value",
@@ -409,6 +435,11 @@ class ResourceSummary(BaseModel):
     )
     io_pressure_full_total_usec: int = Field(
         default=0, ge=0, description="Total PSI io.full time (microseconds)"
+    )
+    psi_available: bool = Field(
+        default=False,
+        description="Whether PSI counters were observed as non-zero in any sample; "
+        "distinguishes a measured zero-stall window from PSI being unavailable",
     )
     pgmajfault_delta: int = Field(
         default=0, ge=0, description="Major page faults during window (delta)"
@@ -567,9 +598,18 @@ class MemoryMetrics(BaseModel):
         default=0.0, ge=0, description="Average RSS during search phase in MB"
     )
 
-    # Cache/fault statistics (optional - requires /proc or memory.stat access)
+    # Cache/fault statistics (optional - requires /proc or memory.stat access).
+    # FAULT-BASED only: these reflect mmap/page-fault traffic, NOT direct I/O.
+    # Algorithms that read via O_DIRECT/pread (e.g. DiskANN) produce ~no faults and
+    # therefore report None here; use disk_io.search_pages_per_query /
+    # bytes_read_per_query / IOPS as the authoritative disk metrics for them.
     search_major_faults: int | None = Field(
-        default=None, ge=0, description="Major page faults during search (disk-backed pages)"
+        default=None,
+        ge=0,
+        description=(
+            "Major page faults during search (disk-backed pages). Fault-based only; "
+            "zero/None for O_DIRECT workloads that bypass the page cache entirely."
+        ),
     )
     search_page_cache_hit_rate: float | None = Field(
         default=None,
@@ -578,8 +618,9 @@ class MemoryMetrics(BaseModel):
         description=(
             "Fraction of page-fault accesses served without disk I/O, computed as "
             "1 - (pgmajfault / pgfault) from cgroup memory.stat. This is the OS "
-            "page-cache hit rate for faulted pages; algorithm-internal caches that "
-            "avoid syscalls/mmap faults are not visible here (see algorithm_stats)."
+            "page-cache hit rate for FAULTED pages only; it is None when there are "
+            "no faults to judge (e.g. O_DIRECT readers). Algorithm-internal caches "
+            "that avoid syscalls/mmap faults are not visible here (see algorithm_stats)."
         ),
     )
 
@@ -1187,8 +1228,15 @@ class BenchmarkResult(BaseModel):
             for key, value in self.search_result.time_bases.model_dump().items():
                 data[f"time_{key}"] = value
 
-        # Add hyperparameters as JSON string for CSV compatibility
-        data["hyperparameters"] = self.hyperparameters
+        # Flatten hyperparameters into prefixed hp_* columns so sweeps become
+        # stable, sortable CSV columns (e.g. hp_search_ef -> 100).
+        for key, value in _flatten_dict(self.hyperparameters).items():
+            data[f"hp_{key}"] = value
+
+        # Flatten algorithm-reported stats into stats_* columns for the dashboard.
+        if self.algorithm_stats is not None:
+            for key, value in _flatten_dict(self.algorithm_stats.to_dict()).items():
+                data[f"stats_{key}"] = value
 
         return data
 

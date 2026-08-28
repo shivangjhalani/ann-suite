@@ -184,6 +184,22 @@ class HNSWIndex:
 
         return np.asarray(all_indices), np.asarray(all_distances), latencies
 
+    def get_search_stats(self) -> dict[str, int] | None:
+        """Return aggregated search statistics, or None if the index isn't instrumented.
+
+        Stats collection is optional: the patched (instrumented) hnswlib build
+        exposes ``get_search_stats()``; the stock build does not. Degrade to None
+        so the benchmark still runs on unpatched bindings.
+        """
+        if self.index is None or not hasattr(self.index, "get_search_stats"):
+            return None
+        return {k: int(v) for k, v in self.index.get_search_stats().items()}
+
+    def reset_search_stats(self) -> None:
+        """Reset search statistics if the index supports it (no-op otherwise)."""
+        if self.index is not None and hasattr(self.index, "reset_search_stats"):
+            self.index.reset_search_stats()
+
 
 def run_build(config: dict[str, Any]) -> dict[str, Any]:
     """Execute the build phase.
@@ -307,6 +323,10 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
         warmup_end_timestamp = datetime.now(UTC).isoformat()
 
         # Run timed search - emit timestamps for resource window filtering
+        # Reset instrumented counters so stats cover only the timed window.
+        # Optional: index objects without stats instrumentation are skipped.
+        if hasattr(index, "reset_search_stats"):
+            index.reset_search_stats()
         query_start_timestamp = datetime.now(UTC).isoformat()
         start_time = time.perf_counter()
         first_round_indices: np.ndarray | None = None
@@ -359,6 +379,11 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
         if ground_truth is not None:
             recall = compute_recall(first_round_indices, ground_truth, k)
 
+        # Algorithm-level search statistics (distance comps, hops, candidates)
+        search_stats: dict[str, int] | None = None
+        if hasattr(index, "get_search_stats"):
+            search_stats = index.get_search_stats() or None
+
         return {
             "status": "success",
             "total_queries": total_queries,
@@ -370,6 +395,8 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
             "p95_latency_ms": p95_latency,
             "p99_latency_ms": p99_latency,
             "max_latency_ms": max_latency,
+            # Algorithm-reported counters (see ContainerProtocol.SearchOutput.stats)
+            "stats": search_stats,
             # Warmup window for resource-metric separation
             "warmup_duration_seconds": warmup_duration_seconds,
             "query_start_timestamp": query_start_timestamp,

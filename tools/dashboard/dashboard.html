@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ANN Benchmark Dashboard</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1420; --panel: #171d2b; --panel2: #1e2637; --border: #2a3348;
+    --text: #e6eaf2; --muted: #8b96ad; --accent: #4f83f7; --accent2: #35c98b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column;
+  }
+  header {
+    padding: 12px 20px; border-bottom: 1px solid var(--border); background: var(--panel);
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .3px; }
+  header .sub { font-size: 12px; color: var(--muted); }
+  .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex: 1; }
+  main { flex: 1; display: flex; min-height: 0; }
+  aside {
+    width: 250px; min-width: 250px; border-right: 1px solid var(--border); background: var(--panel);
+    padding: 16px; overflow-y: auto;
+  }
+  .chart-area { flex: 1; overflow-y: auto; padding: 16px; }
+  .section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin: 18px 0 8px; }
+  label.ctl { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  select {
+    width: 100%; background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 7px 8px; font-size: 13px; margin-bottom: 4px;
+  }
+  .chip-group { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--panel2);
+    font-size: 12px; cursor: pointer; user-select: none; color: var(--text);
+  }
+  .chip.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+  .tab {
+    padding: 6px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; background: var(--panel2);
+    border: 1px solid var(--border); color: var(--muted);
+  }
+  .tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .chart-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px; margin-bottom: 14px;
+  }
+  .chart-card h3 { margin: 0 0 4px; font-size: 13px; font-weight: 600; }
+  .chart-card .desc { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+  .empty { color: var(--muted); text-align: center; padding: 60px 20px; }
+  .counts { font-size: 11px; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>ANN Benchmark Dashboard</h1>
+  <span class="sub">Compare runs, algorithms, datasets &amp; hyperparameter sweeps</span>
+  <div class="toolbar">
+    <button class="chip" id="loadBtn">Load data file…</button>
+    <span class="counts" id="status">no data</span>
+  </div>
+</header>
+<main>
+  <aside id="sidebar">
+    <div>
+      <label class="ctl">Run (experiment)</label>
+      <select id="runSel" multiple size="4"></select>
+    </div>
+    <div class="section-title">Datasets</div>
+    <div class="chip-group" id="datasetChips"></div>
+    <div class="section-title">Algorithms</div>
+    <div class="chip-group" id="algoChips"></div>
+    <div class="section-title">X-axis</div>
+    <select id="xaxisSel"></select>
+  </aside>
+  <div class="chart-area">
+    <div class="tabs" id="tabs"></div>
+    <div id="charts"></div>
+  </div>
+</main>
+<script>
+"use strict";
+
+/* ---------- metric catalog ----------
+   Each tab declares its charts: { key, label, axisLabel, kind }.
+   key   -> column prefix in the flat row (will look up the exact column).
+   kind  -> 'bar' | 'line' | 'scatter' | 'scatter-recall'.
+*/
+const TABS = [
+  {
+    id: "quality", label: "Quality",
+    charts: [
+      { key: "recall", label: "Recall@k", kind: "line" },
+      { key: "qps", label: "Queries per second", kind: "line" },
+      { special: "recall-vs-qps" },
+    ],
+  },
+  {
+    id: "latency", label: "Latency",
+    charts: [
+      { key: "latency_mean_ms", label: "Mean latency (ms)", kind: "bar" },
+      { key: "latency_p50_ms", label: "p50 latency (ms)", kind: "bar" },
+      { key: "latency_p95_ms", label: "p95 latency (ms)", kind: "bar" },
+      { key: "latency_p99_ms", label: "p99 latency (ms)", kind: "bar" },
+      { key: "latency_max_ms", label: "Max latency (ms)", kind: "bar" },
+    ],
+  },
+  {
+    id: "cpu", label: "CPU",
+    charts: [
+      { key: "cpu_search_cpu_time_seconds", label: "Search CPU time (s)", kind: "bar" },
+      { key: "cpu_search_cpu_time_per_query_ms", label: "CPU time / query (ms)", kind: "line" },
+      { key: "cpu_search_peak_cpu_percent", label: "Search peak CPU %", kind: "bar" },
+      { key: "cpu_search_avg_cpu_percent", label: "Search avg CPU %", kind: "bar" },
+      { key: "cpu_build_cpu_time_seconds", label: "Build CPU time (s)", kind: "bar" },
+      { key: "cpu_warmup_cpu_time_seconds", label: "Warmup CPU time (s)", kind: "bar" },
+    ],
+  },
+  {
+    id: "memory", label: "Memory",
+    charts: [
+      { key: "memory_search_peak_rss_mb", label: "Search peak RSS (MB)", kind: "bar" },
+      { key: "memory_search_avg_rss_mb", label: "Search avg RSS (MB)", kind: "bar" },
+      { key: "memory_build_peak_rss_mb", label: "Build peak RSS (MB)", kind: "bar" },
+      { key: "memory_warmup_peak_rss_mb", label: "Warmup peak RSS (MB)", kind: "bar" },
+    ],
+  },
+  {
+    id: "disk", label: "Disk I/O",
+    charts: [
+      { key: "disk_io_search_total_read_mb", label: "Total read (MB)", kind: "bar" },
+      { key: "disk_io_search_avg_read_throughput_mbps", label: "Avg read throughput (MB/s)", kind: "line" },
+      { key: "disk_io_search_avg_read_iops", label: "Avg read IOPS", kind: "line" },
+      { key: "disk_io_search_pages_per_query", label: "Pages read / query", kind: "line" },
+      { key: "disk_io_search_p95_read_service_time_ms", label: "p95 read service time (ms)", kind: "bar" },
+      { key: "disk_io_search_io_stall_percent", label: "I/O stall %", kind: "bar" },
+    ],
+  },
+  {
+    id: "build", label: "Build / Index",
+    charts: [
+      { key: "total_build_time_seconds", label: "Build time (s)", kind: "bar" },
+      { key: "index_size_bytes", label: "Index size (bytes)", kind: "bar" },
+    ],
+  },
+];
+
+const state = {
+  rows: [],
+  runs: [], datasets: [], algos: [],
+  selRuns: new Set(), selDatasets: new Set(), selAlgos: new Set(),
+  activeTab: "quality",
+  xaxis: null,
+  colors: {},
+};
+
+const $ = (id) => document.getElementById(id);
+
+function palette(n) {
+  const cols = ["#4f83f7","#35c98b","#ef8354","#a06cd5","#e4c542","#e15759","#59b8e6","#c98bb9"];
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(cols[i % cols.length]);
+  return out;
+}
+
+function filteredRows() {
+  return state.rows.filter((r) =>
+    state.selRuns.has(r.run_name) &&
+    state.selDatasets.has(r.dataset) &&
+    state.selAlgos.has(r.algorithm)
+  );
+}
+
+/* Column helpers: find the real column for a logical prefix (custom metrics may
+   nest / be listed under custom_*). */
+function findColumn(rows, key) {
+  if (rows.length === 0) return null;
+  const present = Object.keys(rows[0]);
+  if (present.includes(key)) return key;
+  const match = present.find((k) => k === key || k.endsWith("_" + key) || k.startsWith(key));
+  return match || null;
+}
+
+function distinct(rows, key) {
+  return [...new Set(rows.map((r) => r[key]))].filter((v) => v != null && v !== "");
+}
+
+/* Group rows by (dataset, algorithm, x). Returns trace data per algorithm. */
+function buildTraces(rows, metricCol, xCol) {
+  const groups = {};
+  rows.forEach((r) => {
+    const ds = r.dataset, algo = r.algorithm;
+    const x = xCol ? (r[xCol] ?? (r["hp_" + xCol] ?? "?")) : "all";
+    const key = ds + "\u0000" + algo;
+    (groups[key] = groups[key] || {}).__name = algo;
+    (groups[key].__ds = groups[key].__ds || ds);
+    (groups[key][x] = (groups[key][x] || []).concat(r));
+  });
+  // one trace per (dataset, algorithm)
+  const traces = [];
+  for (const key of Object.keys(groups)) {
+    const g = groups[key];
+    // Order x-values numerically when they are all parseable numbers, so sweep
+    // points plot in ascending order (100,200,50 -> 50,100,200) instead of
+    // lexicographic order.
+    const xs = Object.keys(g).filter((k) => !k.startsWith("__"));
+    xs.sort((a, b) => {
+      const na = Number(a), nb = Number(b);
+      const bothNumeric = a !== "" && b !== "" && !isNaN(na) && !isNaN(nb);
+      if (bothNumeric) return na - nb;
+      return String(a).localeCompare(String(b), undefined, { numeric: true });
+    });
+    const ys = xs.map((x) => {
+      const vals = g[x].map((r) => r[metricCol]).filter((v) => v != null);
+      return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+    });
+    traces.push({
+      x: xs.map(String),
+      y: ys,
+      name: g.__name + " · " + g.__ds,
+      type: "bar" === undefined ? "scatter" : "scatter",
+      mode: "lines+markers",
+    });
+  }
+  return traces;
+}
+
+function renderChart(spec) {
+  const rows = filteredRows();
+  const card = document.createElement("div");
+  card.className = "chart-card";
+
+  const h = document.createElement("h3");
+  const d = document.createElement("div");
+  d.className = "desc";
+
+  if (spec.special === "recall-vs-qps") {
+    h.textContent = "Recall vs QPS";
+    d.textContent = "Quality trade-off; each point is one config (color = algorithm, symbol = dataset).";
+    card.appendChild(h); card.appendChild(d);
+    const traces = state.algos.map((algo) => {
+      const pts = rows.filter((r) => r.algorithm === algo && r.recall != null && r.qps != null);
+      return {
+        x: pts.map((r) => r.qps),
+        y: pts.map((r) => r.recall),
+        mode: "markers",
+        type: "scatter",
+        name: algo,
+        text: pts.map((r) => r.dataset),
+        hovertemplate: "<b>" + algo + "</b><br>%{text}<br>QPS=%{x:.1f}<br>recall=%{y:.3f}<extra></extra>",
+        marker: { size: 10 },
+      };
+    });
+    if (traces.length === 0) { card.appendChild(emptyMsg()); return card; }
+    const layout = {
+      template: "plotly_dark",
+      paper_bgcolor: "rgba(0,0,0,0)",
+      plot_bgcolor: "rgba(0,0,0,0)",
+      margin: { l: 60, r: 20, t: 10, b: 45 },
+      xaxis: { title: "QPS" },
+      yaxis: { title: "Recall@k", range: [0, 1] },
+      showlegend: true,
+    };
+    Plotly.newPlot(card, traces, layout, { responsive: true });
+    return card;
+  }
+
+  const col = findColumn(rows, spec.key);
+  h.textContent = spec.label;
+  if (!col) {
+    d.textContent = "No data for this metric in the selected runs.";
+    card.appendChild(h); card.appendChild(d); card.appendChild(emptyMsg());
+    return card;
+  }
+  const xCol = state.xaxis;
+  d.textContent = "Column: " + col + (xCol ? " · x-axis: " + xCol : "");
+  card.appendChild(h); card.appendChild(d);
+
+  // per dataset, one group of traces
+  const perDs = state.selDatasets.size <= 1;
+  const traces = [];
+  const dsList = [...state.selDatasets];
+  dsList.forEach((ds, i) => {
+    const sub = rows.filter((r) => r.dataset === ds);
+    if (sub.length === 0) return;
+    const t = buildTraces(sub, col, xCol);
+    traces.push(...t);
+  });
+
+  if (traces.length === 0) { card.appendChild(emptyMsg()); return card; }
+
+  const isSweep = xCol != null;
+  traces.forEach((t, i) => {
+    t.type = "scatter";
+    t.mode = isSweep ? "lines+markers" : "markers";
+    t.marker = { size: isSweep ? 7 : 11 };
+  });
+
+  const layout = {
+    template: "plotly_dark",
+    paper_bgcolor: "rgba(0,0,0,0)",
+    plot_bgcolor: "rgba(0,0,0,0)",
+    margin: { l: 60, r: 20, t: 10, b: 60 },
+    xaxis: {
+      title: xCol ? xCol : "configuration",
+      ...(isSweep ? {} : { showticklabels: false }),
+    },
+    yaxis: { title: spec.label },
+    showlegend: true,
+  };
+  Plotly.newPlot(card, traces, layout, { responsive: true });
+  return card;
+}
+
+function emptyMsg() {
+  const e = document.createElement("div");
+  e.className = "empty";
+  e.textContent = "Nothing to show — adjust filters or load more data.";
+  return e;
+}
+
+function renderAll() {
+  const charts = document.getElementById("charts");
+  charts.innerHTML = "";
+  const tab = TABS.find((t) => t.id === state.activeTab);
+  if (!tab) return;
+  tab.charts.forEach((spec) => {
+    charts.appendChild(renderChart(spec));
+  });
+}
+
+/* ---------- controls ---------- */
+function renderSidebar() {
+  // runs
+  const runSel = $("runSel");
+  const cur = new Set(state.selRuns);
+  runSel.innerHTML = "";
+  state.runs.forEach((r) => {
+    const o = document.createElement("option");
+    o.value = r; o.textContent = r; o.selected = cur.has(r);
+    runSel.appendChild(o);
+  });
+
+  // datasets + algos chips (all selected by default)
+  renderChips("datasetChips", state.datasets, state.selDatasets, (d) => toggleSet(state.selDatasets, d));
+  renderChips("algoChips", state.algos, state.selAlgos, (a) => toggleSet(state.selAlgos, a));
+
+  // x-axis dropdown
+  const xSel = $("xaxisSel");
+  const hpCols = distinct(state.rows, "__hp__").length ? [] : hpColumnNames();
+  const opts = [""].concat(hpCols);
+  xSel.innerHTML = "";
+  opts.forEach((o) => {
+    const opt = document.createElement("option");
+    opt.value = o; opt.textContent = o === "" ? "(grouped bars)" : o;
+    if (o === state.xaxis) opt.selected = true;
+    xSel.appendChild(opt);
+  });
+}
+
+function hpColumnNames() {
+  if (state.rows.length === 0) return [];
+  const names = new Set();
+  state.rows.forEach((r) => {
+    Object.keys(r).forEach((k) => {
+      if (k.startsWith("hp_")) {
+        // strip hp_ and any trailing index; keep as "search_ef"
+        names.add(k.slice(3));
+      }
+    });
+  });
+  return [...names].sort();
+}
+
+function toggleSet(set, v) {
+  set.has(v) ? set.delete(v) : set.add(v);
+  renderSidebar(); renderAll();
+}
+
+function renderChips(containerId, items, selectedSet, onToggle) {
+  const c = $(containerId);
+  c.innerHTML = "";
+  items.forEach((it) => {
+    const el = document.createElement("span");
+    el.className = "chip" + (selectedSet.has(it) ? " active" : "");
+    el.textContent = it;
+    el.onclick = () => onToggle(it);
+    c.appendChild(el);
+  });
+}
+
+function renderTabs() {
+  const tabs = $("tabs");
+  tabs.innerHTML = "";
+  TABS.forEach((t) => {
+    const el = document.createElement("span");
+    el.className = "tab" + (t.id === state.activeTab ? " active" : "");
+    el.textContent = t.label;
+    el.onclick = () => { state.activeTab = t.id; renderTabs(); renderAll(); };
+    tabs.appendChild(el);
+  });
+}
+
+/* ---------- data loading ---------- */
+function ingest(rows) {
+  state.rows = rows;
+  state.runs = distinct(rows, "run_name");
+  state.datasets = distinct(rows, "dataset");
+  state.algos = distinct(rows, "algorithm");
+  state.selRuns = new Set(state.runs);
+  state.selDatasets = new Set(state.datasets);
+  state.selAlgos = new Set(state.algos);
+  const pal = palette(state.algos.length);
+  state.algos.forEach((a, i) => (state.colors[a] = pal[i]));
+  $("status").textContent = rows.length + " results · " + state.runs.length + " runs";
+  renderSidebar(); renderTabs(); renderAll();
+}
+
+function loadFromFile(file) {
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      ingest(JSON.parse(e.target.result));
+    } catch (err) {
+      alert("Could not parse JSON: " + err.message);
+    }
+  };
+  reader.readAsText(file);
+}
+
+function autoFetch() {
+  // Try to fetch a co-located dashboard_data.json (works when served via http).
+  fetch("dashboard_data.json", { cache: "no-store" })
+    .then((r) => {
+      if (!r.ok) throw new Error("not found");
+      return r.json();
+    })
+    .then(ingest)
+    .catch(() => {
+      $("status").textContent = "no data — click 'Load data file…'";
+    });
+}
+
+$("loadBtn").onclick = () => {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "application/json,.json";
+  input.onchange = () => { if (input.files[0]) loadFromFile(input.files[0]); };
+  input.click();
+};
+
+$("runSel").onchange = (e) => {
+  state.selRuns = new Set([...e.target.selectedOptions].map((o) => o.value));
+  renderAll();
+};
+
+$("xaxisSel").onchange = (e) => {
+  state.xaxis = e.target.value || null;
+  renderAll();
+};
+
+renderTabs();
+autoFetch();
+</script>
+</body>
+</html>

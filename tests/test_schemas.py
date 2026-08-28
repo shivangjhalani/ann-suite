@@ -2,6 +2,9 @@
 
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from ann_suite.core.schemas import (
     AlgorithmConfig,
     AlgorithmType,
@@ -40,6 +43,16 @@ class TestAlgorithmConfig:
             build={"args": {"M": 16, "ef_construction": 200}},
         )
         assert config.build.args["M"] == 16
+
+    def test_cpu_limit_parses_for_nano_cpus(self):
+        """Test that cpu_limit (cores) is a recognized field and positive."""
+        config = AlgorithmConfig(name="test", docker_image="test/algo", cpu_limit=8.0)
+        assert config.cpu_limit == 8.0
+
+    def test_cpu_limit_must_be_positive(self):
+        """Test that cpu_limit rejects non-positive values."""
+        with pytest.raises(ValidationError):
+            AlgorithmConfig(name="test", docker_image="test/algo", cpu_limit=0.0)
 
 
 class TestDatasetConfig:

@@ -91,6 +91,31 @@ class TestDropCaches:
             assert run.call_args.kwargs["input"] == "pw\n"
 
 
+class TestResourceLimits:
+    """Tests for ContainerRunner._prepare_resource_limits (CPU/memory caps)."""
+
+    def test_cpu_limit_maps_to_nano_cpus(self, runner: ContainerRunner) -> None:
+        algo = AlgorithmConfig(name="A", docker_image="a:latest", cpu_limit=8.0)
+        limits = runner._prepare_resource_limits(algo)
+        assert limits["nano_cpus"] == 8_000_000_000
+
+    def test_no_nano_cpus_when_cpu_limit_unset(self, runner: ContainerRunner) -> None:
+        algo = AlgorithmConfig(name="A", docker_image="a:latest")
+        limits = runner._prepare_resource_limits(algo)
+        assert "nano_cpus" not in limits
+
+    def test_cpu_affinity_sets_cpuset(self, runner: ContainerRunner) -> None:
+        algo = AlgorithmConfig(name="A", docker_image="a:latest", cpu_affinity="0-3")
+        limits = runner._prepare_resource_limits(algo)
+        assert limits["cpuset_cpus"] == "0-3"
+
+    def test_memory_limit_sets_mem_and_swap(self, runner: ContainerRunner) -> None:
+        algo = AlgorithmConfig(name="A", docker_image="a:latest", memory_limit="8g")
+        limits = runner._prepare_resource_limits(algo)
+        assert limits["mem_limit"] == "8g"
+        assert limits["memswap_limit"] == "8g"
+
+
 class TestEvaluatorDropCachesHook:
     def test_hook_runs_before_search_phase(self, tmp_path: Path) -> None:
         evaluator = BenchmarkEvaluator(

@@ -877,7 +877,15 @@ class BenchmarkEvaluator:
         # from disk). The hit rate is the fraction of faulted accesses served without
         # disk I/O. Algorithm-internal caches that avoid faults entirely are not
         # visible at this level (those arrive via algorithm_stats.cache_hits/misses).
-        page_cache_hit_rate = None
+        #
+        # NOTE: this metric is only meaningful for fault-based (mmap) workloads.
+        # Algorithms that read via O_DIRECT/pread (e.g. DiskANN's StaticDiskIndex)
+        # do their disk I/O without any page faults, so pgfault/pgmajfault are ~0 and a
+        # "hit rate" computed from them is vacuous (a 0/0 that previously rendered as a
+        # misleading 1.0). When there are no faults to judge, report None so consumers
+        # fall back to the authoritative block-device metrics (pages_per_query,
+        # bytes_read_per_query, IOPS) instead of a bogus 100% cache hit.
+        page_cache_hit_rate: float | None = None
         if search_res.pgfault_delta > 0:
             page_cache_hit_rate = 1.0 - (search_res.pgmajfault_delta / search_res.pgfault_delta)
             # Clamp to valid range [0, 1] to handle edge cases
@@ -958,9 +966,12 @@ class BenchmarkEvaluator:
         search_p95_read_service_time_ms = search_res.p95_read_service_time_ms
         search_max_read_service_time_ms = search_res.max_read_service_time_ms
 
-        # PSI stall metrics
+        # PSI stall metrics. Report a measured percentage when PSI counters were
+        # observed (psi_available) even if the delta is zero (0.0% stall is a real,
+        # meaningful reading for an async-I/O workload that overlaps reads with
+        # compute). Only report None when PSI was never observed in the window.
         search_io_stall_percent: float | None = None
-        if io_time_base > 0 and search_res.io_pressure_some_total_usec > 0:
+        if io_time_base > 0 and search_res.psi_available:
             search_io_stall_percent = (
                 search_res.io_pressure_some_total_usec / (io_time_base * 1_000_000)
             ) * 100.0
@@ -988,7 +999,7 @@ class BenchmarkEvaluator:
 
         # PSI io.full stall percent (complete I/O blockage)
         search_io_full_stall_percent: float | None = None
-        if io_time_base > 0 and search_res.io_pressure_full_total_usec > 0:
+        if io_time_base > 0 and search_res.psi_available:
             search_io_full_stall_percent = (
                 search_res.io_pressure_full_total_usec / (io_time_base * 1_000_000)
             ) * 100.0
@@ -999,7 +1010,7 @@ class BenchmarkEvaluator:
         warmup_file_cache_peak_mb: float | None = None
         if warmup_res:
             warmup_time_base = warmup_res.duration_seconds
-            if warmup_time_base > 0 and warmup_res.io_pressure_some_total_usec > 0:
+            if warmup_time_base > 0 and warmup_res.psi_available:
                 warmup_io_stall_percent = (
                     warmup_res.io_pressure_some_total_usec / (warmup_time_base * 1_000_000)
                 ) * 100.0

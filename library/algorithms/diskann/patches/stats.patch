@@ -1,0 +1,133 @@
+--- a/include/ann_exception.h	2026-08-23 23:18:25.720181321 +0530
++++ b/include/ann_exception.h	2026-08-24 00:37:58.248671235 +0530
+@@ -2,6 +2,7 @@
+ // Licensed under the MIT license.
+ 
+ #pragma once
++#include <cstdint>
+ #include <string>
+ #include <stdexcept>
+ #include <system_error>
+--- a/python/include/static_disk_index.h	2026-08-23 23:18:25.723638590 +0530
++++ b/python/include/static_disk_index.h	2026-08-23 23:52:40.954578499 +0530
+@@ -3,6 +3,7 @@
+ 
+ #pragma once
+ 
++#include <atomic>
+ #include <cstdint>
+ #include <string>
+ 
+@@ -46,8 +47,23 @@
+         py::array_t<DT, py::array::c_style | py::array::forcecast> &queries, uint64_t num_queries, uint64_t knn,
+         uint64_t complexity, uint64_t beam_width, uint32_t num_threads);
+ 
++    // Aggregated search statistics accumulated across all searches since the
++    // last reset. Sourced from diskann::QueryStats of the underlying PQFlashIndex.
++    py::dict get_search_stats() const;
++
++    void reset_search_stats();
++
+   private:
++    void accumulate_search_stats(const diskann::QueryStats &stats);
++
+     std::shared_ptr<AlignedFileReader> _reader;
+     diskann::PQFlashIndex<DT> _index;
++
++    // Aggregated counters (atomic: batch_search runs multi-threaded)
++    std::atomic<uint64_t> _stat_n_ios{0};
++    std::atomic<uint64_t> _stat_read_size{0};
++    std::atomic<uint64_t> _stat_n_cmps{0};
++    std::atomic<uint64_t> _stat_n_hops{0};
++    std::atomic<uint64_t> _stat_n_cache_hits{0};
+ };
+ } // namespace diskannpy
+--- a/python/src/static_disk_index.cpp	2026-08-23 23:18:25.723920905 +0530
++++ b/python/src/static_disk_index.cpp	2026-08-23 23:53:26.866179205 +0530
+@@ -67,6 +67,7 @@
+ 
+     _index.cached_beam_search(query.data(), knn, complexity, u64_ids.data(), dists.mutable_data(), beam_width, false,
+                               &stats);
++    accumulate_search_stats(stats);
+ 
+     auto r = ids.mutable_unchecked<1>();
+     for (uint64_t i = 0; i < knn; ++i)
+@@ -91,8 +92,10 @@
+     shared(num_queries, queries, knn, complexity, u64_ids, dists, beam_width)
+     for (int64_t i = 0; i < (int64_t)num_queries; i++)
+     {
++        diskann::QueryStats query_stats;
+         _index.cached_beam_search(queries.data(i), knn, complexity, u64_ids.data() + i * knn, dists.mutable_data(i),
+-                                  beam_width);
++                                  beam_width, false, &query_stats);
++        accumulate_search_stats(query_stats);
+     }
+ 
+     auto r = ids.mutable_unchecked();
+@@ -103,6 +106,35 @@
+     return std::make_pair(ids, dists);
+ }
+ 
++template <typename DT> void StaticDiskIndex<DT>::accumulate_search_stats(const diskann::QueryStats &stats)
++{
++    _stat_n_ios += stats.n_ios;
++    _stat_read_size += stats.read_size;
++    _stat_n_cmps += stats.n_cmps;
++    _stat_n_hops += stats.n_hops;
++    _stat_n_cache_hits += stats.n_cache_hits;
++}
++
++template <typename DT> py::dict StaticDiskIndex<DT>::get_search_stats() const
++{
++    py::dict stats;
++    stats["io_reads"] = _stat_n_ios.load();
++    stats["io_bytes_read"] = _stat_read_size.load();
++    stats["distance_computations"] = _stat_n_cmps.load();
++    stats["hops"] = _stat_n_hops.load();
++    stats["cache_hits"] = _stat_n_cache_hits.load();
++    return stats;
++}
++
++template <typename DT> void StaticDiskIndex<DT>::reset_search_stats()
++{
++    _stat_n_ios = 0;
++    _stat_read_size = 0;
++    _stat_n_cmps = 0;
++    _stat_n_hops = 0;
++    _stat_n_cache_hits = 0;
++}
++
+ template class StaticDiskIndex<float>;
+ template class StaticDiskIndex<uint8_t>;
+ template class StaticDiskIndex<int8_t>;
+--- a/python/src/module.cpp	2026-08-23 23:18:25.723920905 +0530
++++ b/python/src/module.cpp	2026-08-23 23:53:26.866324434 +0530
+@@ -92,7 +92,9 @@
+         .def("cache_bfs_levels", &diskannpy::StaticDiskIndex<T>::cache_bfs_levels, "num_nodes_to_cache"_a)
+         .def("search", &diskannpy::StaticDiskIndex<T>::search, "query"_a, "knn"_a, "complexity"_a, "beam_width"_a)
+         .def("batch_search", &diskannpy::StaticDiskIndex<T>::batch_search, "queries"_a, "num_queries"_a, "knn"_a,
+-             "complexity"_a, "beam_width"_a, "num_threads"_a);
++             "complexity"_a, "beam_width"_a, "num_threads"_a)
++        .def("get_search_stats", &diskannpy::StaticDiskIndex<T>::get_search_stats)
++        .def("reset_search_stats", &diskannpy::StaticDiskIndex<T>::reset_search_stats);
+ }
+ 
+ PYBIND11_MODULE(_diskannpy, m)
+--- a/src/CMakeLists.txt	2026-08-23 23:18:25.812029065 +0530
++++ b/src/CMakeLists.txt	2026-08-24 01:22:41.061158805 +0530
+@@ -8,12 +8,13 @@
+     add_subdirectory(dll)
+ else()
+     #file(GLOB CPP_SOURCES *.cpp)
+-    set(CPP_SOURCES abstract_data_store.cpp ann_exception.cpp disk_utils.cpp 
++    set(CPP_SOURCES abstract_data_store.cpp abstract_filter_store.cpp ann_exception.cpp disk_utils.cpp 
+         distance.cpp index.cpp in_mem_graph_store.cpp in_mem_data_store.cpp
+         linux_aligned_file_reader.cpp math_utils.cpp natural_number_map.cpp
+         in_mem_data_store.cpp in_mem_graph_store.cpp
+         natural_number_set.cpp memory_mapper.cpp partition.cpp pq.cpp
+-        pq_flash_index.cpp scratch.cpp logger.cpp utils.cpp filter_utils.cpp index_factory.cpp abstract_index.cpp pq_l2_distance.cpp pq_data_store.cpp)
++        pq_flash_index.cpp scratch.cpp logger.cpp utils.cpp filter_utils.cpp
++        in_mem_filter_store.cpp index_factory.cpp abstract_index.cpp pq_l2_distance.cpp pq_data_store.cpp)
+     if (RESTAPI)
+         list(APPEND CPP_SOURCES restapi/search_wrapper.cpp restapi/server.cpp)
+     endif()
