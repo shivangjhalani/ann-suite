@@ -9,7 +9,7 @@
 name: "sift1m-light-sweep"
 description: "SIFT-128 1M light sweep: HNSW ef and DiskANN Ls"
 
-data_dir: "./library/datasets"
+data_dir: "./data"
 results_dir: "./results"
 index_dir: "./indices"
 

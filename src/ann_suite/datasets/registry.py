@@ -1,9 +1,9 @@
 """Dataset registry resolution.
 
 The registry is a declarative YAML manifest of available datasets, kept as a
-data file (``library/datasets/registry.yaml``) so adding a dataset is an edit,
-not a code change. This module is the single place that knows how to locate and
-read it, so no other code has to guess at filesystem paths.
+data file (``data/registry.yaml``) so adding a dataset is an edit, not a code
+change. This module is the single place that knows how to locate and read it,
+so no other code has to guess at filesystem paths.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import yaml
 logger = logging.getLogger(__name__)
 
 #: Default location of the registry relative to the project root.
-DEFAULT_REGISTRY = Path("library/datasets/registry.yaml")
+DEFAULT_REGISTRY = Path("data/registry.yaml")
 
 #: Default output directory for prepared datasets (matches BenchmarkConfig.data_dir).
 DEFAULT_DATA_DIR = Path("./data")
@@ -28,7 +28,7 @@ def resolve_registry_path(registry_path: Path | None = None) -> Path:
 
     Resolution order:
     1. An explicit ``registry_path`` argument.
-    2. ``library/datasets/registry.yaml`` relative to the project root (found by
+    2. ``data/registry.yaml`` relative to the project root (found by
        walking up from this file).
 
     Raises:

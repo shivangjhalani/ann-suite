@@ -457,7 +457,7 @@ from ann_suite.evaluator import BenchmarkEvaluator
 # Define configuration programmatically
 config = BenchmarkConfig(
     name="Single Algorithm Test",
-    data_dir=Path("./library/datasets"),
+    data_dir=Path("./data"),
     results_dir=Path("./results"),
     index_dir=Path("./indices"),
     algorithms=[

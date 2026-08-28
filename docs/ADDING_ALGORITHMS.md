@@ -431,7 +431,7 @@ if __name__ == "__main__":
 
 1. **Test locally first:**
    ```bash
-   docker run -v $(pwd)/library/datasets:/data ann-suite/my-algo:latest \
+   docker run -v $(pwd)/data:/data ann-suite/my-algo:latest \
      --mode build --config '{"dataset_path": "/data/sift-10k/base.npy", "index_path": "/data/index", "dimension": 128, "metric": "L2", "build_args": {}}'
    ```
 
@@ -452,7 +452,7 @@ if __name__ == "__main__":
 
 5. **Test search phase:**
    ```bash
-   docker run -v $(pwd)/library/datasets:/data -v $(pwd)/indices:/data/index \
+   docker run -v $(pwd)/data:/data -v $(pwd)/indices:/data/index \
      ann-suite/my-algo:latest \
      --mode search --config '{"index_path": "/data/index", "queries_path": "/data/sift-10k/queries.npy", "k": 10, "dimension": 128, "metric": "L2", "search_args": {}}'
    ```
@@ -511,7 +511,7 @@ uv run ann-suite download --dataset sift-10k
 
 # Run build
 mkdir -p indices/test
-docker run -v $(pwd)/library/datasets:/data \
+docker run -v $(pwd)/data:/data \
   -v $(pwd)/indices/test:/data/index \
   ann-suite/test:latest \
   --mode build \
@@ -526,7 +526,7 @@ Expected output:
 ### 2. Verify Search Phase
 
 ```bash
-docker run -v $(pwd)/library/datasets:/data \
+docker run -v $(pwd)/data:/data \
   -v $(pwd)/indices/test:/data/index \
   ann-suite/test:latest \
   --mode search \
@@ -545,7 +545,7 @@ Add to a config and run full benchmark:
 ```yaml
 # configs/test_new_algo.yaml
 name: "Test New Algorithm"
-data_dir: "./library/datasets"
+data_dir: "./data"
 algorithms:
   - name: MyAlgorithm
     docker_image: ann-suite/test:latest

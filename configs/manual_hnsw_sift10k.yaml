@@ -1,6 +1,6 @@
 name: "HNSW vs DiskANN on SIFT-10K"
 description: "Quick test benchmark comparing in-memory and disk-based algorithms"
-data_dir: "./library/datasets"
+data_dir: "./data"
 results_dir: "./results"
 index_dir: "./indices"
 

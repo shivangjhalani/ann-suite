@@ -3,7 +3,7 @@ description: >
   Sweep build params (R, L) and search params (Ls) to map the recall/QPS frontier
   across multiple index structures. Each unique (R, L) index is built once
   (build.reuse_index: true, default); all Ls values run against it.
-data_dir: "./library/datasets"
+data_dir: "./data"
 results_dir: "./results"
 index_dir: "./indices"
 monitor_interval_ms: 50

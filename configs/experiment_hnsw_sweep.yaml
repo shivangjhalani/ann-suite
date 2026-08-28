@@ -1,6 +1,6 @@
 name: "HNSW Parameter Sweep on SIFT-10K"
 description: "Sweep ef values to generate recall-QPS tradeoff curve"
-data_dir: "./library/datasets"
+data_dir: "./data"
 results_dir: "./results"
 index_dir: "./indices"
 monitor_interval_ms: 50

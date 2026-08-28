@@ -5,7 +5,7 @@ This guide explains how to add new datasets to the ANN Benchmarking Suite.
 ## Overview
 
 Datasets are managed through the registry and prepared into a data directory:
-- **Registry** (`library/datasets/registry.yaml`): Declarative manifest of available datasets
+- **Registry** (`data/registry.yaml`): Declarative manifest of available datasets
 - **Download Utility** (`ann-suite download`): Command to fetch and prepare datasets
 - **Local Storage**: Prepared datasets stored in `./data/<name>/` by default
 
@@ -54,7 +54,7 @@ data/<dataset-name>/
 
 ### Step 1: Add to Registry
 
-Edit `library/datasets/registry.yaml`:
+Edit `data/registry.yaml`:
 
 ```yaml
 datasets:

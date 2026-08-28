@@ -90,15 +90,13 @@ Thumbs.db
 indices/
 *.hdf5
 *.npy
-!library/datasets/**/*.npy
 
 # Results tracking
 results/
 !src/ann_suite/results/
 
-# Downloaded datasets (large files)
-library/datasets/*/base.npy
-library/datasets/*/queries.npy
-library/datasets/*/ground_truth.npy
-library/datasets/*.hdf5
-data
+# Data directory: ignore downloaded datasets and prepared binaries, but keep the
+# registry and per-dataset metadata version-controlled.
+data/
+!data/registry.yaml
+!data/**/metadata.yaml
