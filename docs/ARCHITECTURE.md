@@ -134,11 +134,29 @@ results = evaluator.run()  # Returns List[BenchmarkResult]
 
 ```
 for each build combination (expanded from build.args):
-    ensure index is built once (cached by algorithm + dataset + build slug)
+    if build.prebuilt_path is set:
+        validate and mount the existing index; skip the build container
+    else:
+        ensure index is built once (cached by algorithm + dataset + build slug)
     for each search combination (expanded from search.args):
         run search phase against that index
         aggregate build + search metrics into one BenchmarkResult
 ```
+
+---
+
+### Prebuilt Index Execution
+
+An algorithm can benchmark an index created outside the current run by setting
+`build.prebuilt_path`. The evaluator resolves the path, verifies that it is a directory, and
+mounts it directly into the search container at `/data/prebuilt-index`. No build container is
+started, so build metrics are explicitly zero and marked `prebuilt`; index-load, query, resource,
+and algorithm-specific metrics remain normal.
+
+The path may be relative to `index_dir` or absolute. Resolving the directory before mounting also
+allows a directory symlink to point at a large index stored elsewhere without copying it. The
+algorithm runner remains responsible for validating its own index files and format parameters,
+such as DiskANN's `index_prefix`, `vector_dtype`, metric, and dimension.
 
 ---
 

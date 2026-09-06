@@ -262,7 +262,7 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
         # Extract search configuration
         k = config.get("k", 10)
         query_rounds = int(config.get("query_rounds", 1))
-        batch_mode = config.get("batch_mode", True)
+        batch_mode = config.get("batch_mode", False)
         ef = search_args.get("ef", 100)
         cache_warmup_queries = int(config.get("cache_warmup_queries", 0) or 0)
 

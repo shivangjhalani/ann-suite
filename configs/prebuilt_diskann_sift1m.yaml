@@ -1,0 +1,53 @@
+name: "DiskANN prebuilt sift1m search"
+description: >-
+  Search the pre-built DiskANN sift1m index (from diskann_data, built by the
+  upstream C++ CLI) using the ann-suite DiskANN container built from upstream
+  cpp_main (diskannpy 0.7.1). The index is uint8/128-d, so queries are loaded
+  as uint8 and recall is computed against the TexMex SIFT-1M ground truth.
+
+data_dir: "./data"
+results_dir: "./results"
+index_dir: "./indices"
+
+monitor_interval_ms: 100
+
+algorithms:
+  - name: DiskANN
+    disabled: false
+    docker_image: ann-suite/diskann:latest
+    algorithm_type: disk
+    build:
+      timeout_seconds: 600
+      # Existing index under index_dir; the build phase is skipped.
+      prebuilt_path: "DiskANN/sift1m-prebuilt/L-50_R-32_build-memory-maximum-0-27_index-prefix-c9390d63"
+      args:
+        R: 32
+        L: 50
+        num_threads: 4
+    search:
+      timeout_seconds: 600
+      k: 10
+      batch_mode: false
+      args:
+        Ls: 100
+        beam_width: 4
+        num_threads: 4
+        num_nodes_to_cache: 0
+        index_prefix: ann
+        vector_dtype: uint8
+      warmup:
+        collect_metrics: true
+        cache_warmup_queries: 0
+
+datasets:
+  - name: sift1m-prebuilt
+    base_path: sift1m-prebuilt/base.npy
+    query_path: sift1m-prebuilt/queries.npy
+    ground_truth_path: sift1m-prebuilt/ground_truth.npy
+    distance_metric: L2
+    dimension: 128
+    point_type: uint8
+    # Base data is retained only to satisfy the dataset contract; prebuilt_path
+    # means it is not read by the DiskANN build phase.
+    base_count: 1000
+    query_count: 10000

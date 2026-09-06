@@ -24,7 +24,12 @@ from ann_suite.core.schemas import (
     ResourceSummary,
 )
 from ann_suite.evaluator import BenchmarkEvaluator
-from ann_suite.runners.container_runner import SUDO_PASSWORD_ENV, ContainerRunner
+from ann_suite.runners.container_runner import (
+    SUDO_PASSWORD_ENV,
+    ContainerRunner,
+    cpuset_to_numa_nodes,
+    expand_cpuset,
+)
 
 
 @pytest.fixture
@@ -114,6 +119,118 @@ class TestResourceLimits:
         limits = runner._prepare_resource_limits(algo)
         assert limits["mem_limit"] == "8g"
         assert limits["memswap_limit"] == "8g"
+
+    def test_cpu_affinity_sets_cpuset_mems_when_numa_available(
+        self, tmp_path: Path
+    ) -> None:
+        """cpu_affinity should also pin memory to the matching NUMA node."""
+        with (
+            patch("ann_suite.runners.container_runner.docker.from_env") as from_env,
+            patch(
+                "ann_suite.runners.container_runner.CgroupsV2Collector.check_available",
+                return_value=True,
+            ),
+        ):
+            from_env.return_value = MagicMock()
+            runner = ContainerRunner(
+                data_dir=tmp_path / "data",
+                index_dir=tmp_path / "indices",
+                results_dir=tmp_path / "results",
+            )
+            algo = AlgorithmConfig(name="A", docker_image="a:latest", cpu_affinity="0-3")
+            with patch(
+                "ann_suite.runners.container_runner.cpuset_to_numa_nodes", return_value="0"
+            ):
+                limits = runner._prepare_resource_limits(algo)
+        assert limits["cpuset_cpus"] == "0-3"
+        assert limits["cpuset_mems"] == "0"
+
+    def test_cpu_affinity_omits_cpuset_mems_when_no_numa(
+        self, tmp_path: Path
+    ) -> None:
+        """On single-node/non-NUMA hosts, memory placement is left at the default."""
+        with (
+            patch("ann_suite.runners.container_runner.docker.from_env") as from_env,
+            patch(
+                "ann_suite.runners.container_runner.CgroupsV2Collector.check_available",
+                return_value=True,
+            ),
+        ):
+            from_env.return_value = MagicMock()
+            runner = ContainerRunner(
+                data_dir=tmp_path / "data",
+                index_dir=tmp_path / "indices",
+                results_dir=tmp_path / "results",
+            )
+            algo = AlgorithmConfig(name="A", docker_image="a:latest", cpu_affinity="0-3")
+            with patch(
+                "ann_suite.runners.container_runner.cpuset_to_numa_nodes", return_value=None
+            ):
+                limits = runner._prepare_resource_limits(algo)
+        assert limits["cpuset_cpus"] == "0-3"
+        assert "cpuset_mems" not in limits
+
+    def test_no_cpuset_when_no_affinity(self, tmp_path: Path) -> None:
+        with (
+            patch("ann_suite.runners.container_runner.docker.from_env") as from_env,
+            patch(
+                "ann_suite.runners.container_runner.CgroupsV2Collector.check_available",
+                return_value=True,
+            ),
+        ):
+            from_env.return_value = MagicMock()
+            runner = ContainerRunner(
+                data_dir=tmp_path / "data",
+                index_dir=tmp_path / "indices",
+                results_dir=tmp_path / "results",
+            )
+            algo = AlgorithmConfig(name="A", docker_image="a:latest")
+            limits = runner._prepare_resource_limits(algo)
+        assert "cpuset_cpus" not in limits
+        assert "cpuset_mems" not in limits
+
+
+class TestNumaHelpers:
+    """Tests for cpuset parsing and NUMA-node mapping helpers."""
+
+    def test_expand_single_range(self) -> None:
+        assert expand_cpuset("0-3") == {0, 1, 2, 3}
+
+    def test_expand_discrete_cores(self) -> None:
+        assert expand_cpuset("0,2,4,6") == {0, 2, 4, 6}
+
+    def test_expand_single_core(self) -> None:
+        assert expand_cpuset("4") == {4}
+
+    def test_expand_empty(self) -> None:
+        assert expand_cpuset("") == set()
+
+    def test_expand_ignores_bad_tokens(self) -> None:
+        assert expand_cpuset("0-x,2") == {2}
+        assert expand_cpuset("3-1") == set()
+
+    def test_numa_mapping_single_node(self, tmp_path: Path) -> None:
+        node0 = tmp_path / "node0"
+        node0.mkdir()
+        (node0 / "cpulist").write_text("0-7\n")
+        fake = [str(node0 / "cpulist")]
+        with patch("ann_suite.runners.container_runner.glob.glob", return_value=fake):
+            assert cpuset_to_numa_nodes("0-3") == "0"
+
+    def test_numa_mapping_spans_nodes(self, tmp_path: Path) -> None:
+        node0 = tmp_path / "node0"
+        node1 = tmp_path / "node1"
+        node0.mkdir()
+        node1.mkdir()
+        (node0 / "cpulist").write_text("0-3\n")
+        (node1 / "cpulist").write_text("4-7\n")
+        fake = [str(node0 / "cpulist"), str(node1 / "cpulist")]
+        with patch("ann_suite.runners.container_runner.glob.glob", return_value=fake):
+            assert cpuset_to_numa_nodes("2-5") == "0,1"
+
+    def test_numa_mapping_unavailable(self) -> None:
+        with patch("ann_suite.runners.container_runner.glob.glob", return_value=[]):
+            assert cpuset_to_numa_nodes("0-3") is None
 
 
 class TestEvaluatorDropCachesHook:

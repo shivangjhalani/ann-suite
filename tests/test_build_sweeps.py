@@ -151,6 +151,10 @@ class TestReuseIndexSchema:
         algo = make_algo(build={"reuse_index": False})
         assert algo.build.reuse_index is False
 
+    def test_prebuilt_path_is_optional(self, tmp_path: Path) -> None:
+        algo = make_algo(build={"prebuilt_path": tmp_path / "index"})
+        assert algo.build.prebuilt_path == tmp_path / "index"
+
     def test_yaml_round_trip(self, tmp_path: Path) -> None:
         config_file = tmp_path / "config.yaml"
         config_file.write_text(
@@ -175,6 +179,49 @@ datasets:
         config = load_config(config_file)
         assert config.algorithms[0].build.reuse_index is False
         assert config.algorithms[0].build.args == {"R": [32, 64]}
+
+
+class TestPrebuiltIndexes:
+    def test_prebuilt_path_skips_build_and_mounts_resolved_directory(
+        self, tmp_path: Path
+    ) -> None:
+        evaluator, container_runner = make_evaluator(tmp_path)
+        prebuilt = tmp_path / "indices" / "diskann"
+        prebuilt.mkdir(parents=True)
+        algo = make_algo(build={"prebuilt_path": Path("diskann")})
+
+        context = evaluator._ensure_build(algo, make_dataset(), tmp_path / "base.npy", {})
+
+        assert context.prebuilt is True
+        assert context.host_index_dir == prebuilt.resolve()
+        assert context.container_index_path == "/data/prebuilt-index"
+        assert context.build_result.output["prebuilt"] is True
+        container_runner.run_phase.assert_not_called()
+
+    def test_missing_prebuilt_path_fails_before_container_start(self, tmp_path: Path) -> None:
+        evaluator, container_runner = make_evaluator(tmp_path)
+        algo = make_algo(build={"prebuilt_path": Path("missing")})
+
+        with pytest.raises(FileNotFoundError, match="Prebuilt index directory"):
+            evaluator._ensure_build(algo, make_dataset(), tmp_path / "base.npy", {})
+
+        container_runner.run_phase.assert_not_called()
+
+    def test_prebuilt_file_symlinks_add_external_mounts(self, tmp_path: Path) -> None:
+        evaluator, _ = make_evaluator(tmp_path)
+        source = tmp_path / "external-index"
+        source.mkdir()
+        (source / "ann_disk.index").write_bytes(b"index")
+        wrapper = tmp_path / "indices" / "wrapper"
+        wrapper.mkdir(parents=True)
+        (wrapper / "ann_disk.index").symlink_to(source / "ann_disk.index")
+        algo = make_algo(build={"prebuilt_path": wrapper})
+
+        context = evaluator._ensure_build(algo, make_dataset(), tmp_path / "base.npy", {})
+
+        assert context.prebuilt_additional_volumes == {
+            str(source): {"bind": str(source), "mode": "rw"}
+        }
 
 
 class TestEnsureBuildCaching:

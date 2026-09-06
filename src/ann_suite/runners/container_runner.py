@@ -15,6 +15,7 @@ so disk I/O is captured accurately and indices persist on host storage.
 from __future__ import annotations
 
 import contextlib
+import glob
 import json
 import logging
 import os
@@ -34,10 +35,83 @@ from ann_suite.monitoring.cgroups_collector import CgroupsV2Collector
 
 SUDO_PASSWORD_ENV = "ANN_SUITE_SUDO_PASSWORD"
 
+NUMANODE_CPULIST_GLOB = "/sys/devices/system/node/node*/cpulist"
+
 if TYPE_CHECKING:
     from docker.models.containers import Container
 
 logger = logging.getLogger(__name__)
+
+
+def expand_cpuset(cpuset: str) -> set[int]:
+    """Expand a Linux cpuset expression (e.g. '0-3', '0,2,4,6', '4') into CPU ids.
+
+    Supports comma-separated tokens where each token is either a single CPU id or
+    a contiguous 'start-end' range.
+    """
+    cpus: set[int] = set()
+    for token in cpuset.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if "-" in token:
+            start_s, _, end_s = token.partition("-")
+            try:
+                start, end = int(start_s), int(end_s)
+            except ValueError:
+                logger.warning(f"Ignoring unparseable cpuset token '{token}' in '{cpuset}'")
+                continue
+            if end < start:
+                logger.warning(
+                    f"Ignoring reversed cpuset range '{token}' in '{cpuset}'; "
+                    "start must be <= end"
+                )
+                continue
+            cpus.update(range(start, end + 1))
+        else:
+            try:
+                cpus.add(int(token))
+            except ValueError:
+                logger.warning(f"Ignoring unparseable cpuset token '{token}' in '{cpuset}'")
+    return cpus
+
+
+def cpuset_to_numa_nodes(cpuset: str) -> str | None:
+    """Map a cpuset expression to the set of NUMA nodes those CPUs belong to.
+
+    Returns a Docker-compatible `cpuset_mems` value (comma-joined node ids), or
+    None when the affinity spans no NUMA-aware node or NUMA topology is unavailable
+    (e.g. single-node / non-NUMA system), in which case the caller should leave
+    memory placement at the Docker default.
+    """
+    affinity_cpus = expand_cpuset(cpuset)
+    if not affinity_cpus:
+        return None
+
+    nodes: list[int] = []
+    try:
+        node_paths = sorted(
+            glob.glob(NUMANODE_CPULIST_GLOB),
+            key=lambda p: int(p.rsplit("node", 1)[1].split("/")[0]),
+        )
+        for node_path in node_paths:
+            node_id = int(node_path.rsplit("node", 1)[1].split("/")[0])
+            with open(node_path) as f:
+                cpu_str = f.read().strip()
+            if not cpu_str:
+                continue
+            node_cpus = expand_cpuset(cpu_str)
+            if affinity_cpus & node_cpus:
+                nodes.append(node_id)
+    except (OSError, ValueError, IndexError) as e:
+        logger.debug(f"NUMA topology unavailable ({e}); skipping cpuset_mems")
+        return None
+
+    if not nodes:
+        return None
+    nodes_str = ",".join(str(n) for n in nodes)
+    logger.debug(f"cpu_affinity '{cpuset}' maps to NUMA node(s): {nodes}")
+    return nodes_str
 
 
 @dataclass
@@ -445,6 +519,7 @@ class ContainerRunner:
         config: dict[str, Any],
         timeout_seconds: int | None = None,
         run_id: str | None = None,
+        additional_volumes: dict[str, dict[str, str]] | None = None,
     ) -> tuple[ContainerResult, ResourceSummary]:
         """Run a benchmark phase (build or search) in a container.
 
@@ -478,7 +553,7 @@ class ContainerRunner:
 
         # Prepare volume mounts
         # CRITICAL: Mount host directories so disk I/O is real (not overlay FS)
-        volumes = self._prepare_volumes(algorithm)
+        volumes = self._prepare_volumes(algorithm, additional_volumes)
 
         # Prepare resource limits
         resource_limits = self._prepare_resource_limits(algorithm)
@@ -777,7 +852,11 @@ class ContainerRunner:
                 except Exception as e:
                     logger.warning(f"Failed to remove container: {e}")
 
-    def _prepare_volumes(self, algorithm: AlgorithmConfig) -> dict[str, dict[str, str]]:
+    def _prepare_volumes(
+        self,
+        algorithm: AlgorithmConfig,
+        additional_volumes: dict[str, dict[str, str]] | None = None,
+    ) -> dict[str, dict[str, str]]:
         """Prepare volume mounts for the container.
 
         For disk-based algorithms, mounting host directories is CRITICAL
@@ -789,6 +868,8 @@ class ContainerRunner:
             str(self.results_dir): {"bind": "/results", "mode": "rw"},
             # Mount logs dir as well if needed, but we write from host side
         }
+        if additional_volumes:
+            volumes.update(additional_volumes)
         return volumes
 
     def _prepare_resource_limits(self, algorithm: AlgorithmConfig) -> dict[str, Any]:
@@ -807,6 +888,23 @@ class ContainerRunner:
 
         if algorithm.cpu_affinity:
             limits["cpuset_cpus"] = algorithm.cpu_affinity
+            # Pin memory placement to the same NUMA node(s) as the pinned CPUs so
+            # page-cache / malloc'd memory stays local to the cores doing the work.
+            # This removes cross-NUMA traffic noise, which can distort ANN QPS and
+            # latency measurements. If NUMA is unavailable (single-node/non-NUMA),
+            # cpuset_mems is left to the Docker default (no-op).
+            numa_nodes = cpuset_to_numa_nodes(algorithm.cpu_affinity)
+            if numa_nodes:
+                limits["cpuset_mems"] = numa_nodes
+                logger.info(
+                    f"cpu_affinity '{algorithm.cpu_affinity}' -> cpuset_cpus and "
+                    f"cpuset_mems={numa_nodes} (NUMA-local memory pinning)"
+                )
+            else:
+                logger.debug(
+                    f"cpu_affinity '{algorithm.cpu_affinity}' set; NUMA topology not "
+                    "available, memory placement left at Docker default"
+                )
 
         if algorithm.cpu_limit is not None:
             # Docker's `nano_cpus` expects quota in 1e-9 CPU units (cores). A float

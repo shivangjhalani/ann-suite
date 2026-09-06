@@ -7,6 +7,7 @@ as Docker containers in library/algorithms/.
 Available algorithms:
 - HNSW: In-memory graph-based algorithm using hnswlib
 - DiskANN: Disk-based algorithm using Microsoft's diskannpy
+- SPANN: Disk-based memory/SSD hybrid index using Microsoft's SPTAG
 
 Example:
     ```python

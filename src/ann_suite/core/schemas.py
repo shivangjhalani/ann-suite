@@ -212,6 +212,13 @@ class BuildConfig(BaseModel):
     """Configuration for the index building phase."""
 
     timeout_seconds: int = Field(default=3600, ge=60, description="Build phase timeout")
+    prebuilt_path: Path | None = Field(
+        default=None,
+        description=(
+            "Optional existing index directory, relative to index_dir or an absolute path. "
+            "When set, the evaluator validates and mounts this index and skips building."
+        ),
+    )
     args: dict[str, Any] = Field(default_factory=dict, description="Algorithm-specific build args")
     reuse_index: bool = Field(
         default=True,
@@ -274,7 +281,22 @@ class SearchConfig(BaseModel):
     args: dict[str, Any] = Field(
         default_factory=dict, description="Algorithm-specific search args (can be list for sweeps)"
     )
-    batch_mode: bool = Field(default=True, description="Enable batch processing for high QPS")
+    sweep: list[dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Optional explicit search parameter points. When set, each mapping is run once "
+            "instead of expanding list-valued args as a Cartesian product."
+        ),
+    )
+    batch_mode: bool = Field(
+        default=False,
+        description=(
+            "False (default, research-oriented): run each query serially and time it "
+            "individually, yielding real latency percentiles (p50/p95/p99). True: run the "
+            "whole query batch in a single native call for maximum QPS, but only mean "
+            "latency is available (percentiles are None/N/A)."
+        ),
+    )
     warmup: WarmupConfig = Field(
         default_factory=WarmupConfig, description="Warmup/cache-warming configuration"
     )
@@ -304,14 +326,28 @@ class AlgorithmConfig(BaseModel):
     env_vars: dict[str, str] = Field(default_factory=dict)
     cpu_affinity: str | None = Field(
         default=None,
-        description="CPU core affinity/cpuset (e.g., '0-3'); pins container to these cores",
+        description=(
+            "CPU core affinity/cpuset (e.g., '0-3', '0,2,4,6'); pins the container to these "
+            "cores (Docker cpuset_cpus). When set, the matching NUMA node(s) are also pinned "
+            "(cpuset_mems) so CPU and memory placement are local, removing cross-NUMA traffic "
+            "noise from benchmarks. Prefer pinning all cores of a single NUMA node for "
+            "deterministic, low-noise measurements."
+        ),
     )
     cpu_limit: float | None = Field(
         default=None,
         gt=0,
         description=(
             "Hard CPU utilization cap in cores (e.g., 8.0); maps to Docker's nano_cpus "
-            "computed over the available cores. Mutually exclusive in effect with cpu_affinity."
+            "(CFS CPU quota). ⚠️ CAVEAT: the CFS scheduler enforces this by throttling the "
+            "container in ~100ms windows, which can inject periodic stalls that inflate "
+            "p95/p99 latency for steady-state query workloads. For latency-sensitive ANN "
+            "benchmarks prefer cpu_affinity (NUMA-pinned cores, no throttling) over a "
+            "cpu_limit. If you must cap usage, combine affinity + limit and watch the "
+            "CPUThrottlingMetrics (nr_throttled / throttled_percent) in results. This cap is "
+            "independent of cpu_affinity: you may set cpu_affinity to pin placement (e.g., "
+            "to a NUMA socket) AND cpu_limit to cap concurrent core usage together; a "
+            "combination pins to the socket while also limiting aggregate throughput."
         ),
     )
     memory_limit: str | None = Field(
@@ -1274,7 +1310,7 @@ class ContainerProtocol(BaseModel):
         ground_truth_path: str | None = Field(default=None)
         k: int = Field(default=10, ge=1)
         query_rounds: int = Field(default=1, ge=1)
-        batch_mode: bool = Field(default=True)
+        batch_mode: bool = Field(default=False)
         search_args: dict[str, Any] = Field(default_factory=dict)
         # Warmup configuration
         cache_warmup_queries: int = Field(

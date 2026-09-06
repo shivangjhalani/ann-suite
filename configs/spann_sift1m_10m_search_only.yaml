@@ -1,0 +1,70 @@
+name: "SPANN on SIFT1M and SIFT10M"
+description: "Microsoft SPTAG SPANN search-only benchmark on BIGANN SIFT prefixes. Reuses the previously built indexes via prebuilt_path so the build phase is skipped; only SPTAG search runs."
+data_dir: "./data"
+results_dir: "./results"
+index_dir: "./indices"
+monitor_interval_ms: 50
+
+algorithms:
+  - name: SPANN
+    docker_image: ann-suite/spann:latest
+    algorithm_type: disk
+    datasets: [sift1m]
+    build:
+      timeout_seconds: 14400
+      prebuilt_path: "SPANN/sift1m/internal-result-num-64_max-check-4096_num-thread-9a75424b"
+      args:
+        num_threads: 16
+        max_check: 4096
+        posting_page_limit: 3
+        internal_result_num: 64
+    search:
+      timeout_seconds: 1200
+      k: 10
+      batch_mode: false
+      args:
+        internal_result_num: 96
+        posting_page_limit: 3
+        num_threads: 8
+
+  - name: SPANN
+    docker_image: ann-suite/spann:latest
+    algorithm_type: disk
+    datasets: [sift10m]
+    build:
+      timeout_seconds: 14400
+      prebuilt_path: "SPANN/sift10m/internal-result-num-64_max-check-4096_num-thread-9a75424b"
+      args:
+        num_threads: 16
+        max_check: 4096
+        posting_page_limit: 3
+        internal_result_num: 64
+    search:
+      timeout_seconds: 1200
+      k: 10
+      batch_mode: false
+      args:
+        internal_result_num: 96
+        posting_page_limit: 3
+        num_threads: 8
+
+datasets:
+  - name: sift1m
+    base_path: sift1m/base.npy
+    query_path: sift1m/queries.npy
+    ground_truth_path: sift1m/ground_truth.npy
+    distance_metric: L2
+    dimension: 128
+    point_type: float32
+    base_count: 1000000
+    query_count: 10000
+
+  - name: sift10m
+    base_path: sift10m/base.npy
+    query_path: sift10m/queries.npy
+    ground_truth_path: sift10m/ground_truth.npy
+    distance_metric: L2
+    dimension: 128
+    point_type: float32
+    base_count: 10000000
+    query_count: 10000

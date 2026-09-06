@@ -1,0 +1,33 @@
+name: "SPANN Parameter Sweep on SIFT-10K"
+description: "Microsoft SPTAG SPANN disk-backed ANN benchmark"
+data_dir: "./data"
+results_dir: "./results"
+index_dir: "./indices"
+monitor_interval_ms: 50
+
+algorithms:
+  - name: SPANN
+    docker_image: ann-suite/spann:latest
+    algorithm_type: disk
+    build:
+      timeout_seconds: 3600
+      args:
+        num_threads: 4
+        max_check: 4096
+        posting_page_limit: 3
+        internal_result_num: 64
+    search:
+      timeout_seconds: 600
+      k: 10
+      batch_mode: false
+      args:
+        internal_result_num: [32, 64, 96]
+        posting_page_limit: 3
+
+datasets:
+  - name: sift-10k
+    base_path: sift-10k/base.npy
+    query_path: sift-10k/queries.npy
+    ground_truth_path: sift-10k/ground_truth.npy
+    distance_metric: L2
+    dimension: 128

@@ -276,6 +276,7 @@ The suite includes production implementations you can use as templates:
 |-----------|------|------|---------|
 | HNSW | `library/algorithms/hnsw/` | in-memory | hnswlib |
 | DiskANN | `library/algorithms/diskann/` | disk-based | diskannpy |
+| SPANN | `library/algorithms/spann/` | disk-based | Microsoft SPTAG |
 
 ### Key Files to Study
 
@@ -286,6 +287,10 @@ The suite includes production implementations you can use as templates:
 **DiskANN (disk-based example):**
 - [runner.py](../library/algorithms/diskann/algorithm/runner.py) - Disk index handling
 - [Dockerfile](../library/algorithms/diskann/Dockerfile) - Python version considerations
+
+**SPANN (memory/SSD hybrid example):**
+- [runner.py](../library/algorithms/spann/algorithm/runner.py) - SPTAG binary conversion and CLI integration
+- [Dockerfile](../library/algorithms/spann/Dockerfile) - Reproducible SPTAG source build
 
 ---
 

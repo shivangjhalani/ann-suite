@@ -41,20 +41,21 @@ RUN echo "deb [trusted=yes] https://apt.repos.intel.com/mkl all main" \
     apt-get update && apt-get install -y --no-install-recommends intel-mkl-64bit-2020.4-912 && \
     rm -rf /var/lib/apt/lists/*
 
-# Fetch pristine DiskANN at the commit matching diskannpy 0.7.0 and apply the
-# search-statistics patch
+# Fetch upstream DiskANN on the cpp_main branch (diskannpy 0.7.1, which matches
+# the local checkout /home/gem/shivang/DiskANN/diskann_code) and apply the
+# search-statistics patch. cpp_main currently points at 78256bbab... (= 0.7.1);
+# pin to that commit for reproducibility.
+ARG DISKANN_COMMIT=78256bbab4685e1774e78d331e081a153be26823
 COPY diskann/patches/stats.patch /tmp/diskann-stats.patch
-RUN wget -q https://github.com/microsoft/DiskANN/archive/cce54e50a493ed76a446b6d7f7d82193faafe115.tar.gz \
-        -O /tmp/diskann.tar.gz && \
-    cd /tmp && tar xzf diskann.tar.gz && \
-    cd /tmp/DiskANN-cce54e50a493ed76a446b6d7f7d82193faafe115 && \
+RUN git clone --branch cpp_main https://github.com/microsoft/DiskANN.git /tmp/diskann && \
+    cd /tmp/diskann && git checkout ${DISKANN_COMMIT} && \
     patch -p1 < /tmp/diskann-stats.patch
 
 # Build instrumented diskannpy from source
 # MKL paths follow the Debian package layout under /opt/intel/mkl
 RUN uv pip install --system --no-cache "numpy==1.25" cmake==3.27.9 ninja pybind11==2.11.1 setuptools wheel && \
     CMAKE_ARGS="-DPYBIND=ON -DOMP_PATH=/opt/intel/mkl/lib/intel64 -DMKL_PATH=/opt/intel/mkl/lib/intel64 -DMKL_INCLUDE_PATH=/opt/intel/mkl/include" \
-    uv pip install --system --no-cache /tmp/DiskANN-cce54e50a493ed76a446b6d7f7d82193faafe115
+    uv pip install --system --no-cache /tmp/diskann
 
 # Copy algorithm code and utilities
 COPY utils.py .

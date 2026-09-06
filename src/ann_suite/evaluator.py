@@ -31,6 +31,7 @@ from ann_suite.core.constants import STANDARD_PAGE_SIZE
 from ann_suite.core.schemas import (
     AlgorithmConfig,
     AlgorithmStats,
+    AlgorithmType,
     BenchmarkConfig,
     BenchmarkResult,
     CPUMetrics,
@@ -39,6 +40,7 @@ from ann_suite.core.schemas import (
     LatencyMetrics,
     MemoryMetrics,
     PhaseResult,
+    ResourceSummary,
     TimeBases,
 )
 from ann_suite.datasets.loader import DatasetLoader
@@ -96,6 +98,13 @@ def expand_sweep_params(args: dict[str, Any]) -> list[dict[str, Any]]:
     return combinations
 
 
+def search_sweep_params(algo_config: AlgorithmConfig) -> list[dict[str, Any]]:
+    """Return explicit search points or expand the legacy Cartesian sweep."""
+    if algo_config.search.sweep is not None:
+        return [point.copy() for point in algo_config.search.sweep]
+    return expand_sweep_params(algo_config.search.args)
+
+
 def build_combo_slug(args: dict[str, Any]) -> str:
     """Generate a deterministic, filesystem-safe slug for a build parameter combination.
 
@@ -142,6 +151,24 @@ class _BuildContext:
     host_index_dir: Path
     container_index_path: str
     build_params: dict[str, Any]
+    prebuilt: bool = False
+    prebuilt_additional_volumes: dict[str, dict[str, str]] | None = None
+
+
+def _empty_resource_summary() -> ResourceSummary:
+    """Return explicit zero metrics for an index supplied before the run."""
+    return ResourceSummary(
+        peak_memory_mb=0.0,
+        avg_memory_mb=0.0,
+        avg_cpu_percent=0.0,
+        peak_cpu_percent=0.0,
+        total_blkio_read_mb=0.0,
+        total_blkio_write_mb=0.0,
+        avg_read_iops=0.0,
+        avg_write_iops=0.0,
+        sample_count=0,
+        duration_seconds=0.0,
+    )
 
 
 class BenchmarkEvaluator:
@@ -231,7 +258,7 @@ class BenchmarkEvaluator:
                 error_msg = f"Failed to pull image: {algo_config.docker_image}"
                 logger.error(f"[{self._run_id}] {error_msg}")
                 for dataset_config in algo_datasets:
-                    for search_params in expand_sweep_params(algo_config.search.args):
+                    for search_params in search_sweep_params(algo_config):
                         results.append(
                             self._failed_result(
                                 algo_config,
@@ -268,7 +295,7 @@ class BenchmarkEvaluator:
                 # Each unique build combo builds its index once; every search combo
                 # then runs against it (subject to build.reuse_index).
                 build_param_combos = expand_sweep_params(algo_config.build.args)
-                search_param_combos = expand_sweep_params(algo_config.search.args)
+                search_param_combos = search_sweep_params(algo_config)
                 n_build_combos = len(build_param_combos)
                 n_search_combos = len(search_param_combos)
                 if n_build_combos > 1 or n_search_combos > 1:
@@ -502,6 +529,56 @@ class BenchmarkEvaluator:
         Returns:
             Build context (build result may still be unsuccessful; callers must check)
         """
+        prebuilt_path = algo_config.build.prebuilt_path
+        if prebuilt_path is not None:
+            host_prebuilt_path = prebuilt_path
+            if not host_prebuilt_path.is_absolute():
+                host_prebuilt_path = self.index_dir / host_prebuilt_path
+            host_prebuilt_path = host_prebuilt_path.expanduser()
+            if not host_prebuilt_path.is_dir():
+                raise FileNotFoundError(
+                    f"Prebuilt index directory does not exist: {host_prebuilt_path}"
+                )
+
+            resolved_prebuilt_path = host_prebuilt_path.resolve()
+            index_size = sum(
+                path.stat().st_size
+                for path in host_prebuilt_path.rglob("*")
+                if path.is_file()
+            )
+            additional_volumes: dict[str, dict[str, str]] = {}
+            for link in host_prebuilt_path.rglob("*"):
+                if not link.is_symlink():
+                    continue
+                target = link.resolve()
+                if target.exists() and not target.is_relative_to(resolved_prebuilt_path):
+                    additional_volumes[str(target.parent)] = {
+                        "bind": str(target.parent),
+                        "mode": "rw",
+                    }
+            build_result = PhaseResult(
+                phase="build",
+                success=True,
+                duration_seconds=0.0,
+                resources=_empty_resource_summary(),
+                output={
+                    "status": "success",
+                    "prebuilt": True,
+                    "prebuilt_path": str(resolved_prebuilt_path),
+                    "index_size_bytes": index_size,
+                    "build_time_seconds": 0.0,
+                },
+                time_bases=TimeBases(container_duration_seconds=0.0, sample_span_seconds=0.0),
+            )
+            return _BuildContext(
+                build_result=build_result,
+                host_index_dir=host_prebuilt_path,
+                container_index_path="/data/prebuilt-index",
+                build_params=build_params,
+                prebuilt=True,
+                prebuilt_additional_volumes=additional_volumes,
+            )
+
         slug = build_combo_slug(build_params)
         cache_key = (algo_config.name, dataset_config.name, slug)
         host_index_dir = self.index_dir / algo_config.name / dataset_config.name / slug
@@ -552,6 +629,8 @@ class BenchmarkEvaluator:
             queries_path,
             gt_path,
             search_params_override=search_params,
+            prebuilt_host_path=context.host_index_dir if context.prebuilt else None,
+            prebuilt_additional_volumes=context.prebuilt_additional_volumes,
         )
 
         return self._aggregate_results(
@@ -625,6 +704,8 @@ class BenchmarkEvaluator:
         queries_path: Path,
         gt_path: Path | None,
         search_params_override: dict[str, Any] | None = None,
+        prebuilt_host_path: Path | None = None,
+        prebuilt_additional_volumes: dict[str, dict[str, str]] | None = None,
     ) -> PhaseResult:
         """Run the search/query phase.
 
@@ -636,8 +717,11 @@ class BenchmarkEvaluator:
             gt_path: Host path to ground truth (optional)
             search_params_override: Optional dict to override search.args for parameter sweeps
         """
-        # Use override if provided (for parameter sweeps), otherwise use config
-        search_args = search_params_override if search_params_override else algo_config.search.args
+        # Merge explicit sweep points with fixed search args so settings such as
+        # vector dtype, index prefix, and thread count are retained.
+        search_args = dict(algo_config.search.args)
+        if search_params_override:
+            search_args.update(search_params_override)
 
         # Get warmup configuration
         warmup_config = algo_config.search.warmup
@@ -681,6 +765,14 @@ class BenchmarkEvaluator:
             config=search_config,
             timeout_seconds=algo_config.search.timeout_seconds,
             run_id=self._run_id,
+            additional_volumes=(
+                {
+                    str(prebuilt_host_path): {"bind": "/data/prebuilt-index", "mode": "rw"},
+                    **(prebuilt_additional_volumes or {}),
+                }
+                if prebuilt_host_path is not None
+                else None
+            ),
         )
 
         # Create time bases from container result and algorithm output
@@ -744,7 +836,8 @@ class BenchmarkEvaluator:
             (build_res.total_blkio_read_mb + build_res.total_blkio_write_mb) * 1024 * 1024
         )
         if (
-            algo_config.algorithm_type.value == "disk"
+            algo_config.algorithm_type in (AlgorithmType.DISK, AlgorithmType.HYBRID)
+            and not build_output.get("prebuilt", False)
             and index_size_bytes
             and index_size_bytes > 0
             and build_total_io_bytes == 0

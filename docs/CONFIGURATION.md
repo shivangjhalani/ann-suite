@@ -86,8 +86,50 @@ algorithms:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `timeout_seconds` | int | `3600` | Build timeout (>= 60) |
+| `prebuilt_path` | path | `null` | Existing index directory, relative to `index_dir` or absolute; skips the build phase |
 | `args` | dict | `{}` | Algorithm-specific build arguments (supports sweeps) |
 | `reuse_index` | bool | `true` | Reuse a built index across search sweep points instead of rebuilding per point |
+
+### Prebuilt Indexes
+
+Set `build.prebuilt_path` to benchmark an index that was built outside the current run:
+
+```yaml
+build:
+  prebuilt_path: DiskANN/sift1m/R32_Lb50_fast
+search:
+  args:
+    index_prefix: ann
+    vector_dtype: uint8
+```
+
+The path is resolved relative to `index_dir` unless absolute. The evaluator validates the
+directory, skips index construction, and mounts the resolved directory directly into the search
+container. Build time and build resource metrics are reported as zero and marked `prebuilt`; index
+load and query metrics are still collected normally.
+
+The index must already use the naming convention required by its runner. For DiskANN with the
+default `index_prefix: ann`, the directory must contain at least:
+
+- `ann_disk.index`
+- `ann_pq_pivots.bin`
+- `ann_pq_compressed.bin`
+
+Optional DiskANN files such as `ann_sample_data.bin` may also be present. DiskANN indexes created
+by the native CLI often have no prefix. If the source already has the required names, avoid
+duplicating large files by symlinking the whole index directory:
+
+```bash
+mkdir -p indices/DiskANN/sift1m
+ln -s /path/to/normalized/index indices/DiskANN/sift1m/R32_Lb50_fast
+```
+
+The directory symlink target is resolved before Docker mounts the index, so an index outside
+`index_dir` remains usable without duplicating storage. For native CLI files that need prefix
+aliases, create a normalized wrapper directory with file symlinks; the evaluator mounts external
+symlink targets automatically. The configured `vector_dtype`, dimension,
+metric, and query dtype must match the prebuilt index. For example, SIFT indexes built from
+DiskANN `u8bin` data require `vector_dtype: uint8` and uint8 queries.
 
 ### Search Configuration
 
@@ -96,7 +138,7 @@ algorithms:
 | `timeout_seconds` | int | `600` | Search timeout (>= 10) |
 | `k` | int | `10` | Neighbors to retrieve (1-1000) |
 | `args` | dict | `{}` | Algorithm-specific search arguments (supports sweeps) |
-| `batch_mode` | bool | `true` | Enable batch queries for higher QPS |
+| `batch_mode` | bool | `false` | Research default: serial, per-query latency (percentiles). Set `true` for higher QPS but mean-only latency |
 | `query_rounds` | int | `1` | Timed passes over the complete query set |
 | `warmup` | object | `{}` | Warmup/cache settings |
 

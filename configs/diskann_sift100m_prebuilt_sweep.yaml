@@ -1,0 +1,107 @@
+name: "DiskANN SIFT-100M Prebuilt Search Sweep"
+description: >-
+  Search the three prebuilt SIFT-100M DiskANN indexes. The query and ground-truth
+  files are the TEXMEX SIFT1B evaluation files, with ground truth restricted by
+  TEXMEX to the first 100M base vectors. Search parameters are swept as a full
+  Cartesian product to expose both individual effects and interactions.
+
+data_dir: "./data"
+results_dir: "./results"
+index_dir: "./indices"
+monitor_interval_ms: 100
+
+algorithms:
+  - name: "DiskANN-R32-Lb50-fast"
+    docker_image: ann-suite/diskann:latest
+    algorithm_type: disk
+    datasets: [sift100m]
+    build:
+      timeout_seconds: 600
+      prebuilt_path: "DiskANN/sift100m/R32_Lb50_fast"
+      args:
+        R: 32
+        L: 50
+        num_threads: 0
+    search:
+      timeout_seconds: 7200
+      k: 10
+      batch_mode: false
+      args:
+        num_threads: 0
+        index_prefix: ann
+        vector_dtype: uint8
+      sweep: &search_points
+        - {Ls: 50, beam_width: 1, num_nodes_to_cache: 0}
+        - {Ls: 100, beam_width: 1, num_nodes_to_cache: 0}
+        - {Ls: 200, beam_width: 2, num_nodes_to_cache: 0}
+        - {Ls: 400, beam_width: 4, num_nodes_to_cache: 0}
+        - {Ls: 800, beam_width: 8, num_nodes_to_cache: 0}
+        - {Ls: 200, beam_width: 1, num_nodes_to_cache: 10000}
+        - {Ls: 200, beam_width: 2, num_nodes_to_cache: 100000}
+        - {Ls: 200, beam_width: 4, num_nodes_to_cache: 1000000}
+        - {Ls: 400, beam_width: 4, num_nodes_to_cache: 100000}
+        - {Ls: 800, beam_width: 8, num_nodes_to_cache: 1000000}
+      warmup:
+        collect_metrics: true
+        cache_warmup_queries: 0
+
+  - name: "DiskANN-R64-Lb100-balanced"
+    docker_image: ann-suite/diskann:latest
+    algorithm_type: disk
+    datasets: [sift100m]
+    build:
+      timeout_seconds: 600
+      prebuilt_path: "DiskANN/sift100m/R64_Lb100_balanced"
+      args:
+        R: 64
+        L: 100
+        num_threads: 0
+    search:
+      timeout_seconds: 7200
+      k: 10
+      batch_mode: false
+      args:
+        num_threads: 0
+        index_prefix: ann
+        vector_dtype: uint8
+      sweep: *search_points
+      warmup:
+        collect_metrics: true
+        cache_warmup_queries: 0
+
+  - name: "DiskANN-R96-Lb160-high-recall"
+    docker_image: ann-suite/diskann:latest
+    algorithm_type: disk
+    datasets: [sift100m]
+    build:
+      timeout_seconds: 600
+      prebuilt_path: "DiskANN/sift100m/R96_Lb160_high_recall"
+      args:
+        R: 96
+        L: 160
+        num_threads: 0
+    search:
+      timeout_seconds: 7200
+      k: 10
+      batch_mode: false
+      args:
+        num_threads: 0
+        index_prefix: ann
+        vector_dtype: uint8
+      sweep: *search_points
+      warmup:
+        collect_metrics: true
+        cache_warmup_queries: 0
+
+datasets:
+  - name: sift100m
+    # The prebuilt indexes contain the 100M base vectors, so the suite only
+    # needs a small placeholder base to satisfy its dataset contract.
+    base_path: sift100m/queries.npy
+    query_path: sift100m/queries.npy
+    ground_truth_path: sift100m/ground_truth.npy
+    distance_metric: L2
+    dimension: 128
+    point_type: uint8
+    base_count: 100000000
+    query_count: 10000

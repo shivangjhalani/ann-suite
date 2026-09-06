@@ -97,6 +97,16 @@ algorithms:
     #   - "0-3"     : Cores 0, 1, 2, 3
     #   - "0,2,4,6" : Specific cores only
     #   - "4"       : Single core limit
+    #
+    # Pins container placement to these cores (Docker cpuset_cpus). On NUMA hosts
+    # this ALSO pins memory to the matching node(s) (cpuset_mems) so CPU and page
+    # cache stay local, removing cross-NUMA traffic noise. For best determinism,
+    # pin all cores of a single NUMA node (e.g. "0-15" on a 2-socket host).
+    #
+    # This is independent of cpu_limit: you can pin to a socket here AND cap total
+    # usage with cpu_limit at the same time. Prefer cpu_affinity over cpu_limit for
+    # latency-sensitive benchmarks (cpu_limit uses CFS throttling, which can inflate
+    # p95/p99; see DOCKER_OPTIMIZATIONS.md §5).
     cpu_affinity: "0-3"
 
     # Optional: Memory limit for the container (Docker memory constraint)
@@ -146,12 +156,16 @@ algorithms:
       k: 10
 
       # Batch mode processing
-      # - true (default): Process all queries together for maximum QPS
-      # - false: Process queries one-by-one for accurate per-query latency
+      # - false (default, research-oriented): Process queries one-by-one and time each
+      #     individually, giving real latency percentiles (p50/p95/p99).
+      # - true: Process all queries in a single native call for maximum QPS. In this
+      #     mode only MEAN latency is available; P50/P95/P99 are None/N/A.
       #
-      # ⚠️ IMPORTANT: When batch_mode=true, latency percentiles (P50, P95, P99)
-      #    may be estimated from mean latency. A warning is logged if detected.
-      #    Use batch_mode=false for accurate latency distribution measurement.
+      # ⚠️ When batch_mode=true, the algorithm can only report MEAN latency; the
+      #    P50/P95/P99 are NOT computed (they are not estimated from the mean).
+      #    Use batch_mode=false for a real latency percentile distribution.
+      #    Shown as true here to demonstrate the throughput mode; the schema default
+      #    is false.
       batch_mode: true
 
       # Algorithm-specific search arguments
@@ -192,13 +206,17 @@ algorithms:
         # - 100-1000: Run warmup queries to measure steady-state performance
         cache_warmup_queries: 0
 
-        # Drop OS page caches before search (requires root privileges)
+        # Drop OS page caches before search (requires root or passwordless sudo)
         # Useful for true cold-start benchmarks on disk-based algorithms
-        # - false (default): Keep caches as-is
-        # - true: Reserved for future implementation
-        # NOTE: This option is defined in config but NOT YET IMPLEMENTED.
-        # For cold-start benchmarks, manually clear caches before running:
-        #   sudo sync && echo 3 | sudo tee /proc/sys/vm/drop_caches
+        # - false (default): Keep caches as-is (warm cache benchmark)
+        # - true: Drop page caches so index reads hit physical disk (cold-start)
+        #
+        # NOTE: This is IMPLEMENTED. The cache drop is attempted before each search
+        # phase (see ContainerRunner.drop_caches): first by direct write to
+        # /proc/sys/vm/drop_caches (root), then passwordless `sudo -n`, then
+        # `sudo -S` using the ANN_SUITE_SUDO_PASSWORD env var. If every attempt
+        # fails, the run continues with a warm cache and a warning is logged, so
+        # cold-cache results are never silently mislabeled.
         drop_caches_before: false
 
   # ============================================================================
@@ -256,6 +274,8 @@ algorithms:
     search:
       timeout_seconds: 600
       k: 10
+      # Shown as true to demonstrate the throughput mode; the schema default is
+      # false (serial, per-query latency percentiles) for research.
       batch_mode: true
 
       # DiskANN-specific search parameters:
@@ -438,7 +458,8 @@ datasets:
 # │ • p95_ms                     - 95th percentile                              │
 # │ • p99_ms                     - 99th percentile (tail latency)               │
 # │                                                                             │
-# │ ⚠️ Note: When batch_mode=true, P50/P95/P99 may be estimated from mean.      │
+# │ ⚠️ Note: When batch_mode=true, P50/P95/P99 are None/N/A (only mean is        │
+# │    available; percentiles are NOT estimated from mean).                     │
 # │    Use batch_mode=false for accurate latency distribution.                  │
 # └─────────────────────────────────────────────────────────────────────────────┘
 #

@@ -100,3 +100,7 @@ results/
 data/
 !data/registry.yaml
 !data/**/metadata.yaml
+!data/sift1m/
+!data/sift1m/metadata.yaml
+!data/sift10m/
+!data/sift10m/metadata.yaml

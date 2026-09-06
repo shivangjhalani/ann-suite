@@ -157,6 +157,8 @@ class DiskANNIndex:
         dimension: int,
         metric: str = "L2",
         num_nodes_to_cache: int = 0,
+        index_prefix: str = "ann",
+        vector_dtype: str | None = None,
     ) -> None:
         """Load a previously built index.
 
@@ -165,12 +167,24 @@ class DiskANNIndex:
             dimension: Vector dimension
             metric: Distance metric
             num_nodes_to_cache: Number of nodes to cache in RAM
+            index_prefix: File prefix for the index components (default "ann",
+                matching diskannpy's convention: ann_disk.index, etc.). Pass the
+                prefix used when the index was built.
+            vector_dtype: Dtype of the index vectors ("float32" or "uint8").
+                Indexes built from uint8 (bvecs) data must be searched with
+                uint8, not float32. Defaults to float32.
         """
         self.dimension = dimension
         if metric not in self.METRIC_MAP:
             raise ValueError(f"Unsupported DiskANN metric: {metric}")
         self.metric = self.METRIC_MAP[metric]
         self.index_path = Path(index_path)
+        if vector_dtype is None:
+            self.vector_dtype: np.dtype = np.dtype(np.float32)
+        elif str(vector_dtype) == "uint8":
+            self.vector_dtype = np.dtype(np.uint8)
+        else:
+            self.vector_dtype = np.dtype(np.float32)
 
         # Load the index with required parameters for diskannpy
         # Use StaticDiskIndex for true disk-based search
@@ -179,8 +193,9 @@ class DiskANNIndex:
             num_threads=self.num_threads,
             num_nodes_to_cache=num_nodes_to_cache,
             distance_metric=self.metric,
-            vector_dtype=np.float32,
+            vector_dtype=self.vector_dtype,
             dimensions=dimension,
+            index_prefix=index_prefix,
         )
 
     def search(
@@ -354,14 +369,23 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
         # Extract configuration
         k = config.get("k", 10)
         query_rounds = int(config.get("query_rounds", 1))
-        batch_mode = config.get("batch_mode", True)
+        batch_mode = config.get("batch_mode", False)
         Ls = search_args.get("Ls", 100)
         beam_width = search_args.get("beam_width", 2)
         cache_warmup_queries = int(config.get("cache_warmup_queries", 0) or 0)
+        # diskannpy uses 0 to mean all available logical CPUs.
+        num_threads = int(search_args.get("num_threads", 0) or 0)
 
         # Load queries (not part of timed benchmark; keep before warmup window)
         queries_path = Path(config["queries_path"])
-        queries = np.load(queries_path).astype(np.float32)
+        # Dtype must match the index dtype (uint8 for bvecs-built indexes).
+        vector_dtype_name = str(
+            search_args.get("vector_dtype", config.get("vector_dtype", "float32"))
+        )
+        index_dtype = np.dtype(np.float32 if vector_dtype_name == "float32" else np.uint8) if vector_dtype_name else np.float32
+        queries = np.load(queries_path)
+        if queries.dtype != index_dtype:
+            queries = queries.astype(index_dtype)
         print(f"Loaded {len(queries)} queries from {queries_path}", file=sys.stderr)
 
         # Load ground truth if available
@@ -381,12 +405,14 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
         load_start_timestamp = datetime.now(UTC).isoformat()
         load_start = time.perf_counter()
 
-        index = DiskANNIndex(num_threads=search_args.get("num_threads", 4))
+        index = DiskANNIndex(num_threads=num_threads)
         index.load(
             index_path,
             dimension,
             metric,
             num_nodes_to_cache=search_args.get("num_nodes_to_cache", 0),
+            index_prefix=str(search_args.get("index_prefix", config.get("index_prefix", "ann"))),
+            vector_dtype=vector_dtype_name,
         )
 
         load_duration_seconds = time.perf_counter() - load_start
