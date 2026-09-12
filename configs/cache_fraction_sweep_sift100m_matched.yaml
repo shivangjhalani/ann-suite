@@ -1,0 +1,66 @@
+name: "Cache-fraction sweep - DiskANN SIFT100M R32 fast (matched to SIFT10M)"
+description: >-
+  Re-run of the SIFT100M cache-fraction sweep with Ls/beam_width/num_threads
+  set identically to the SIFT10M sweep (Ls=100, beam_width=2, num_threads=8,
+  explicit rather than num_threads=0 auto-sizing) instead of the original
+  SIFT100M run's Ls=200/beam_width=4/num_threads=0. The original cross-scale
+  comparison (Results/cache-fraction-cross-scale-comparison.md) normalized
+  each curve by its own f=0 baseline specifically because these three
+  parameters differed between the two original sweeps; this config removes
+  that confound directly instead of only cancelling it via normalization.
+  Same cache points and dataset as the original sweep so the two are
+  directly comparable point-for-point.
+
+data_dir: "./data"
+results_dir: "./results"
+index_dir: "./indices"
+monitor_interval_ms: 100
+
+algorithms:
+  - name: "DiskANN-R32-Lb50-fast-cache-sweep-matched"
+    docker_image: ann-suite/diskann:latest
+    algorithm_type: disk
+    datasets: [sift100m]
+    build:
+      timeout_seconds: 600
+      prebuilt_path: "DiskANN/sift100m/R32_Lb50_fast"
+      required_files: ["ann_disk.index"]
+      args:
+        R: 32
+        L: 50
+        num_threads: 8
+    search:
+      timeout_seconds: 3600
+      k: 10
+      batch_mode: false
+      args:
+        num_threads: 8
+        index_prefix: ann
+        vector_dtype: uint8
+        Ls: 100
+        beam_width: 2
+      sweep:
+        - {num_nodes_to_cache: 0}
+        - {num_nodes_to_cache: 1000}
+        - {num_nodes_to_cache: 10000}
+        - {num_nodes_to_cache: 100000}
+        - {num_nodes_to_cache: 500000}
+        - {num_nodes_to_cache: 1000000}
+        - {num_nodes_to_cache: 5000000}
+        - {num_nodes_to_cache: 10000000}
+        - {num_nodes_to_cache: 25000000}
+        - {num_nodes_to_cache: 50000000}
+      warmup:
+        collect_metrics: true
+        cache_warmup_queries: 0
+
+datasets:
+  - name: sift100m
+    base_path: sift100m/queries.npy
+    query_path: sift100m/queries.npy
+    ground_truth_path: sift100m/ground_truth.npy
+    distance_metric: L2
+    dimension: 128
+    point_type: uint8
+    base_count: 100000000
+    query_count: 10000

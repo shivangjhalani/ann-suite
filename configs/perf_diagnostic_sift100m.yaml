@@ -1,0 +1,61 @@
+name: "Perf diagnostic - SIFT100M cache 1M/5M/10M anomaly root-cause"
+description: >-
+  Single-pass runs at num_nodes_to_cache=1M (control, no anomaly observed),
+  5M, and 10M (both confirmed anomalous: cpu_time_seconds spikes ~3x/1.8x
+  vs. neighboring points despite pages_per_query decreasing monotonically)
+  on the SIFT100M R32/Lb50/fast prebuilt index. Same fixed Ls/beam_width/
+  num_threads as the original cache-fraction sweep and the prior repeat
+  check, so the anomaly is being profiled under the exact conditions it
+  was confirmed under — not a new, unvalidated configuration. Intended to
+  be run with a perf-stat poller attached to the container process from
+  the host (see Knowledge/running-ann-suite-experiments.md), sampling
+  hardware counters at 1s intervals across the whole run so the warmup
+  window and the timed query window can be told apart after the fact via
+  the run's own query_start_timestamp/query_end_timestamp.
+
+data_dir: "./data"
+results_dir: "./results"
+index_dir: "./indices"
+monitor_interval_ms: 100
+
+algorithms:
+  - name: "DiskANN-R32-Lb50-fast-perf-diagnostic"
+    docker_image: ann-suite/diskann:latest
+    algorithm_type: disk
+    datasets: [sift100m]
+    build:
+      timeout_seconds: 600
+      prebuilt_path: "DiskANN/sift100m/R32_Lb50_fast"
+      required_files: ["ann_disk.index"]
+      args:
+        R: 32
+        L: 50
+        num_threads: 0
+    search:
+      timeout_seconds: 3600
+      k: 10
+      batch_mode: false
+      args:
+        num_threads: 0
+        index_prefix: ann
+        vector_dtype: uint8
+        Ls: 200
+        beam_width: 4
+      sweep:
+        - {num_nodes_to_cache: 1000000}
+        - {num_nodes_to_cache: 5000000}
+        - {num_nodes_to_cache: 10000000}
+      warmup:
+        collect_metrics: true
+        cache_warmup_queries: 0
+
+datasets:
+  - name: sift100m
+    base_path: sift100m/queries.npy
+    query_path: sift100m/queries.npy
+    ground_truth_path: sift100m/ground_truth.npy
+    distance_metric: L2
+    dimension: 128
+    point_type: uint8
+    base_count: 100000000
+    query_count: 10000
