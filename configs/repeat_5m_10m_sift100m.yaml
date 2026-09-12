@@ -18,6 +18,7 @@ algorithms:
     build:
       timeout_seconds: 600
       prebuilt_path: "DiskANN/sift100m/R32_Lb50_fast"
+      required_files: ["ann_disk.index"]
       args:
         R: 32
         L: 50

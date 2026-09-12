@@ -219,6 +219,18 @@ class BuildConfig(BaseModel):
             "When set, the evaluator validates and mounts this index and skips building."
         ),
     )
+    required_files: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Glob patterns (relative to prebuilt_path) that must each match at least one file "
+            "for the prebuilt index to be considered complete, e.g. ['ann_disk.index'] for "
+            "DiskANN. Only checked when prebuilt_path is set. Without this, a directory left "
+            "behind by an interrupted/incomplete build (present, non-empty, but missing its "
+            "final merged index file) silently passes the build phase and only fails later "
+            "with an opaque 'index load failed' error at search time — this happened in "
+            "practice (see ai-researcher vault, Experiments/cache-fraction-cost-model-sift10m)."
+        ),
+    )
     args: dict[str, Any] = Field(default_factory=dict, description="Algorithm-specific build args")
     reuse_index: bool = Field(
         default=True,

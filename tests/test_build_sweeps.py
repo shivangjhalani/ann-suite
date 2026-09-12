@@ -207,6 +207,42 @@ class TestPrebuiltIndexes:
 
         container_runner.run_phase.assert_not_called()
 
+    def test_required_files_rejects_incomplete_build(self, tmp_path: Path) -> None:
+        """An interrupted build (e.g. sharded temp files but no final merged
+        index) must fail loudly at build time, not silently pass and only
+        fail later at search time with an opaque "index load failed"."""
+        evaluator, container_runner = make_evaluator(tmp_path)
+        prebuilt = tmp_path / "indices" / "diskann"
+        prebuilt.mkdir(parents=True)
+        (prebuilt / "ann_mem.index_tempFiles_subshard-0_mem.index").write_bytes(b"partial")
+        algo = make_algo(
+            build={
+                "prebuilt_path": Path("diskann"),
+                "required_files": ["ann_disk.index"],
+            }
+        )
+
+        with pytest.raises(FileNotFoundError, match="missing required file"):
+            evaluator._ensure_build(algo, make_dataset(), tmp_path / "base.npy", {})
+
+        container_runner.run_phase.assert_not_called()
+
+    def test_required_files_accepts_complete_build(self, tmp_path: Path) -> None:
+        evaluator, _ = make_evaluator(tmp_path)
+        prebuilt = tmp_path / "indices" / "diskann"
+        prebuilt.mkdir(parents=True)
+        (prebuilt / "ann_disk.index").write_bytes(b"index")
+        algo = make_algo(
+            build={
+                "prebuilt_path": Path("diskann"),
+                "required_files": ["ann_disk.index"],
+            }
+        )
+
+        context = evaluator._ensure_build(algo, make_dataset(), tmp_path / "base.npy", {})
+
+        assert context.prebuilt is True
+
     def test_prebuilt_file_symlinks_add_external_mounts(self, tmp_path: Path) -> None:
         evaluator, _ = make_evaluator(tmp_path)
         source = tmp_path / "external-index"

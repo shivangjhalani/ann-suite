@@ -540,6 +540,21 @@ class BenchmarkEvaluator:
                     f"Prebuilt index directory does not exist: {host_prebuilt_path}"
                 )
 
+            missing_patterns = [
+                pattern
+                for pattern in algo_config.build.required_files
+                if not any(host_prebuilt_path.glob(pattern))
+            ]
+            if missing_patterns:
+                raise FileNotFoundError(
+                    f"Prebuilt index directory {host_prebuilt_path} is missing required "
+                    f"file(s) matching {missing_patterns} — this usually means an earlier "
+                    "build was interrupted before finishing (e.g. only sharded temp files "
+                    "were written, never merged into the final index). Rebuild with "
+                    "build.reuse_index: false and no prebuilt_path, or point at a complete "
+                    "index."
+                )
+
             resolved_prebuilt_path = host_prebuilt_path.resolve()
             index_size = sum(
                 path.stat().st_size
