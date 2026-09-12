@@ -42,6 +42,7 @@ from ann_suite.core.schemas import (
     PhaseResult,
     ResourceSummary,
     TimeBases,
+    _flatten_dict,
 )
 from ann_suite.datasets.loader import DatasetLoader
 from ann_suite.results.storage import ResultsStorage
@@ -103,6 +104,102 @@ def search_sweep_params(algo_config: AlgorithmConfig) -> list[dict[str, Any]]:
     if algo_config.search.sweep is not None:
         return [point.copy() for point in algo_config.search.sweep]
     return expand_sweep_params(algo_config.search.args)
+
+
+def detect_sweep_anomalies(
+    results: list[BenchmarkResult], min_relative_change: float = 0.05
+) -> list[str]:
+    """Flag sweep points where disk I/O improved but CPU/QPS got worse.
+
+    In a single-parameter sweep (e.g. varying `num_nodes_to_cache`), disk I/O
+    (`search_pages_per_query`) and query cost (`qps`, `search_cpu_time_per_query_ms`)
+    are normally expected to move together: less I/O per query should mean equal
+    or better QPS. A point where I/O clearly *improved* relative to its
+    neighbours but QPS clearly *worsened* (or CPU time per query clearly
+    *increased*) is a signal something other than the swept parameter itself is
+    driving the result -- e.g. a genuine implementation-level pathology, not a
+    property of the algorithm/parameter being studied.
+
+    This check exists because exactly this pattern (monotonically decreasing
+    `pages_per_query` alongside a sharp, localized QPS/CPU regression) was how a
+    real hash-table clustering bug in DiskANN's node cache was first noticed --
+    manually, by eyeballing a results table. See the ai-researcher project's
+    Knowledge/diskann-robin-map-hash-clustering-bug.md for the full case study.
+    It is a heuristic, not a correctness check: it can both miss anomalies (if
+    they're gradual rather than localized) and produce false positives (if two
+    swept parameters both legitimately affect cost in opposite directions), so
+    treat its output as "worth a second look", not a verdict.
+
+    Args:
+        results: All results from a run (may span multiple algorithms/datasets).
+        min_relative_change: Minimum fractional change (default 5%) for a
+            point-to-point move to count as a clear improvement/regression,
+            to avoid flagging ordinary run-to-run noise.
+
+    Returns:
+        Human-readable warning strings, one per flagged point. Empty if none.
+    """
+    warnings: list[str] = []
+
+    def _group_key(r: BenchmarkResult) -> tuple[str, str]:
+        return (r.algorithm, r.dataset)
+
+    groups: dict[tuple[str, str], list[BenchmarkResult]] = {}
+    for r in results:
+        groups.setdefault(_group_key(r), []).append(r)
+
+    for (algorithm, dataset), group in groups.items():
+        if len(group) < 3:
+            continue  # need at least 3 points to talk about a "local" regression
+
+        # hyperparameters is a nested dict (e.g. {"build": {...}, "search":
+        # {"num_nodes_to_cache": 5_000_000}, "k": 10}) -- flatten it so a swept
+        # search-arg like "search_num_nodes_to_cache" is comparable across points.
+        flat_hp = [_flatten_dict(r.hyperparameters) for r in group]
+
+        # Only handles the common case: exactly one hyperparameter varies
+        # numerically across the group's points. Skips multi-parameter sweeps,
+        # where an I/O-vs-CPU tradeoff can be a legitimate property of the
+        # parameter combination rather than an anomaly.
+        all_keys = {k for hp in flat_hp for k in hp}
+        varying_numeric_keys = [
+            k
+            for k in all_keys
+            if len({hp.get(k) for hp in flat_hp}) > 1
+            and all(isinstance(hp.get(k), (int, float)) for hp in flat_hp)
+        ]
+        if len(varying_numeric_keys) != 1:
+            continue
+        sweep_key = varying_numeric_keys[0]
+
+        ordered_pairs = sorted(
+            zip(flat_hp, group, strict=True), key=lambda pair: pair[0][sweep_key]
+        )
+
+        for (prev_hp, prev), (curr_hp, curr) in zip(
+            ordered_pairs, ordered_pairs[1:], strict=False
+        ):
+            prev_pages = prev.disk_io.search_pages_per_query
+            curr_pages = curr.disk_io.search_pages_per_query
+            prev_qps = prev.qps
+            curr_qps = curr.qps
+            if not prev_pages or not curr_pages or not prev_qps or not curr_qps:
+                continue
+            if prev_pages <= 0 or curr_pages <= 0 or prev_qps <= 0 or curr_qps <= 0:
+                continue
+
+            pages_improved = (prev_pages - curr_pages) / prev_pages >= min_relative_change
+            qps_regressed = (prev_qps - curr_qps) / prev_qps >= min_relative_change
+            if pages_improved and qps_regressed:
+                warnings.append(
+                    f"[{algorithm} on {dataset}] {sweep_key}="
+                    f"{prev_hp[sweep_key]} -> {curr_hp[sweep_key]}: "
+                    f"pages_per_query improved {prev_pages:.1f} -> {curr_pages:.1f} "
+                    f"but QPS regressed {prev_qps:.1f} -> {curr_qps:.1f}. "
+                    "Disk I/O and QPS usually move together; investigate before "
+                    "trusting this point (see detect_sweep_anomalies docstring)."
+                )
+    return warnings
 
 
 def build_combo_slug(args: dict[str, Any]) -> str:

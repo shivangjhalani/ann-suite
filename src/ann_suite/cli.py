@@ -19,7 +19,7 @@ from ann_suite.core.config import load_config
 from ann_suite.core.schemas import BenchmarkConfig, BenchmarkResult
 from ann_suite.datasets import DEFAULT_DATA_DIR, prepare_dataset
 from ann_suite.datasets import list_datasets as list_registered_datasets
-from ann_suite.evaluator import BenchmarkEvaluator
+from ann_suite.evaluator import BenchmarkEvaluator, detect_sweep_anomalies
 from ann_suite.results.storage import ResultsStorage
 from ann_suite.runners.container_runner import ContainerRunner
 from ann_suite.utils.logging import setup_logging
@@ -94,6 +94,15 @@ def run(
         if results:
             console.print(f"\n[bold green]Completed {len(results)} benchmarks[/]")
             _show_results_table(results)
+
+            anomalies = detect_sweep_anomalies(results)
+            if anomalies:
+                console.print(
+                    "\n[bold yellow]⚠ Possible sweep anomalies "
+                    "(disk I/O improved but QPS regressed):[/]"
+                )
+                for warning in anomalies:
+                    console.print(f"  [yellow]{warning}[/]")
         else:
             console.print("[bold yellow]No results generated[/]")
 
