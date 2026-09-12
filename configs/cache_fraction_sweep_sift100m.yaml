@@ -1,0 +1,63 @@
+name: "Cache-fraction sweep - DiskANN SIFT100M R32 fast"
+description: >-
+  Fine-grained num_nodes_to_cache sweep on the existing, verified-complete
+  DiskANN/sift100m/R32_Lb50_fast prebuilt index, holding Ls/beam_width fixed,
+  to characterize how effective disk I/O (pages_per_query) and latency/QPS
+  scale with the fraction of a 100M-vector graph held in DiskANN's in-memory
+  vertex cache. Feeds the cache-aware I/O cost model validation in the
+  ai-researcher project (Knowledge/cache-aware-cost-model-validation.md).
+  Cache points capped at 50M (~50% of dataset) to stay within the 31GB RAM
+  budget on the target machine.
+
+data_dir: "./data"
+results_dir: "./results"
+index_dir: "./indices"
+monitor_interval_ms: 100
+
+algorithms:
+  - name: "DiskANN-R32-Lb50-fast-cache-sweep"
+    docker_image: ann-suite/diskann:latest
+    algorithm_type: disk
+    datasets: [sift100m]
+    build:
+      timeout_seconds: 600
+      prebuilt_path: "DiskANN/sift100m/R32_Lb50_fast"
+      args:
+        R: 32
+        L: 50
+        num_threads: 0
+    search:
+      timeout_seconds: 3600
+      k: 10
+      batch_mode: false
+      args:
+        num_threads: 0
+        index_prefix: ann
+        vector_dtype: uint8
+        Ls: 200
+        beam_width: 4
+      sweep:
+        - {num_nodes_to_cache: 0}
+        - {num_nodes_to_cache: 1000}
+        - {num_nodes_to_cache: 10000}
+        - {num_nodes_to_cache: 100000}
+        - {num_nodes_to_cache: 500000}
+        - {num_nodes_to_cache: 1000000}
+        - {num_nodes_to_cache: 5000000}
+        - {num_nodes_to_cache: 10000000}
+        - {num_nodes_to_cache: 25000000}
+        - {num_nodes_to_cache: 50000000}
+      warmup:
+        collect_metrics: true
+        cache_warmup_queries: 0
+
+datasets:
+  - name: sift100m
+    base_path: sift100m/queries.npy
+    query_path: sift100m/queries.npy
+    ground_truth_path: sift100m/ground_truth.npy
+    distance_metric: L2
+    dimension: 128
+    point_type: uint8
+    base_count: 100000000
+    query_count: 10000

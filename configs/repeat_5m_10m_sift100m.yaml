@@ -1,0 +1,53 @@
+name: "Repeat check - SIFT100M cache 5M/10M anomaly"
+description: >-
+  Repeats the two SIFT100M cache-fraction sweep points (num_nodes_to_cache
+  5M and 10M) that showed a non-monotonic QPS/latency dip relative to
+  neighboring points, to check whether it's a real effect or single-run
+  noise. Same fixed Ls/beam_width as the original sweep.
+
+data_dir: "./data"
+results_dir: "./results"
+index_dir: "./indices"
+monitor_interval_ms: 100
+
+algorithms:
+  - name: "DiskANN-R32-Lb50-fast-cache-repeat"
+    docker_image: ann-suite/diskann:latest
+    algorithm_type: disk
+    datasets: [sift100m]
+    build:
+      timeout_seconds: 600
+      prebuilt_path: "DiskANN/sift100m/R32_Lb50_fast"
+      args:
+        R: 32
+        L: 50
+        num_threads: 0
+    search:
+      timeout_seconds: 3600
+      k: 10
+      batch_mode: false
+      args:
+        num_threads: 0
+        index_prefix: ann
+        vector_dtype: uint8
+        Ls: 200
+        beam_width: 4
+      sweep:
+        - {num_nodes_to_cache: 5000000}
+        - {num_nodes_to_cache: 10000000}
+        - {num_nodes_to_cache: 5000000}
+        - {num_nodes_to_cache: 10000000}
+      warmup:
+        collect_metrics: true
+        cache_warmup_queries: 0
+
+datasets:
+  - name: sift100m
+    base_path: sift100m/queries.npy
+    query_path: sift100m/queries.npy
+    ground_truth_path: sift100m/ground_truth.npy
+    distance_metric: L2
+    dimension: 128
+    point_type: uint8
+    base_count: 100000000
+    query_count: 10000
