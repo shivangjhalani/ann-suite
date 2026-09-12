@@ -1,0 +1,16 @@
+# Derived from the pinned ann-suite/diskann:latest image (DISKANN_COMMIT=78256bbab...
+# + stats.patch, see diskann/Dockerfile). Applies robin_map_hash_fix.patch to the
+# already-present upstream source tree at /tmp/diskann and rebuilds diskannpy in place.
+#
+# Unlike Dockerfile.cachedump this patch is NOT env-var gated -- the mixing hash is
+# always active, so this image is a genuinely different build from :latest and must be
+# tagged separately (ann-suite/diskann:hashfix). Use it to measure what the node-cache
+# performance looks like without the id-space folding pathology.
+
+FROM ann-suite/diskann:latest
+
+COPY diskann/patches/robin_map_hash_fix.patch /tmp/diskann-robin-map-hash-fix.patch
+RUN cd /tmp/diskann && patch -p1 < /tmp/diskann-robin-map-hash-fix.patch
+
+RUN CMAKE_ARGS="-DPYBIND=ON -DOMP_PATH=/opt/intel/mkl/lib/intel64 -DMKL_PATH=/opt/intel/mkl/lib/intel64 -DMKL_INCLUDE_PATH=/opt/intel/mkl/include" \
+    uv pip install --system --no-cache --force-reinstall --no-deps /tmp/diskann
