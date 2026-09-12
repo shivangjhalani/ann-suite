@@ -1,0 +1,73 @@
+name: "Cache population - SIFT1M third scale point"
+description: >-
+  Third scale point for the cross-scale cache analysis, which until now has had
+  only SIFT10M and SIFT100M -- two points, which cannot distinguish "two
+  genuinely different curve shapes" from "smooth drift with scale".
+
+  This index is uint8/128-d at R32/L50, so it is dtype-matched to the SIFT100M
+  index (uint8) across a 100x scale range. SIFT10M is float32, and that dtype
+  difference has been an uncontrolled confound in every cross-scale comparison
+  so far; the SIFT1M-vs-SIFT100M pair removes it.
+
+  Cache points are chosen so that 1,000 / 10,000 / 100,000 / 500,000 overlap in
+  ABSOLUTE terms with points already measured at the other two scales. That is
+  the comparison that matters for the observation in
+  Results/system-observations-cache-population.md section 6: the hot head of the
+  visit-frequency distribution looks roughly absolute in size while the tail
+  looks proportional to the graph. A third scale either supports that or breaks
+  it.
+
+  Search parameters match the other two sweeps (Ls=100, beam_width=2,
+  num_threads=8) so nothing but scale and dtype differs.
+
+data_dir: "./data"
+results_dir: "./results"
+index_dir: "./indices"
+monitor_interval_ms: 100
+
+algorithms:
+  - name: "DiskANN-hashfix-sift1m-population"
+    docker_image: ann-suite/diskann:hashfix
+    algorithm_type: disk
+    datasets: [sift1m-prebuilt]
+    build:
+      timeout_seconds: 600
+      prebuilt_path: "DiskANN/sift1m-prebuilt/L-50_R-32_build-memory-maximum-0-27_index-prefix-c9390d63"
+      required_files: ["ann_disk.index"]
+      args:
+        R: 32
+        L: 50
+        num_threads: 8
+    search:
+      timeout_seconds: 3600
+      k: 10
+      batch_mode: false
+      args:
+        num_threads: 8
+        index_prefix: ann
+        vector_dtype: uint8
+        Ls: 100
+        beam_width: 2
+      sweep:
+        - {num_nodes_to_cache: 0}
+        - {num_nodes_to_cache: 1000}
+        - {num_nodes_to_cache: 10000}
+        - {num_nodes_to_cache: 50000}
+        - {num_nodes_to_cache: 100000}
+        - {num_nodes_to_cache: 250000}
+        - {num_nodes_to_cache: 500000}
+        - {num_nodes_to_cache: 1000000}
+      warmup:
+        collect_metrics: true
+        cache_warmup_queries: 0
+
+datasets:
+  - name: sift1m-prebuilt
+    base_path: sift1m-prebuilt/base.npy
+    query_path: sift1m-prebuilt/queries.npy
+    ground_truth_path: sift1m-prebuilt/ground_truth.npy
+    distance_metric: L2
+    dimension: 128
+    point_type: uint8
+    base_count: 1000
+    query_count: 10000
