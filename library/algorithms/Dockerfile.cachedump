@@ -1,0 +1,11 @@
+# Derived from the pinned ann-suite/diskann:latest image (DISKANN_COMMIT=78256bbab...
+# + stats.patch, see diskann/Dockerfile). Re-applies an extra, env-var-gated patch to the
+# already-present upstream source tree at /tmp/diskann and rebuilds diskannpy in place.
+# Behaviour is byte-identical to :latest unless DISKANN_DUMP_CACHE_LIST is set.
+FROM ann-suite/diskann:latest
+
+COPY diskann/patches/cache_list_dump.patch /tmp/diskann-cache-list-dump.patch
+RUN cd /tmp/diskann && patch -p1 < /tmp/diskann-cache-list-dump.patch
+
+RUN CMAKE_ARGS="-DPYBIND=ON -DOMP_PATH=/opt/intel/mkl/lib/intel64 -DMKL_PATH=/opt/intel/mkl/lib/intel64 -DMKL_INCLUDE_PATH=/opt/intel/mkl/include" \
+    uv pip install --system --no-cache --force-reinstall --no-deps /tmp/diskann

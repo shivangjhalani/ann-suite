@@ -1,0 +1,50 @@
+--- a/src/pq_flash_index.cpp
++++ b/src/pq_flash_index.cpp
+@@ -9,6 +9,10 @@
+ #include "pq_flash_index.h"
+ #include "cosine_similarity.h"
+ 
++// ann-suite research instrumentation (env-var gated; see DISKANN_DUMP_CACHE_LIST below)
++#include <cstdlib>
++#include <fstream>
++
+ #ifdef _WINDOWS
+ #include "windows_aligned_file_reader.h"
+ #else
+@@ -343,6 +347,36 @@
+     }
+     this->_count_visited_nodes = false;
+ 
++    // --- ann-suite research instrumentation (env-var gated; completely inert when unset) ---
++    //   DISKANN_DUMP_CACHE_LIST=<path>  dump node_list as raw little-endian uint32 node ids
++    //   DISKANN_DUMP_EXIT=1             hard-exit immediately after the dump (skips load_cache_list)
++    {
++        const char *ann_suite_dump_path = std::getenv("DISKANN_DUMP_CACHE_LIST");
++        if (ann_suite_dump_path != nullptr && ann_suite_dump_path[0] != '\0')
++        {
++            uint64_t ann_suite_nonzero = 0;
++            for (size_t vi = 0; vi < this->_node_visit_counter.size(); vi++)
++            {
++                if (this->_node_visit_counter[vi].second > 0)
++                    ann_suite_nonzero++;
++            }
++            std::ofstream ann_suite_dump(ann_suite_dump_path, std::ios::binary | std::ios::trunc);
++            ann_suite_dump.write((const char *)node_list.data(),
++                                 (std::streamsize)(node_list.size() * sizeof(uint32_t)));
++            ann_suite_dump.close();
++            diskann::cout << "[ann-suite] cache_list_dump path=" << ann_suite_dump_path
++                          << " n_ids=" << node_list.size() << " sample_num=" << sample_num
++                          << " nodes_visited_gt0=" << ann_suite_nonzero
++                          << " num_points=" << this->_num_points << std::endl;
++            if (std::getenv("DISKANN_DUMP_EXIT") != nullptr)
++            {
++                diskann::aligned_free(samples);
++                std::cout.flush();
++                std::_Exit(0);
++            }
++        }
++    }
++
+     diskann::aligned_free(samples);
+ }
+ 
