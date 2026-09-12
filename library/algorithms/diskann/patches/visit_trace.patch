@@ -34,7 +34,7 @@ Output is raw little-endian uint32 visit counts indexed by node id.
 @@ -9,6 +9,10 @@
  #include "pq_flash_index.h"
  #include "cosine_similarity.h"
-
+ 
 +// ann-suite research instrumentation (env-var gated; see DISKANN_VISIT_TRACE below)
 +#include <cstdlib>
 +#include <fstream>
@@ -42,8 +42,8 @@ Output is raw little-endian uint32 visit counts indexed by node id.
  #ifdef _WINDOWS
  #include "windows_aligned_file_reader.h"
  #else
-@@ -57,6 +61,26 @@
-
+@@ -57,6 +61,27 @@
+ 
  template <typename T, typename LabelT> PQFlashIndex<T, LabelT>::~PQFlashIndex()
  {
 +    // --- ann-suite research instrumentation: dump real-workload visit counts ---
@@ -70,22 +70,19 @@ Output is raw little-endian uint32 visit counts indexed by node id.
  #ifndef EXEC_ENV_OLS
      if (data != nullptr)
      {
-@@ -341,6 +365,26 @@
-         node_list.push_back(this->_node_visit_counter[i].first);
+@@ -343,6 +368,26 @@
      }
      this->_count_visited_nodes = false;
-+
+ 
 +    // --- ann-suite research instrumentation (env-var gated; inert when unset) ---
++    // The sort above ordered _node_visit_counter by descending count, so position i
++    // no longer corresponds to node i. cached_beam_search increments
++    // _node_visit_counter[nbr.id] -- indexed by node id -- so the identity mapping
++    // must be restored or every visit lands on the wrong node.
 +    {
 +        const char *ann_suite_trace = std::getenv("DISKANN_VISIT_TRACE");
 +        if (ann_suite_trace != nullptr && ann_suite_trace[0] != '\0')
 +        {
-+            // The sort above ordered _node_visit_counter by descending count, so
-+            // position i no longer corresponds to node i. cached_beam_search
-+            // increments _node_visit_counter[nbr.id] -- indexed by node id -- so the
-+            // identity mapping has to be restored or every visit lands on the wrong
-+            // node. Rebuild it, zero the counts, and resume counting over the real
-+            // query workload.
 +            for (uint32_t vi = 0; vi < this->_node_visit_counter.size(); vi++)
 +            {
 +                this->_node_visit_counter[vi].first = vi;
@@ -96,6 +93,7 @@ Output is raw little-endian uint32 visit counts indexed by node id.
 +                          << ann_suite_trace << " at teardown" << std::endl;
 +        }
 +    }
-
++
      diskann::aligned_free(samples);
  }
+ 
