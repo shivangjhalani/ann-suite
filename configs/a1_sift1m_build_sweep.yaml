@@ -1,0 +1,43 @@
+name: "A1 navigability sweep - DiskANN R sweep on SIFT-1M"
+description: >
+  Build DiskANN at R=64,96 on full SIFT-1M (float32) to extend the A1
+  navigability-gap measurement beyond the existing R=32 prebuilt index.
+data_dir: "./data"
+results_dir: "./results"
+index_dir: "./indices"
+monitor_interval_ms: 200
+
+algorithms:
+  - name: DiskANN
+    docker_image: ann-suite/diskann:latest
+    algorithm_type: disk
+    cpu_affinity: "0-3"
+    memory_limit: "4g"
+    build:
+      timeout_seconds: 7200
+      reuse_index: true
+      args:
+        R: [64, 96]
+        L: 100
+        alpha: 1.2
+        num_threads: 4
+        build_memory_maximum: 2.0
+        search_memory_maximum: 1.0
+    search:
+      timeout_seconds: 600
+      k: 10
+      batch_mode: false
+      args:
+        Ls: 100
+        beam_width: 2
+        num_threads: 4
+        num_nodes_to_cache: 0
+
+datasets:
+  - name: sift1m
+    base_path: sift1m/base.npy
+    query_path: sift1m/queries.npy
+    ground_truth_path: sift1m/ground_truth.npy
+    distance_metric: L2
+    dimension: 128
+    point_type: float32
