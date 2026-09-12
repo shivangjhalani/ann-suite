@@ -1,0 +1,101 @@
+Dump the real-workload per-node visit distribution.
+
+DiskANN already counts node visits (_node_visit_counter, incremented in
+cached_beam_search when _count_visited_nodes is set), but only enables counting
+inside generate_cache_list_from_sample_queries, using its own internal sample
+queries at L=15/beam=4 -- not the benchmark's actual query workload.
+
+This patch re-enables counting after cache generation finishes, so the counter
+accumulates over the real timed query set, and dumps it at teardown. That gives
+the true access distribution, which is the object H(N) in the cost
+decomposition: H(N) = (visits to the top-N nodes) / (total visits).
+
+Two uses:
+  - Recover the entire H(N) curve from ONE run, instead of one point per
+    benchmark run.
+  - Compare DiskANN's sample-based cache selection against the oracle ordering
+    from real-workload visit counts, i.e. measure how much hit rate its
+    selection heuristic leaves on the table.
+
+CRITICAL correctness detail: generate_cache_list_from_sample_queries sorts
+_node_visit_counter by descending count, after which position i no longer holds
+node i. cached_beam_search increments _node_visit_counter[nbr.id], indexing by
+node id, so the identity mapping MUST be restored before counting is re-enabled
+or every visit is attributed to the wrong node. The patch rebuilds it.
+
+Counting adds an atomic fetch_add per expanded node, so this perturbs timing.
+Use it for distribution characterization only, never for a timed measurement.
+
+Env-var gated by DISKANN_VISIT_TRACE=<path>; completely inert when unset.
+Output is raw little-endian uint32 visit counts indexed by node id.
+
+--- a/src/pq_flash_index.cpp
++++ b/src/pq_flash_index.cpp
+@@ -9,6 +9,10 @@
+ #include "pq_flash_index.h"
+ #include "cosine_similarity.h"
+
++// ann-suite research instrumentation (env-var gated; see DISKANN_VISIT_TRACE below)
++#include <cstdlib>
++#include <fstream>
++
+ #ifdef _WINDOWS
+ #include "windows_aligned_file_reader.h"
+ #else
+@@ -57,6 +61,26 @@
+
+ template <typename T, typename LabelT> PQFlashIndex<T, LabelT>::~PQFlashIndex()
+ {
++    // --- ann-suite research instrumentation: dump real-workload visit counts ---
++    {
++        const char *ann_suite_trace = std::getenv("DISKANN_VISIT_TRACE");
++        if (ann_suite_trace != nullptr && ann_suite_trace[0] != '\0' &&
++            !this->_node_visit_counter.empty())
++        {
++            std::ofstream ann_suite_out(ann_suite_trace, std::ios::binary | std::ios::trunc);
++            uint64_t ann_suite_total = 0;
++            for (size_t vi = 0; vi < this->_node_visit_counter.size(); vi++)
++            {
++                uint32_t ann_suite_cnt = this->_node_visit_counter[vi].second;
++                ann_suite_total += ann_suite_cnt;
++                ann_suite_out.write((const char *)&ann_suite_cnt, sizeof(uint32_t));
++            }
++            ann_suite_out.close();
++            diskann::cout << "[ann-suite] visit_trace path=" << ann_suite_trace
++                          << " n_nodes=" << this->_node_visit_counter.size()
++                          << " total_visits=" << ann_suite_total << std::endl;
++        }
++    }
++
+ #ifndef EXEC_ENV_OLS
+     if (data != nullptr)
+     {
+@@ -341,6 +365,26 @@
+         node_list.push_back(this->_node_visit_counter[i].first);
+     }
+     this->_count_visited_nodes = false;
++
++    // --- ann-suite research instrumentation (env-var gated; inert when unset) ---
++    {
++        const char *ann_suite_trace = std::getenv("DISKANN_VISIT_TRACE");
++        if (ann_suite_trace != nullptr && ann_suite_trace[0] != '\0')
++        {
++            // The sort above ordered _node_visit_counter by descending count, so
++            // position i no longer corresponds to node i. cached_beam_search
++            // increments _node_visit_counter[nbr.id] -- indexed by node id -- so the
++            // identity mapping has to be restored or every visit lands on the wrong
++            // node. Rebuild it, zero the counts, and resume counting over the real
++            // query workload.
++            for (uint32_t vi = 0; vi < this->_node_visit_counter.size(); vi++)
++            {
++                this->_node_visit_counter[vi].first = vi;
++                this->_node_visit_counter[vi].second = 0;
++            }
++            this->_count_visited_nodes = true;
++            diskann::cout << "[ann-suite] visit tracing armed, dumping to "
++                          << ann_suite_trace << " at teardown" << std::endl;
++        }
++    }
+
+     diskann::aligned_free(samples);
+ }
