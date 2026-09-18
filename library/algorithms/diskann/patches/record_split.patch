@@ -35,8 +35,25 @@ so the two do not conflict). Build from ann-suite/diskann:hashfix.
 
 This is a TIMED-measurement image: it adds no counters or tracing.
 
-diff --git a/src/pq_flash_index.cpp b/src/pq_flash_index.cpp
 index 9580537e..4da1878d 100644
+ADDENDUM (2026-09-19): top-R exact rerank, env-gated by DISKANN_RERANK_TOPR.
+
+Adjacency-only residency measured recall 0.9521 -> 0.8068 on SIFT10M, and widening
+the search does NOT repair it: Ls 100/150/200/300 gives 0.8068/0.8155/0.8192/0.8229,
+clearly saturating. Tripling Ls buys 1.6 recall points. So the true neighbours are
+already in the candidate pool and merely mis-ordered by PQ -- the deficit is ranking
+PRECISION, not candidate DISCOVERY, and breadth cannot fix it.
+
+The rerank re-reads the top-R candidates' full vectors and re-sorts on exact distance.
+It mirrors DiskANN's own use_reorder_data path but reads NODE sectors via
+get_node_sector + offset_to_node, so it needs no separate reorder-data region and
+works on any index. Cost is exactly R page reads per query against ~116 for an
+uncached search, so R is the knob trading recall against I/O. R is clamped to
+defaults::MAX_N_SECTOR_READS (128), the sector-scratch capacity.
+
+Both features are independently env-gated and inert when unset.
+
+index 9580537e..ef76e694 100644
 --- a/src/pq_flash_index.cpp
 +++ b/src/pq_flash_index.cpp
 @@ -9,6 +9,9 @@
@@ -128,3 +145,67 @@ index 9580537e..4da1878d 100644
                  if (metric == diskann::Metric::INNER_PRODUCT)
                      cur_expanded_dist = _disk_pq_table.inner_product(query_float, (uint8_t *)node_fp_coords_copy);
                  else
+@@ -1613,6 +1643,63 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
+     // re-sort by distance
+     std::sort(full_retset.begin(), full_retset.end());
+ 
++    // --- ann-suite: top-R exact rerank over NODE sectors (DISKANN_RERANK_TOPR) ---
++    // Under adjacency-only residency every expanded node's distance is a PQ estimate,
++    // so the final ordering is PQ-ranked. Measured effect on SIFT10M: recall 0.9521 ->
++    // 0.8068, and widening the search does NOT repair it (Ls 100->300 buys only
++    // 0.8068 -> 0.8229 and is saturating) -- the true neighbours are already in the
++    // pool, merely mis-ordered. So the repair is precision, not breadth: re-read the
++    // top-R candidates' full vectors and re-sort on exact distance.
++    //
++    // This mirrors DiskANN's own use_reorder_data path but reads the NODE sectors
++    // (get_node_sector + offset_to_node), so it needs no separate reorder-data region
++    // and works on any index. Cost is exactly R page reads per query, against ~116 for
++    // an uncached search -- so R is the knob trading recall against I/O.
++    //
++    // R is clamped to the sector scratch capacity. Inert when unset.
++    {
++        const char *ann_suite_rr = std::getenv("DISKANN_RERANK_TOPR");
++        uint64_t ann_suite_R = (ann_suite_rr != nullptr && ann_suite_rr[0] != '\0')
++                                   ? (uint64_t)std::atoi(ann_suite_rr)
++                                   : 0;
++        if (ann_suite_R > 0 && !full_retset.empty())
++        {
++            if (ann_suite_R > defaults::MAX_N_SECTOR_READS)
++                ann_suite_R = defaults::MAX_N_SECTOR_READS;
++            if (full_retset.size() > ann_suite_R)
++                full_retset.erase(full_retset.begin() + ann_suite_R, full_retset.end());
++
++            std::vector<AlignedRead> ann_suite_reqs;
++            for (size_t i = 0; i < full_retset.size(); ++i)
++            {
++                ann_suite_reqs.emplace_back(get_node_sector((size_t)full_retset[i].id) * defaults::SECTOR_LEN,
++                                            defaults::SECTOR_LEN, sector_scratch + i * defaults::SECTOR_LEN);
++                if (stats != nullptr)
++                {
++                    stats->n_4k++;
++                    stats->n_ios++;
++                }
++            }
++            io_timer.reset();
++#ifdef USE_BING_INFRA
++            reader->read(ann_suite_reqs, ctx, true);
++#else
++            reader->read(ann_suite_reqs, ctx);
++#endif
++            if (stats != nullptr)
++                stats->io_us += io_timer.elapsed();
++
++            for (size_t i = 0; i < full_retset.size(); ++i)
++            {
++                char *ann_suite_nb = offset_to_node(sector_scratch + i * defaults::SECTOR_LEN,
++                                                    (size_t)full_retset[i].id);
++                full_retset[i].distance =
++                    _dist_cmp->compare(aligned_query_T, offset_to_node_coords(ann_suite_nb), (uint32_t)_aligned_dim);
++            }
++            std::sort(full_retset.begin(), full_retset.end());
++        }
++    }
++
+     if (use_reorder_data)
+     {
+         if (!(this->_reorder_data_exists))
