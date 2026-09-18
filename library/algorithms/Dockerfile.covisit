@@ -1,0 +1,20 @@
+# Derived from ann-suite/diskann:visittrace. Adds env-var-gated PER-QUERY
+# co-visitation tracing, which visit tracing alone cannot provide: aggregated
+# per-node counts give H(N) but not which nodes share a query, and that is what
+# bounds the achievable nodes-per-page-read under an optimal layout.
+#
+# Built on :visittrace rather than :hashfix because covisit_trace.patch's arm and
+# teardown hooks sit adjacent to visit_trace.patch's, and because a run usually
+# wants both traces at once.
+#
+# Buffering costs a push_back per expanded node plus one locked write per query,
+# so this image perturbs timing and must not be used for timed measurements.
+# Inert unless DISKANN_COVISIT_TRACE is set, but tag it separately regardless.
+
+FROM ann-suite/diskann:visittrace
+
+COPY diskann/patches/covisit_trace.patch /tmp/diskann-covisit-trace.patch
+RUN cd /tmp/diskann && patch -p1 < /tmp/diskann-covisit-trace.patch
+
+RUN CMAKE_ARGS="-DPYBIND=ON -DOMP_PATH=/opt/intel/mkl/lib/intel64 -DMKL_PATH=/opt/intel/mkl/lib/intel64 -DMKL_INCLUDE_PATH=/opt/intel/mkl/include" \
+    uv pip install --system --no-cache --force-reinstall --no-deps /tmp/diskann

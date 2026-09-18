@@ -1,0 +1,167 @@
+Per-query co-visitation trace for DiskANN.
+
+DISKANN_VISIT_TRACE gives per-node visit COUNTS aggregated over the workload.
+That is enough to recover H(N), but it says nothing about which nodes are
+visited BY THE SAME QUERY -- and that is the quantity that bounds how few pages
+a query could touch under an optimal on-disk layout.
+
+Motivation (Knowledge/cache-benefit-ceiling): the achievable benefit of any
+eagerly-populated cache is 1 - 1/(reuse*d), where d is useful nodes delivered
+per page read. Measured reuse is 1.076 on SIFT100M, so with today's d=1 a
+perfect cache is worth 7% of search I/O. Raising d is the only lever with real
+headroom, and d is governed by co-visitation, not by per-node frequency.
+
+Existing layout work (Starling, PageANN, BAMG, MARGO) co-locates GRAPH
+NEIGHBOURS as a proxy for this. Co-visitation is the direct objective: nodes
+expanded in the same query should share a page. This patch measures it so the
+headroom can be computed before any layout is built.
+
+Record format, appended once per query: [uint32 n][n x uint32 node_id].
+The reader loops to EOF. Each record is written under a mutex so it is atomic;
+records from different threads interleave, which is fine since each is a set.
+
+Armed only AFTER generate_cache_list_from_sample_queries, so DiskANN's own
+sample searches are excluded and only the real workload is recorded.
+
+Applies ON TOP OF visit_trace.patch -- the arm site and destructor hooks sit
+adjacent to that patch's. Build from ann-suite/diskann:visittrace.
+
+Buffering costs a push_back per expanded node plus one locked write per query,
+so this perturbs timing. Use it for layout characterization only, never for a
+timed measurement.
+
+Env-var gated by DISKANN_COVISIT_TRACE=<path>; completely inert when unset.
+
+diff --git a/src/pq_flash_index.cpp b/src/pq_flash_index.cpp
+index 7ef11fff..521f9bc2 100644
+--- a/src/pq_flash_index.cpp
++++ b/src/pq_flash_index.cpp
+@@ -12,6 +12,31 @@
+ // ann-suite research instrumentation (env-var gated; see DISKANN_VISIT_TRACE below)
+ #include <cstdlib>
+ #include <fstream>
++#include <mutex>
++#include <vector>
++
++// --- ann-suite research instrumentation: per-query co-visitation trace ---
++// DISKANN_VISIT_TRACE gives per-node visit COUNTS aggregated over the workload,
++// which is enough for H(N) but says nothing about which nodes are visited BY THE
++// SAME QUERY. Co-visitation is the quantity that bounds how few pages a query
++// could touch under an optimal layout, so it needs per-query sets, not totals.
++//
++// Record format, appended once per query: [uint32 n][n x uint32 node_id].
++// Reader loops to EOF. Records are written under a mutex so each is atomic;
++// records from different threads interleave, which is fine -- each is a set.
++//
++// Armed only AFTER generate_cache_list_from_sample_queries, so DiskANN's own
++// sample searches are excluded and only the real workload is recorded.
++// Env-var gated by DISKANN_COVISIT_TRACE; completely inert when unset.
++namespace
++{
++std::ofstream ann_suite_covisit_out;
++std::mutex ann_suite_covisit_mtx;
++bool ann_suite_covisit_armed = false;
++uint64_t ann_suite_covisit_records = 0;
++uint64_t ann_suite_covisit_ids = 0;
++thread_local std::vector<uint32_t> ann_suite_covisit_buf;
++} // namespace
+ 
+ #ifdef _WINDOWS
+ #include "windows_aligned_file_reader.h"
+@@ -82,6 +107,19 @@ template <typename T, typename LabelT> PQFlashIndex<T, LabelT>::~PQFlashIndex()
+         }
+     }
+ 
++    // --- ann-suite research instrumentation: close the co-visitation trace ---
++    {
++        std::lock_guard<std::mutex> ann_suite_lk(ann_suite_covisit_mtx);
++        if (ann_suite_covisit_out.is_open())
++        {
++            ann_suite_covisit_out.flush();
++            ann_suite_covisit_out.close();
++            diskann::cout << "[ann-suite] covisit_trace queries=" << ann_suite_covisit_records
++                          << " total_ids=" << ann_suite_covisit_ids << std::endl;
++        }
++        ann_suite_covisit_armed = false;
++    }
++
+ #ifndef EXEC_ENV_OLS
+     if (data != nullptr)
+     {
+@@ -388,6 +426,30 @@ void PQFlashIndex<T, LabelT>::generate_cache_list_from_sample_queries(std::strin
+         }
+     }
+ 
++    // --- ann-suite research instrumentation: arm the co-visitation trace ---
++    // Armed here, after the sample pass, so only the real workload is recorded.
++    {
++        const char *ann_suite_cov = std::getenv("DISKANN_COVISIT_TRACE");
++        if (ann_suite_cov != nullptr && ann_suite_cov[0] != '\0')
++        {
++            std::lock_guard<std::mutex> ann_suite_lk(ann_suite_covisit_mtx);
++            ann_suite_covisit_out.open(ann_suite_cov, std::ios::binary | std::ios::trunc);
++            if (ann_suite_covisit_out.is_open())
++            {
++                ann_suite_covisit_armed = true;
++                ann_suite_covisit_records = 0;
++                ann_suite_covisit_ids = 0;
++                diskann::cout << "[ann-suite] covisit tracing armed, writing to "
++                              << ann_suite_cov << std::endl;
++            }
++            else
++            {
++                diskann::cout << "[ann-suite] WARNING: could not open covisit trace "
++                              << ann_suite_cov << std::endl;
++            }
++        }
++    }
++
+     diskann::aligned_free(samples);
+ }
+ 
+@@ -1331,6 +1393,12 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
+     // reset query scratch
+     query_scratch->reset();
+ 
++    // --- ann-suite research instrumentation: start a co-visitation record ---
++    if (ann_suite_covisit_armed)
++    {
++        ann_suite_covisit_buf.clear();
++    }
++
+     // copy query to thread specific aligned and allocated memory (for distance
+     // calculations we need aligned data)
+     float query_norm = 0;
+@@ -1490,6 +1558,10 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
+             {
+                 reinterpret_cast<std::atomic<uint32_t> &>(this->_node_visit_counter[nbr.id].second).fetch_add(1);
+             }
++            if (ann_suite_covisit_armed)
++            {
++                ann_suite_covisit_buf.push_back(nbr.id);
++            }
+         }
+ 
+         // read nhoods of frontier ids
+@@ -1737,6 +1809,21 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
+     ctx.m_completeCount = 0;
+ #endif
+ 
++    // --- ann-suite research instrumentation: emit this query's co-visitation set ---
++    if (ann_suite_covisit_armed && !ann_suite_covisit_buf.empty())
++    {
++        const uint32_t ann_suite_n = (uint32_t)ann_suite_covisit_buf.size();
++        std::lock_guard<std::mutex> ann_suite_lk(ann_suite_covisit_mtx);
++        if (ann_suite_covisit_out.is_open())
++        {
++            ann_suite_covisit_out.write((const char *)&ann_suite_n, sizeof(uint32_t));
++            ann_suite_covisit_out.write((const char *)ann_suite_covisit_buf.data(),
++                                        (std::streamsize)(ann_suite_n * sizeof(uint32_t)));
++            ann_suite_covisit_records++;
++            ann_suite_covisit_ids += ann_suite_n;
++        }
++    }
++
+     if (stats != nullptr)
+     {
+         stats->total_us = (float)query_timer.elapsed();
