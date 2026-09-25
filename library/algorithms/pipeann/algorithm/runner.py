@@ -47,11 +47,13 @@ METRIC_MAP = {
     "angular": "cosine",
 }
 
-# search_disk_index's results table header, e.g.:
-#      L   I/O Width         QPS  AvgLat(us)     P99 Lat    Mean IOs   Recall@10
-#     10          32     1871.92      512.01      939.00       23.24       67.40
+# search_disk_index's results table, e.g. (verified against the pinned
+# commit's actual binary output - docs/cpp-interface.md's example omits the
+# "Mean Hops" column that this build's table has):
+#          L   I/O Width         QPS  AvgLat(us)     P99 Lat   Mean Hops    Mean IOs   Recall@10
+#         50           8     1894.05     1920.19     9793.00        0.00       71.78       56.00
 _RESULT_ROW_RE = re.compile(
-    r"^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*$"
+    r"^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*$"
 )
 
 # search_openloop's single summary line, e.g.:
@@ -114,9 +116,7 @@ def _tool(name: str, *, util: bool = False) -> str:
     return str((_util_bin_dir() if util else _bin_dir()) / name)
 
 
-def _run(
-    command: list[str], env: dict[str, str] | None = None
-) -> subprocess.CompletedProcess[str]:
+def _run(command: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     """Run a PipeANN binary and preserve its stdout/stderr for diagnostics."""
     full_env = {**os.environ, **(env or {})}
     result = subprocess.run(command, text=True, capture_output=True, check=False, env=full_env)
@@ -423,7 +423,7 @@ def _run_closedloop(
             "match the expected 'L I/O-Width QPS AvgLat P99Lat MeanIOs Recall' table"
         )
 
-    _l, _io_width, qps, avg_lat_us, p99_lat_us, mean_ios, recall_pct = rows[-1]
+    _l, _io_width, qps, avg_lat_us, p99_lat_us, _mean_hops, mean_ios, recall_pct = rows[-1]
     total_queries = num_queries * max(1, query_rounds)
 
     return {

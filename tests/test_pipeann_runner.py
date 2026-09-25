@@ -108,16 +108,25 @@ class TestBinFormat:
 
 class TestResultParsing:
     def test_closedloop_result_row_regex(self, runner):
-        line = "    10          32     1871.92      512.01      939.00       23.24       67.40"
+        # Verified against the pinned commit's actual search_disk_index output,
+        # which has an extra "Mean Hops" column vs. docs/cpp-interface.md's example.
+        line = "        50           8     1894.05     1920.19     9793.00        0.00       71.78       56.00"
         m = runner._RESULT_ROW_RE.match(line)
         assert m is not None
-        L, io_width, qps, avg_lat, p99_lat, mean_ios, recall = (float(g) for g in m.groups())
-        assert (L, io_width) == (10.0, 32.0)
-        assert qps == pytest.approx(1871.92)
-        assert recall == pytest.approx(67.40)
+        L, io_width, qps, avg_lat, p99_lat, mean_hops, mean_ios, recall = (
+            float(g) for g in m.groups()
+        )
+        assert (L, io_width) == (50.0, 8.0)
+        assert qps == pytest.approx(1894.05)
+        assert mean_hops == pytest.approx(0.0)
+        assert mean_ios == pytest.approx(71.78)
+        assert recall == pytest.approx(56.00)
 
     def test_closedloop_header_line_does_not_match(self, runner):
-        header = "     L   I/O Width         QPS  AvgLat(us)     P99 Lat    Mean IOs   Recall@10"
+        header = (
+            "         L   I/O Width         QPS  AvgLat(us)     P99 Lat"
+            "   Mean Hops    Mean IOs   Recall@10"
+        )
         assert runner._RESULT_ROW_RE.match(header) is None
 
     def test_openloop_result_line_kv_parsing(self, runner):
