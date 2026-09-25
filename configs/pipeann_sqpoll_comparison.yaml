@@ -1,0 +1,89 @@
+# SQPOLL on/off comparison: pipe mode (2), width 32, 24 workers, BIGANN-10M
+# R=64, L(Ls)=40, mem_L=10, K=10, arrival rates 500/2000/4000 QPS.
+# Reproduces the isfcr research host's SQPOLL A/B comparison referenced in
+# the migration task (per-thread io_uring SQPOLL pins a CPU core per thread
+# even when I/O-bound - PIPEANN_SQPOLL=0 disables it). See
+# src/utils/linux_aligned_file_reader.cpp's load_aware.patch hunk and
+# docs/PIPEANN.md.
+#
+# Expectation from the reference standalone runs: SQPOLL on with 24 workers
+# pins CPU near 100% (all 24 threads spin-poll their submission queues
+# regardless of actual I/O rate); SQPOLL off relies on ordinary io_uring
+# completion-event waits instead. Compare achieved_qps/latency AND
+# machine_cpu_util (open_loop.machine_cpu_util in the result) between the
+# two sqpoll settings at each rate.
+
+name: "PipeANN SQPOLL on/off comparison"
+description: >
+  SQPOLL A/B comparison on BIGANN-10M R=64, pipe mode W=32, 24 workers,
+  rates 500/2000/4000 QPS.
+data_dir: "./data"
+results_dir: "./results"
+index_dir: "./indices"
+monitor_interval_ms: 200
+
+algorithms:
+  - name: PipeANN-pipeW32-sqpoll-on
+    docker_image: ann-suite/pipeann:latest
+    algorithm_type: disk
+    datasets: [bigann-10m]
+    build:
+      prebuilt_path: "PipeANN/bigann-10m/R64_L128_pq32"
+      required_files:
+        - "pipeann_disk.index"
+        - "pipeann_pq_pivots.bin"
+        - "pipeann_pq_compressed.bin"
+    search:
+      timeout_seconds: 600
+      k: 10
+      args:
+        index_prefix: pipeann
+        mode: 2
+        beam_width: 32
+        mem_L: 10
+        Ls: 40
+        num_threads: 24
+        sqpoll: true
+      arrival:
+        mode: poisson
+        rate_qps: [500, 2000, 4000]
+        num_queries: 40000
+        num_workers: 24
+
+  - name: PipeANN-pipeW32-sqpoll-off
+    docker_image: ann-suite/pipeann:latest
+    algorithm_type: disk
+    datasets: [bigann-10m]
+    build:
+      prebuilt_path: "PipeANN/bigann-10m/R64_L128_pq32"
+      required_files:
+        - "pipeann_disk.index"
+        - "pipeann_pq_pivots.bin"
+        - "pipeann_pq_compressed.bin"
+    search:
+      timeout_seconds: 600
+      k: 10
+      args:
+        index_prefix: pipeann
+        mode: 2
+        beam_width: 32
+        mem_L: 10
+        Ls: 40
+        num_threads: 24
+        sqpoll: false
+      arrival:
+        mode: poisson
+        rate_qps: [500, 2000, 4000]
+        num_queries: 40000
+        num_workers: 24
+
+datasets:
+  - name: bigann-10m
+    base_path: bigann-10m/base10m.u8bin
+    query_path: bigann-10m/query.u8bin
+    ground_truth_path: bigann-10m/gt10m.bin
+    distance_metric: L2
+    dimension: 128
+    point_type: uint8
+    base_count: 10000000
+    query_count: 10000
