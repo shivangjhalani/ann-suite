@@ -1,0 +1,78 @@
+# Tiny smoke-test config for the PipeANN algorithm + open-loop mode.
+# Uses a 10k-point synthetic uint8 dataset (not committed; generate it
+# yourself, e.g. via docs/PIPEANN.md or the smoke test in the PR description).
+name: "PipeANN smoke test (10k synthetic)"
+description: "Closed-loop Ls sweep + open-loop rate sweep on a tiny synthetic dataset, for fast end-to-end verification."
+data_dir: "./data"
+results_dir: "./results"
+index_dir: "./indices"
+monitor_interval_ms: 50
+
+algorithms:
+  - name: PipeANN
+    docker_image: ann-suite/pipeann:latest
+    algorithm_type: disk
+    datasets: [smoke10k]
+    build:
+      timeout_seconds: 600
+      args:
+        index_prefix: pipeann
+        R: 32
+        L: 50
+        pq_bytes: 16
+        build_memory_gb: 4
+        num_threads: 8
+        nbr_type: pq
+        build_mem_index: false
+    search:
+      timeout_seconds: 300
+      k: 10
+      args:
+        index_prefix: pipeann
+        mode: 2
+        beam_width: 8
+        mem_L: 0
+        num_threads: 4
+        Ls: [20, 50]
+
+  - name: PipeANN-openloop
+    docker_image: ann-suite/pipeann:latest
+    algorithm_type: disk
+    datasets: [smoke10k]
+    build:
+      timeout_seconds: 600
+      args:
+        index_prefix: pipeann
+        R: 32
+        L: 50
+        pq_bytes: 16
+        build_memory_gb: 4
+        num_threads: 8
+        nbr_type: pq
+        build_mem_index: false
+    search:
+      timeout_seconds: 600
+      k: 10
+      args:
+        index_prefix: pipeann
+        mode: 2
+        beam_width: 8
+        mem_L: 0
+        num_threads: 4
+      arrival:
+        mode: poisson
+        rate_qps: [200, 1000]
+        num_queries: 4000
+        warmup_fraction: 0.1
+        num_workers: 4
+
+datasets:
+  - name: smoke10k
+    base_path: smoke10k/base.npy
+    query_path: smoke10k/queries.npy
+    ground_truth_path: smoke10k/ground_truth.npy
+    distance_metric: L2
+    dimension: 128
+    point_type: uint8
+    base_count: 10000
+    query_count: 200

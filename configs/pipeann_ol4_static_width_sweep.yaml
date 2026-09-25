@@ -1,0 +1,212 @@
+# Reproduces ~/research/runs/ol4.sh on the isfcr benchmark host: static-width
+# open-loop sweep on BIGANN-10M, R=64.
+#
+#   beamW4, beamW8   (mode 0, DiskANN best-first beam search)
+#   pipeW4/8/16/32   (mode 2, PipeANN pipelined)
+#   all with PIPEANN_SQPOLL=0 (sqpoll: false), 24 workers, L(Ls)=40, mem_L=10,
+#   K=10, arrival rates 500/2000/3500/4500 QPS.
+#
+# Reference (ol4.sh): N = max(15000, 10 * rate_qps) per rate point, so a
+# 500 QPS run issues 15000 queries (~30s) while a 4500 QPS run issues 45000
+# (~10s) - proportional to rate to keep wall time roughly comparable across
+# rates. ArrivalConfig.num_queries is a single scalar (not sweepable per
+# rate_qps list value), so this config uses a fixed num_queries: 45000 for
+# every rate (the largest N the reference formula produces) rather than the
+# per-rate N - every rate point therefore runs MORE queries than the
+# reference at low rates (safe/conservative: only affects wall time and
+# variance, not the steady-state achieved_qps/latency estimates once past
+# the 10% warmup drop). For an exact per-rate-N reproduction (needed for
+# the validation task comparing against the lead's reference medians),
+# run one invocation per rate with `search.arrival.num_queries` overridden
+# to the reference formula - see the validation runner mentioned in
+# docs/RESEARCH_WORKFLOW.md.
+#
+# "3 reps" (ol4.sh's outer rep loop) is reproduced by re-running this whole
+# config 3 times (each `ann-suite run` invocation gets its own timestamped
+# results/<config-name>_<timestamp>/ directory - see docs/RESEARCH_WORKFLOW.md),
+# not baked into a single config, since query_rounds is not currently wired
+# through the open-loop code path in the PipeANN runner
+# (library/algorithms/pipeann/algorithm/runner.py::_run_openloop).
+
+name: "PipeANN BIGANN-10M ol4 static-width open-loop sweep"
+description: >
+  Static I/O-width open-loop sweep (beam mode 0 vs pipelined mode 2) on
+  BIGANN-10M R=64, reproducing isfcr:~/research/runs/ol4.sh.
+data_dir: "./data"
+results_dir: "./results"
+index_dir: "./indices"
+monitor_interval_ms: 200
+
+algorithms:
+  - name: PipeANN-beamW4
+    docker_image: ann-suite/pipeann:latest
+    algorithm_type: disk
+    datasets: [bigann-10m]
+    build:
+      prebuilt_path: "PipeANN/bigann-10m/R64_L128_pq32"
+      required_files:
+        - "idx_disk.index"
+        - "idx_pq_pivots.bin"
+        - "idx_pq_compressed.bin"
+    search:
+      timeout_seconds: 600
+      k: 10
+      args:
+        index_prefix: idx
+        mode: 0
+        beam_width: 4
+        mem_L: 10
+        Ls: 40
+        num_threads: 24
+        sqpoll: false
+      arrival:
+        mode: poisson
+        rate_qps: [500, 2000, 3500, 4500]
+        num_queries: 45000
+        num_workers: 24
+
+  - name: PipeANN-beamW8
+    docker_image: ann-suite/pipeann:latest
+    algorithm_type: disk
+    datasets: [bigann-10m]
+    build:
+      prebuilt_path: "PipeANN/bigann-10m/R64_L128_pq32"
+      required_files:
+        - "idx_disk.index"
+        - "idx_pq_pivots.bin"
+        - "idx_pq_compressed.bin"
+    search:
+      timeout_seconds: 600
+      k: 10
+      args:
+        index_prefix: idx
+        mode: 0
+        beam_width: 8
+        mem_L: 10
+        Ls: 40
+        num_threads: 24
+        sqpoll: false
+      arrival:
+        mode: poisson
+        rate_qps: [500, 2000, 3500, 4500]
+        num_queries: 45000
+        num_workers: 24
+
+  - name: PipeANN-pipeW4
+    docker_image: ann-suite/pipeann:latest
+    algorithm_type: disk
+    datasets: [bigann-10m]
+    build:
+      prebuilt_path: "PipeANN/bigann-10m/R64_L128_pq32"
+      required_files:
+        - "idx_disk.index"
+        - "idx_pq_pivots.bin"
+        - "idx_pq_compressed.bin"
+    search:
+      timeout_seconds: 600
+      k: 10
+      args:
+        index_prefix: idx
+        mode: 2
+        beam_width: 4
+        mem_L: 10
+        Ls: 40
+        num_threads: 24
+        sqpoll: false
+      arrival:
+        mode: poisson
+        rate_qps: [500, 2000, 3500, 4500]
+        num_queries: 45000
+        num_workers: 24
+
+  - name: PipeANN-pipeW8
+    docker_image: ann-suite/pipeann:latest
+    algorithm_type: disk
+    datasets: [bigann-10m]
+    build:
+      prebuilt_path: "PipeANN/bigann-10m/R64_L128_pq32"
+      required_files:
+        - "idx_disk.index"
+        - "idx_pq_pivots.bin"
+        - "idx_pq_compressed.bin"
+    search:
+      timeout_seconds: 600
+      k: 10
+      args:
+        index_prefix: idx
+        mode: 2
+        beam_width: 8
+        mem_L: 10
+        Ls: 40
+        num_threads: 24
+        sqpoll: false
+      arrival:
+        mode: poisson
+        rate_qps: [500, 2000, 3500, 4500]
+        num_queries: 45000
+        num_workers: 24
+
+  - name: PipeANN-pipeW16
+    docker_image: ann-suite/pipeann:latest
+    algorithm_type: disk
+    datasets: [bigann-10m]
+    build:
+      prebuilt_path: "PipeANN/bigann-10m/R64_L128_pq32"
+      required_files:
+        - "idx_disk.index"
+        - "idx_pq_pivots.bin"
+        - "idx_pq_compressed.bin"
+    search:
+      timeout_seconds: 600
+      k: 10
+      args:
+        index_prefix: idx
+        mode: 2
+        beam_width: 16
+        mem_L: 10
+        Ls: 40
+        num_threads: 24
+        sqpoll: false
+      arrival:
+        mode: poisson
+        rate_qps: [500, 2000, 3500, 4500]
+        num_queries: 45000
+        num_workers: 24
+
+  - name: PipeANN-pipeW32
+    docker_image: ann-suite/pipeann:latest
+    algorithm_type: disk
+    datasets: [bigann-10m]
+    build:
+      prebuilt_path: "PipeANN/bigann-10m/R64_L128_pq32"
+      required_files:
+        - "idx_disk.index"
+        - "idx_pq_pivots.bin"
+        - "idx_pq_compressed.bin"
+    search:
+      timeout_seconds: 600
+      k: 10
+      args:
+        index_prefix: idx
+        mode: 2
+        beam_width: 32
+        mem_L: 10
+        Ls: 40
+        num_threads: 24
+        sqpoll: false
+      arrival:
+        mode: poisson
+        rate_qps: [500, 2000, 3500, 4500]
+        num_queries: 45000
+        num_workers: 24
+
+datasets:
+  - name: bigann-10m
+    base_path: bigann-10m/base10m.u8bin
+    query_path: bigann-10m/query.u8bin
+    ground_truth_path: bigann-10m/gt10m.bin
+    distance_metric: L2
+    dimension: 128
+    point_type: uint8
+    base_count: 10000000
+    query_count: 10000

@@ -1,0 +1,72 @@
+# Closed-loop 1-thread search-candidate-list (Ls) sweep, BIGANN-10M R=64:
+# Ls in {20,40,80,150} x mem_L in {0,10}, for mode 0 (beam) W=8 and
+# mode 2 (pipe) W=32. Cartesian product of Ls x mem_L is intentional here
+# (unlike the degree-build config's R/L, these ARE independent axes in the
+# reference sweep) - both are plain list-valued search.args, which the
+# suite expands via itertools.product (8 points per algorithm entry: 4 Ls x
+# 2 mem_L).
+
+name: "PipeANN BIGANN-10M closed-loop Ls sweep"
+description: >
+  Closed-loop 1-thread Ls x mem_L sweep on BIGANN-10M R=64, beam W8 (mode 0)
+  vs pipe W32 (mode 2).
+data_dir: "./data"
+results_dir: "./results"
+index_dir: "./indices"
+monitor_interval_ms: 200
+
+algorithms:
+  - name: PipeANN-beamW8-closed
+    docker_image: ann-suite/pipeann:latest
+    algorithm_type: disk
+    datasets: [bigann-10m]
+    build:
+      prebuilt_path: "PipeANN/bigann-10m/R64_L128_pq32"
+      required_files:
+        - "idx_disk.index"
+        - "idx_pq_pivots.bin"
+        - "idx_pq_compressed.bin"
+    search:
+      timeout_seconds: 600
+      k: 10
+      batch_mode: false
+      args:
+        index_prefix: idx
+        mode: 0
+        beam_width: 8
+        num_threads: 1
+        Ls: [20, 40, 80, 150]
+        mem_L: [0, 10]
+
+  - name: PipeANN-pipeW32-closed
+    docker_image: ann-suite/pipeann:latest
+    algorithm_type: disk
+    datasets: [bigann-10m]
+    build:
+      prebuilt_path: "PipeANN/bigann-10m/R64_L128_pq32"
+      required_files:
+        - "idx_disk.index"
+        - "idx_pq_pivots.bin"
+        - "idx_pq_compressed.bin"
+    search:
+      timeout_seconds: 600
+      k: 10
+      batch_mode: false
+      args:
+        index_prefix: idx
+        mode: 2
+        beam_width: 32
+        num_threads: 1
+        Ls: [20, 40, 80, 150]
+        mem_L: [0, 10]
+
+datasets:
+  - name: bigann-10m
+    base_path: bigann-10m/base10m.u8bin
+    query_path: bigann-10m/query.u8bin
+    ground_truth_path: bigann-10m/gt10m.bin
+    distance_metric: L2
+    dimension: 128
+    point_type: uint8
+    base_count: 10000000
+    query_count: 10000
