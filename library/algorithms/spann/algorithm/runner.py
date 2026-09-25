@@ -127,6 +127,11 @@ def run_build(config: dict[str, Any]) -> dict[str, Any]:
         )
         build_time = time.perf_counter() - start
         index_size = sum(path.stat().st_size for path in index_path.rglob("*") if path.is_file())
+        # SPTAG's persisted SSD index is only safe to query with an IndexSearcher
+        # thread count <= the NumberOfThreads used at build time; exceeding it
+        # segfaults (FreeWorkSpaceIds is not initialized). Persist it so
+        # run_search can cap its own thread count regardless of search config.
+        (index_path / "build_meta.json").write_text(json.dumps({"num_threads": threads}))
         return {
             "status": "success",
             "build_time_seconds": build_time,
@@ -193,7 +198,11 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
             + str(search_args.get("internal_result_num", 64)),
             "BuildSSDIndex.SearchPostingPageLimit=" + str(search_args.get("posting_page_limit", 3)),
         ]
-        num_threads = min(int(search_args.get("num_threads", 8)), 16)
+        build_threads = 4
+        build_meta_path = index_path / "build_meta.json"
+        if build_meta_path.exists():
+            build_threads = int(json.loads(build_meta_path.read_text()).get("num_threads", 4))
+        num_threads = min(int(search_args.get("num_threads", 8)), 16, build_threads)
         command.extend(["-t", str(max(1, num_threads))])
         ground_truth = None
         if config.get("ground_truth_path"):
