@@ -1,19 +1,22 @@
 # Reproduces ~/data/build_deg.sh (isfcr benchmark host) + the baseline R=64
 # build from ~/data/build10m.sh: a graph-degree sweep on BIGANN-10M,
-# R in {32, 64, 128, 256, 512}, L paired per-R exactly as the original
+# R in {32, 64, 128, 256}, L paired per-R exactly as the original
 # scripts used (not a cartesian R x L sweep - these are NOT independent
 # parameters in the original recipe, so each is its own algorithm entry
 # rather than a `build.args.R: [...]` list, which would expand to every
-# R x L combination instead of just the 5 intended pairs):
+# R x L combination instead of just the 4 intended pairs):
 #   R=32  L=128   (build_deg.sh)
 #   R=64  L=128   (build10m.sh baseline - already prebuilt at
 #                  indices/PipeANN/bigann-10m/R64_L128_pq32/ on isfcr;
 #                  included here for completeness/reproducibility)
 #   R=128 L=192   (build_deg.sh)
 #   R=256 L=320   (build_deg.sh)
-#   R=512 L=576   (build_deg.sh)
 # pq_bytes=32, build_memory_gb=48, num_threads=24, nbr_type=pq, metric=l2,
 # matching build_disk_index's positional args in both source scripts.
+#
+# R=512 (L=576) is intentionally NOT included: that build was aborted on
+# the isfcr research host (see ~/data/idx/ - no bigann10m_R512 directory
+# exists there) and must not be referenced by this config.
 #
 # Note: build_deg.sh reuses the R=64 run's 1%-sample in-memory entry index
 # (`cp idx/bigann10m/idx_mem.index* idx/bigann10m_R$R/`) for every R instead
@@ -26,7 +29,7 @@
 
 name: "PipeANN BIGANN-10M degree sweep"
 description: >
-  Build PipeANN disk indices at R in {32,64,128,256,512} on BIGANN-10M,
+  Build PipeANN disk indices at R in {32,64,128,256} on BIGANN-10M,
   reproducing the isfcr research host's build_deg.sh + build10m.sh degree
   sweep for latency-under-load experiments.
 data_dir: "./data"
@@ -129,31 +132,6 @@ algorithms:
       k: 10
       args:
         index_prefix: pipeann_R256
-        mode: 2
-        beam_width: 32
-        mem_L: 10
-        Ls: 40
-        num_threads: 8
-
-  - name: PipeANN-R512
-    docker_image: ann-suite/pipeann:latest
-    algorithm_type: disk
-    datasets: [bigann-10m]
-    build:
-      timeout_seconds: 14400
-      args:
-        index_prefix: pipeann_R512
-        R: 512
-        L: 576
-        pq_bytes: 32
-        build_memory_gb: 48
-        num_threads: 24
-        nbr_type: pq
-    search:
-      timeout_seconds: 60
-      k: 10
-      args:
-        index_prefix: pipeann_R512
         mode: 2
         beam_width: 32
         mem_L: 10

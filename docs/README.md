@@ -13,6 +13,7 @@ Welcome to the ANN Benchmarking Suite documentation. This suite provides product
 | [Metrics Reference](./METRICS.md) | All metrics collected and how they're measured |
 | [Open-Loop Search Mode](./OPEN_LOOP.md) | Arrival-rate (Poisson) search and latency-under-load metrics |
 | [PipeANN](./PIPEANN.md) | Pipelined disk-based ANN algorithm: build/search params, patches |
+| [Research Workflow](./RESEARCH_WORKFLOW.md) | ANN-on-SSD research project: where data/indices/configs/results live, how to reproduce each experiment |
 | [Visualization Dashboard](./DASHBOARD.md) | Web dashboard for exploring and comparing results |
 | [API Reference](./API.md) | Python API for programmatic usage |
 | [Docker Optimizations](./DOCKER_OPTIMIZATIONS.md) | Runtime settings for research-grade performance |

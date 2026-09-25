@@ -30,14 +30,14 @@ algorithms:
     build:
       prebuilt_path: "PipeANN/bigann-10m/R64_L128_pq32"
       required_files:
-        - "pipeann_disk.index"
-        - "pipeann_pq_pivots.bin"
-        - "pipeann_pq_compressed.bin"
+        - "idx_disk.index"
+        - "idx_pq_pivots.bin"
+        - "idx_pq_compressed.bin"
     search:
       timeout_seconds: 600
       k: 10
       args:
-        index_prefix: pipeann
+        index_prefix: idx
         mode: 2
         beam_width: 32
         mem_L: 10
@@ -57,14 +57,14 @@ algorithms:
     build:
       prebuilt_path: "PipeANN/bigann-10m/R64_L128_pq32"
       required_files:
-        - "pipeann_disk.index"
-        - "pipeann_pq_pivots.bin"
-        - "pipeann_pq_compressed.bin"
+        - "idx_disk.index"
+        - "idx_pq_pivots.bin"
+        - "idx_pq_compressed.bin"
     search:
       timeout_seconds: 600
       k: 10
       args:
-        index_prefix: pipeann
+        index_prefix: idx
         mode: 2
         beam_width: 32
         mem_L: 10
