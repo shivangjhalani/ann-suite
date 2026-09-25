@@ -106,6 +106,11 @@ class DiskIODict(TypedDict):
     # PSI stall metrics
     io_stall_percent: float | None
     io_full_stall_percent: float | None
+    # Device-level (system-wide, from /sys/block/<dev>/stat) IOPS/latency, and
+    # machine-wide (from /proc/stat) CPU utilization during the search window.
+    device_read_iops: float | None
+    device_avg_read_service_time_ms: float | None
+    machine_cpu_util: float | None
 
 
 class SearchPhaseDict(TypedDict):
@@ -537,6 +542,15 @@ class ResourceSummary(BaseModel):
     avg_queue_depth: float | None = Field(default=None, ge=0)
     max_queue_depth: int | None = Field(default=None, ge=0)
     p95_queue_depth: float | None = Field(default=None, ge=0)
+    # Device-level (system-wide, from /sys/block/<dev>/stat) read IOPS and mean read
+    # service time. Independent of cgroups io.stat rusec/wusec (which not every
+    # kernel/controller populates); used as the fallback source for
+    # avg_read_service_time_ms and as the authoritative "device read IOPS" /
+    # "mean device read latency" metrics for open-loop search windows.
+    device_read_iops: float | None = Field(default=None, ge=0)
+    device_avg_read_service_time_ms: float | None = Field(default=None, ge=0)
+    # Machine-wide (system, not cgroup) CPU utilization (0-1) during the window.
+    machine_cpu_util: float | None = Field(default=None, ge=0)
     sample_count: int = Field(ge=0, description="Number of samples collected")
     duration_seconds: float = Field(
         ge=0,
@@ -779,12 +793,43 @@ class DiskIOMetrics(BaseModel):
     search_avg_read_service_time_ms: float | None = Field(
         default=None,
         ge=0,
-        description="Average read service time per op (ms) from rusec/rios",
+        description=(
+            "Average read service time per op (ms). Sourced from cgroups io.stat "
+            "rusec/rios when the kernel/controller populates them; otherwise falls "
+            "back to search_device_avg_read_service_time_ms (system-wide, from "
+            "/sys/block/<dev>/stat deltas) so this is not silently 0/None on hosts "
+            "where io.stat has no rusec field."
+        ),
     )
     search_avg_write_service_time_ms: float | None = Field(
         default=None,
         ge=0,
         description="Average write service time per op (ms) from wusec/wios",
+    )
+    search_device_read_iops: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "System-wide read IOPS during the search window, from /sys/block/<dev>/stat "
+            "deltas (not cgroup-scoped, unlike search_avg_read_iops)."
+        ),
+    )
+    search_device_avg_read_service_time_ms: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "System-wide mean device read latency during the search window: "
+            "delta(read ticks ms) / delta(reads completed) from /sys/block/<dev>/stat, "
+            "matching the reference PipeANN open-loop driver's dev_lat metric."
+        ),
+    )
+    search_machine_cpu_util: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Machine-wide (not cgroup-scoped) CPU utilization (0-1) during the search "
+            "window, from /proc/stat deltas."
+        ),
     )
 
     # Tail metrics for IOPS (p95/max)
@@ -1204,6 +1249,10 @@ class BenchmarkResult(BaseModel):
             # PSI stall metrics
             io_stall_percent=self.disk_io.search_io_stall_percent,
             io_full_stall_percent=self.disk_io.search_io_full_stall_percent,
+            # Device-level (system-wide) IOPS/latency + machine CPU util
+            device_read_iops=self.disk_io.search_device_read_iops,
+            device_avg_read_service_time_ms=self.disk_io.search_device_avg_read_service_time_ms,
+            machine_cpu_util=self.disk_io.search_machine_cpu_util,
         )
 
     def _build_latency_dict(self) -> LatencyDict:

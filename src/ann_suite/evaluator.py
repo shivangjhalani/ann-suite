@@ -1163,6 +1163,18 @@ class BenchmarkEvaluator:
                     search_res.total_write_usec / search_res.total_write_ops
                 ) / 1000.0
 
+        # Device-level (system-wide, /sys/block/<dev>/stat) read IOPS and mean read
+        # service time. Independent of cgroups io.stat rusec, which not every
+        # kernel/controller populates (that gap is why avg_read_service_time_ms
+        # could previously read as 0/None despite real search I/O). When the
+        # cgroup-scoped value above is unavailable, fall back to this device-level
+        # measurement rather than reporting nothing.
+        search_device_read_iops = search_res.device_read_iops
+        search_device_avg_read_service_time_ms = search_res.device_avg_read_service_time_ms
+        search_machine_cpu_util = search_res.machine_cpu_util
+        if search_avg_read_service_time_ms is None:
+            search_avg_read_service_time_ms = search_device_avg_read_service_time_ms
+
         # Tail metrics from per-interval samples (computed by collector)
         search_p95_read_iops = search_res.p95_read_iops
         search_max_read_iops = search_res.max_read_iops
@@ -1265,6 +1277,9 @@ class BenchmarkEvaluator:
             search_avg_bytes_per_write_op=search_avg_bytes_per_write_op,
             search_avg_read_service_time_ms=search_avg_read_service_time_ms,
             search_avg_write_service_time_ms=search_avg_write_service_time_ms,
+            search_device_read_iops=search_device_read_iops,
+            search_device_avg_read_service_time_ms=search_device_avg_read_service_time_ms,
+            search_machine_cpu_util=search_machine_cpu_util,
             # Tail metrics (p95/max IOPS)
             search_p95_read_iops=search_p95_read_iops,
             search_max_read_iops=search_max_read_iops,
