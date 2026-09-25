@@ -63,8 +63,7 @@ def expand_cpuset(cpuset: str) -> set[int]:
                 continue
             if end < start:
                 logger.warning(
-                    f"Ignoring reversed cpuset range '{token}' in '{cpuset}'; "
-                    "start must be <= end"
+                    f"Ignoring reversed cpuset range '{token}' in '{cpuset}'; start must be <= end"
                 )
                 continue
             cpus.update(range(start, end + 1))

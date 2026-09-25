@@ -99,11 +99,39 @@ def expand_sweep_params(args: dict[str, Any]) -> list[dict[str, Any]]:
     return combinations
 
 
+# Reserved search-params key used internally to carry a single resolved
+# arrival.rate_qps value through the existing sweep-point plumbing (see
+# search_sweep_params()). Stripped out before the args dict is sent to the
+# algorithm container; never set this key directly in a config.
+ARRIVAL_RATE_SWEEP_KEY = "_arrival_rate_qps"
+
+
 def search_sweep_params(algo_config: AlgorithmConfig) -> list[dict[str, Any]]:
-    """Return explicit search points or expand the legacy Cartesian sweep."""
-    if algo_config.search.sweep is not None:
-        return [point.copy() for point in algo_config.search.sweep]
-    return expand_sweep_params(algo_config.search.args)
+    """Return explicit search points or expand the legacy Cartesian sweep.
+
+    When search.arrival is configured with a list-valued rate_qps, each sweep
+    point is additionally expanded across every rate, so a run like
+    `arrival.rate_qps: [500, 1000, 2000]` produces one benchmark point per rate
+    (each carrying its resolved rate under ARRIVAL_RATE_SWEEP_KEY).
+    """
+    points = (
+        [point.copy() for point in algo_config.search.sweep]
+        if algo_config.search.sweep is not None
+        else expand_sweep_params(algo_config.search.args)
+    )
+
+    arrival = algo_config.search.arrival
+    if arrival is None or arrival.rate_qps is None:
+        return points
+
+    rates = arrival.rate_qps if isinstance(arrival.rate_qps, list) else [arrival.rate_qps]
+    expanded: list[dict[str, Any]] = []
+    for point in points:
+        for rate in rates:
+            expanded_point = dict(point)
+            expanded_point[ARRIVAL_RATE_SWEEP_KEY] = rate
+            expanded.append(expanded_point)
+    return expanded
 
 
 def detect_sweep_anomalies(
@@ -176,9 +204,7 @@ def detect_sweep_anomalies(
             zip(flat_hp, group, strict=True), key=lambda pair: pair[0][sweep_key]
         )
 
-        for (prev_hp, prev), (curr_hp, curr) in zip(
-            ordered_pairs, ordered_pairs[1:], strict=False
-        ):
+        for (prev_hp, prev), (curr_hp, curr) in zip(ordered_pairs, ordered_pairs[1:], strict=False):
             prev_pages = prev.disk_io.search_pages_per_query
             curr_pages = curr.disk_io.search_pages_per_query
             prev_qps = prev.qps
@@ -654,9 +680,7 @@ class BenchmarkEvaluator:
 
             resolved_prebuilt_path = host_prebuilt_path.resolve()
             index_size = sum(
-                path.stat().st_size
-                for path in host_prebuilt_path.rglob("*")
-                if path.is_file()
+                path.stat().st_size for path in host_prebuilt_path.rglob("*") if path.is_file()
             )
             additional_volumes: dict[str, dict[str, str]] = {}
             for link in host_prebuilt_path.rglob("*"):
@@ -835,6 +859,16 @@ class BenchmarkEvaluator:
         if search_params_override:
             search_args.update(search_params_override)
 
+        # Open-loop (arrival-rate) mode: pull the resolved single rate_qps for this
+        # sweep point (injected by search_sweep_params()) out of the generic args
+        # dict, and build the ArrivalConfig payload sent to the container. Ordinary
+        # closed-loop runs (arrival unset) are unaffected.
+        arrival_rate = search_args.pop(ARRIVAL_RATE_SWEEP_KEY, None)
+        arrival_payload: dict[str, Any] | None = None
+        if algo_config.search.arrival is not None:
+            resolved_arrival = algo_config.search.arrival.resolved(arrival_rate)
+            arrival_payload = resolved_arrival.model_dump(mode="json")
+
         # Get warmup configuration
         warmup_config = algo_config.search.warmup
 
@@ -850,6 +884,8 @@ class BenchmarkEvaluator:
             # Warmup configuration
             "cache_warmup_queries": warmup_config.cache_warmup_queries,
         }
+        if arrival_payload is not None:
+            search_config["arrival"] = arrival_payload
 
         if gt_path is not None:
             search_config["ground_truth_path"] = f"/data/{dataset_config.name}/ground_truth.npy"
@@ -1326,6 +1362,11 @@ class BenchmarkEvaluator:
         if isinstance(raw_stats, dict) and raw_stats:
             algorithm_stats = AlgorithmStats.from_output(raw_stats).with_per_query(num_queries)
 
+        # Open-loop (arrival-rate) results, if the algorithm container ran in that
+        # mode (search.arrival was set) and reported an "open_loop" object.
+        raw_open_loop = search_output.get("open_loop")
+        open_loop = raw_open_loop if isinstance(raw_open_loop, dict) and raw_open_loop else None
+
         # Combine hyperparameters - use override if provided (for parameter sweeps)
         hyperparameters = {
             "build": effective_build_params,
@@ -1355,6 +1396,7 @@ class BenchmarkEvaluator:
             index_size_bytes=build_output.get("index_size_bytes"),
             # Configuration
             hyperparameters=hyperparameters,
+            open_loop=open_loop,
         )
 
     def cleanup(self) -> None:

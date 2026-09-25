@@ -863,17 +863,12 @@ class CgroupsV2Collector(BaseCollector):
         # (the final post-exit sample). Deducting 0 would zero out the real cumulative
         # delta, so compute the delta from the peak observed value instead of the last
         # sample (monotonic counters => peak == final healthy value).
-        io_pressure_some_delta = _monotonic_delta(
-            samples, "io_pressure_some_total_usec"
-        )
-        io_pressure_full_delta = _monotonic_delta(
-            samples, "io_pressure_full_total_usec"
-        )
+        io_pressure_some_delta = _monotonic_delta(samples, "io_pressure_some_total_usec")
+        io_pressure_full_delta = _monotonic_delta(samples, "io_pressure_full_total_usec")
         # PSI is "available" if any sample observed a non-zero stall counter; this
         # lets callers report a measured 0.0% stall rather than a misleading None.
         psi_available = any(
-            s.io_pressure_some_total_usec > 0 or s.io_pressure_full_total_usec > 0
-            for s in samples
+            s.io_pressure_some_total_usec > 0 or s.io_pressure_full_total_usec > 0 for s in samples
         )
 
         # Memory stat deltas (page faults are counters, file stats are gauges).

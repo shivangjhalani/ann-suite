@@ -194,6 +194,7 @@ class BenchmarkSummaryDict(TypedDict):
     metadata: MetadataDict
     debug_artifacts: DebugArtifactsDict
     hyperparameters: dict[str, Any]
+    open_loop: dict[str, Any] | None
 
 
 class DistanceMetric(str, Enum):
@@ -285,6 +286,94 @@ class WarmupConfig(BaseModel):
     )
 
 
+class ArrivalMode(str, Enum):
+    """Query arrival pattern for the search phase."""
+
+    CLOSED = "closed"  # Ordinary closed-loop: next query issued as soon as a worker is free
+    POISSON = "poisson"  # Open-loop: queries arrive per a Poisson process at rate_qps
+
+
+class ArrivalConfig(BaseModel):
+    """Open-loop (arrival-rate) search configuration.
+
+    When set on SearchConfig, the search phase issues queries on a schedule
+    instead of purely back-to-back, and reports latency-under-load metrics
+    (queueing included) in addition to (or instead of) the ordinary closed-loop
+    numbers. Semantics match the PipeANN reference open-loop driver
+    (tests/search_openloop.cpp in thustorage/PipeANN, load-aware branch):
+    an M/G/T FIFO queue served by a fixed pool of `num_workers` threads;
+    per-query latency = completion time - scheduled arrival time (so queueing
+    delay is included), service time = completion - dequeue; the first
+    `warmup_fraction` of issued queries are dropped from the reported
+    percentiles as steady-state warm-up.
+
+    Not every algorithm implements the open-loop driver natively (as a C++
+    timing loop, which is strongly preferred for microsecond-scale latency
+    accuracy); algorithms without one may implement a Python-side fallback
+    (documented per-algorithm) or reject an arrival config they don't support.
+    """
+
+    mode: ArrivalMode = Field(
+        default=ArrivalMode.CLOSED,
+        description=(
+            "'closed': all queries considered to arrive at t=0 (equivalent to a "
+            "normal closed-loop benchmark run through the open-loop driver/queue). "
+            "'poisson': queries arrive per a Poisson process at rate_qps."
+        ),
+    )
+    rate_qps: float | list[float] | None = Field(
+        default=None,
+        description=(
+            "Poisson arrival rate in queries/second. Required when mode=poisson. "
+            "A list sweeps over multiple rates, each producing its own benchmark "
+            "point (like a search.args list value)."
+        ),
+    )
+    num_queries: int = Field(
+        default=10000,
+        ge=100,
+        description="Total number of queries to issue for the open-loop run.",
+    )
+    seed: int = Field(default=12345, description="RNG seed for the Poisson arrival schedule.")
+    warmup_fraction: float = Field(
+        default=0.1,
+        ge=0.0,
+        lt=1.0,
+        description="Fraction of issued queries (from the start) dropped as steady-state warm-up.",
+    )
+    num_workers: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Worker pool size serving the arrival queue. Defaults to "
+            "search_args['num_threads'] (or the algorithm's own default) when unset."
+        ),
+    )
+    raw_dump: bool = Field(
+        default=False,
+        description=(
+            "Ask the algorithm container to write a per-query raw latency dump "
+            "(arrival_time, latency, service_time, ios) to /results/ for offline analysis."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_rate(self) -> ArrivalConfig:
+        if self.mode == ArrivalMode.POISSON and self.rate_qps is None:
+            raise ValueError("arrival.rate_qps is required when arrival.mode == 'poisson'")
+        rates: list[float | None] = (
+            list(self.rate_qps) if isinstance(self.rate_qps, list) else [self.rate_qps]
+        )
+        for rate in rates:
+            if rate is not None and rate <= 0:
+                raise ValueError(f"arrival.rate_qps must be > 0, got {rate}")
+        return self
+
+    def resolved(self, rate_qps: float | None) -> ArrivalConfig:
+        """Return a copy with a single scalar rate_qps, for one sweep point."""
+        return self.model_copy(update={"rate_qps": rate_qps})
+
+
 class SearchConfig(BaseModel):
     """Configuration for the search/query phase."""
 
@@ -316,6 +405,15 @@ class SearchConfig(BaseModel):
     )
     warmup: WarmupConfig = Field(
         default_factory=WarmupConfig, description="Warmup/cache-warming configuration"
+    )
+    arrival: ArrivalConfig | None = Field(
+        default=None,
+        description=(
+            "Open-loop (arrival-rate) search mode. When set, queries are issued on "
+            "an arrival schedule (Poisson or closed) instead of run back-to-back, "
+            "and latency-under-load metrics (queueing included) are reported. "
+            "See ArrivalConfig."
+        ),
     )
 
     model_config = {"extra": "allow"}
@@ -1010,9 +1108,7 @@ class AlgorithmStats(BaseModel):
         if normalized.hops is not None:
             normalized.hops_per_query = normalized.hops / num_queries
         if normalized.candidates_explored is not None:
-            normalized.candidates_explored_per_query = (
-                normalized.candidates_explored / num_queries
-            )
+            normalized.candidates_explored_per_query = normalized.candidates_explored / num_queries
         return normalized
 
     def to_dict(self) -> dict[str, Any]:
@@ -1134,6 +1230,21 @@ class BenchmarkResult(BaseModel):
         default_factory=dict, description="Combined build and search hyperparameters"
     )
 
+    # Open-loop (arrival-rate) search results, present only when search.arrival was
+    # configured for this point. Sourced from the algorithm container's reported
+    # "open_loop" object (see OpenLoopResultDict); kept as a loosely-typed passthrough
+    # dict rather than a strict submodel since fields are algorithm/driver-dependent
+    # (e.g. only PipeANN's C++ open-loop driver reports service-time percentiles).
+    open_loop: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Open-loop (Poisson/closed arrival) search metrics: achieved_qps, "
+            "arrival_rate_qps, num_queries, warmup_fraction, latency_ms "
+            "{mean,p50,p90,p99,p999}, service_time_ms {mean,p50,p90,p99,p999}, "
+            "ios_per_query, raw_dump_path. None for ordinary closed-loop runs."
+        ),
+    )
+
     def _get_time_base(self, field: str) -> Any:
         """Safely extract a field from search_result.time_bases."""
         if self.search_result and self.search_result.time_bases:
@@ -1166,6 +1277,7 @@ class BenchmarkResult(BaseModel):
             metadata=self._build_metadata_dict(),
             debug_artifacts=self._build_debug_artifacts_dict(),
             hyperparameters=self.hyperparameters,
+            open_loop=self.open_loop,
         )
 
     def _build_quality_dict(self) -> QualityMetricsDict:
