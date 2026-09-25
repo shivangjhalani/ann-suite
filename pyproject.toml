@@ -78,3 +78,6 @@ addopts = "-v --tb=short"
 dev = [
     "mypy>=1.19.1",
 ]
+research = [
+    "faiss-cpu>=1.9.0",
+]
