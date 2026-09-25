@@ -28,6 +28,8 @@ from ann_suite.monitoring.base import (
     DeviceIOStat,
     FilteredSamplesMeta,
     TopDeviceSummary,
+    read_device_io_totals,
+    read_machine_cpu_ticks,
     read_system_queue_depth,
 )
 
@@ -381,6 +383,11 @@ class CgroupsV2Collector(BaseCollector):
         # Read memory.stat
         memory_stat = self._read_memory_stat()
 
+        # Device-level (system-wide) read counters and machine CPU ticks, for the
+        # avg_read_service_time_ms fallback and machine_cpu_util metric.
+        device_reads_completed, device_read_ticks_ms = read_device_io_totals()
+        machine_cpu_busy_ticks, machine_cpu_total_ticks = read_machine_cpu_ticks()
+
         return CollectorSample(
             timestamp=now,
             monotonic_time=mono_now,
@@ -405,6 +412,10 @@ class CgroupsV2Collector(BaseCollector):
             nr_throttled=cpu_stat.get("nr_throttled", 0),
             throttled_usec=cpu_stat.get("throttled_usec", 0),
             queue_depth=read_system_queue_depth(),
+            device_reads_completed=device_reads_completed,
+            device_read_ticks_ms=device_read_ticks_ms,
+            machine_cpu_busy_ticks=machine_cpu_busy_ticks,
+            machine_cpu_total_ticks=machine_cpu_total_ticks,
         )
 
     def _read_single_value(self, path: Path) -> int:
@@ -852,17 +863,12 @@ class CgroupsV2Collector(BaseCollector):
         # (the final post-exit sample). Deducting 0 would zero out the real cumulative
         # delta, so compute the delta from the peak observed value instead of the last
         # sample (monotonic counters => peak == final healthy value).
-        io_pressure_some_delta = _monotonic_delta(
-            samples, "io_pressure_some_total_usec"
-        )
-        io_pressure_full_delta = _monotonic_delta(
-            samples, "io_pressure_full_total_usec"
-        )
+        io_pressure_some_delta = _monotonic_delta(samples, "io_pressure_some_total_usec")
+        io_pressure_full_delta = _monotonic_delta(samples, "io_pressure_full_total_usec")
         # PSI is "available" if any sample observed a non-zero stall counter; this
         # lets callers report a measured 0.0% stall rather than a misleading None.
         psi_available = any(
-            s.io_pressure_some_total_usec > 0 or s.io_pressure_full_total_usec > 0
-            for s in samples
+            s.io_pressure_some_total_usec > 0 or s.io_pressure_full_total_usec > 0 for s in samples
         )
 
         # Memory stat deltas (page faults are counters, file stats are gauges).
@@ -946,6 +952,34 @@ class CgroupsV2Collector(BaseCollector):
         max_queue_depth = max(queue_depth_values)
         p95_queue_depth = _percentile([float(v) for v in queue_depth_values], 95)
 
+        # Device-level (system-wide) read IOPS and mean read service time, from
+        # /sys/block/<dev>/stat deltas across the whole window. These are monotonic
+        # kernel counters independent of cgroups, so use first/last of all samples
+        # (not just the cgroup-io-valid subset).
+        device_reads_delta = max(
+            0, last_sample.device_reads_completed - first_sample.device_reads_completed
+        )
+        device_read_ticks_delta = max(
+            0, last_sample.device_read_ticks_ms - first_sample.device_read_ticks_ms
+        )
+        device_read_iops = (device_reads_delta / duration) if duration > 0 else None
+        device_avg_read_service_time_ms = (
+            device_read_ticks_delta / device_reads_delta if device_reads_delta > 0 else None
+        )
+
+        # Machine-wide CPU utilization (0-1) during the window, from /proc/stat deltas.
+        machine_cpu_busy_delta = max(
+            0, last_sample.machine_cpu_busy_ticks - first_sample.machine_cpu_busy_ticks
+        )
+        machine_cpu_total_delta = max(
+            0, last_sample.machine_cpu_total_ticks - first_sample.machine_cpu_total_ticks
+        )
+        machine_cpu_util = (
+            machine_cpu_busy_delta / machine_cpu_total_delta
+            if machine_cpu_total_delta > 0
+            else None
+        )
+
         result = CollectorResult(
             cpu_time_total_seconds=cpu_time_total_seconds,
             avg_cpu_percent=avg_cpu_percent,
@@ -985,6 +1019,9 @@ class CgroupsV2Collector(BaseCollector):
             avg_queue_depth=avg_queue_depth,
             max_queue_depth=max_queue_depth,
             p95_queue_depth=p95_queue_depth,
+            device_read_iops=device_read_iops,
+            device_avg_read_service_time_ms=device_avg_read_service_time_ms,
+            machine_cpu_util=machine_cpu_util,
             duration_seconds=duration,
             sample_count=len(samples),
             filtered_samples_meta=filtered_meta,

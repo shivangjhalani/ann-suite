@@ -473,7 +473,32 @@ avg_read_bytes_per_op = delta_rbytes / delta_rios
 | `avg_read_bytes_per_op` | 4KB-256KB | Small = random; Large = sequential |
 
 > [!NOTE]
-> `rusec`/`wusec` fields are available on Linux 5.5+ with certain I/O schedulers. When unavailable, service time metrics are `None`.
+> `rusec`/`wusec` fields are available on Linux 5.5+ with certain I/O schedulers. When
+> unavailable, `avg_read_service_time_ms` falls back to a device-level measurement
+> (`search_device_avg_read_service_time_ms`, below) instead of silently reading as
+> 0/`None` - a bug present until this fallback was added: on hosts whose cgroup `io.stat`
+> never populates `rusec`, the metric would read as 0.000 despite real search I/O.
+
+---
+
+### Device-level I/O and machine CPU utilization
+
+```python
+search_device_read_iops: float | None              # system-wide read IOPS
+search_device_avg_read_service_time_ms: float | None  # system-wide mean read latency
+search_machine_cpu_util: float | None               # system-wide CPU utilization (0-1)
+```
+
+**Source:** `/sys/block/<dev>/stat` deltas (fields 0 and 3: reads completed, ms spent
+reading) and `/proc/stat`'s aggregate `cpu` line deltas -
+`src/ann_suite/monitoring/base.py::read_device_io_totals`/`read_machine_cpu_ticks`.
+
+These are **system-wide**, not scoped to the benchmarked container/cgroup (like
+`avg_queue_depth`), so they're most meaningful when the host is otherwise idle. They exist
+independently of cgroups io.stat and are the primary fix for the `avg_read_service_time_ms`
+gap above; they're also the metrics the [open-loop search mode](./OPEN_LOOP.md) reports
+per arrival rate, matching the semantics of PipeANN's reference open-loop driver
+(`dev_iops`, `dev_lat`, `cpu` in its `RESULT` line).
 
 ---
 

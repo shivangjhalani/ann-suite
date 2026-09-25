@@ -63,8 +63,7 @@ def expand_cpuset(cpuset: str) -> set[int]:
                 continue
             if end < start:
                 logger.warning(
-                    f"Ignoring reversed cpuset range '{token}' in '{cpuset}'; "
-                    "start must be <= end"
+                    f"Ignoring reversed cpuset range '{token}' in '{cpuset}'; start must be <= end"
                 )
                 continue
             cpus.update(range(start, end + 1))
@@ -335,6 +334,9 @@ class ContainerRunner:
             avg_queue_depth=result.avg_queue_depth if result.sample_count else None,
             max_queue_depth=result.max_queue_depth if result.sample_count else None,
             p95_queue_depth=result.p95_queue_depth if result.sample_count else None,
+            device_read_iops=result.device_read_iops,
+            device_avg_read_service_time_ms=result.device_avg_read_service_time_ms,
+            machine_cpu_util=result.machine_cpu_util,
             sample_count=result.sample_count,
             duration_seconds=result.duration_seconds,
             samples=samples_payload,
