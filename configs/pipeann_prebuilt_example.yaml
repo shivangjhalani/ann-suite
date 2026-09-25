@@ -1,0 +1,44 @@
+# PipeANN, search-only, against a previously built index (skips the build
+# phase). required_files guards against silently searching an incomplete
+# index (see BuildConfig.required_files docstring).
+
+name: "PipeANN prebuilt search-only"
+description: "Search-only PipeANN benchmark reusing an index built out-of-band."
+data_dir: "./data"
+results_dir: "./results"
+index_dir: "./indices"
+monitor_interval_ms: 50
+
+algorithms:
+  - name: PipeANN
+    docker_image: ann-suite/pipeann:latest
+    algorithm_type: disk
+    datasets: [sift1m]
+    build:
+      timeout_seconds: 60
+      prebuilt_path: "PipeANN/sift1m/R64_L100_pq32"
+      required_files:
+        - "pipeann_disk.index"
+        - "pipeann_pq_pivots.bin"
+        - "pipeann_pq_compressed.bin"
+    search:
+      timeout_seconds: 1200
+      k: 10
+      args:
+        index_prefix: pipeann
+        mode: 2
+        beam_width: 32
+        mem_L: 10
+        num_threads: 8
+        Ls: [20, 40, 60, 80]
+
+datasets:
+  - name: sift1m
+    base_path: sift1m/base.npy
+    query_path: sift1m/queries.npy
+    ground_truth_path: sift1m/ground_truth.npy
+    distance_metric: L2
+    dimension: 128
+    point_type: uint8
+    base_count: 1000000
+    query_count: 10000
