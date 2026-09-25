@@ -301,6 +301,133 @@ class DiskANNIndex:
             native.reset_search_stats()
 
 
+def run_openloop_search(
+    index: DiskANNIndex,
+    queries: np.ndarray,
+    k: int,
+    Ls: int,
+    beam_width: int,
+    arrival: dict[str, Any],
+    ground_truth: np.ndarray | None,
+) -> dict[str, Any]:
+    """Open-loop (arrival-rate) search: a fixed worker-thread pool serves queries
+    scheduled on a Poisson (or "closed", all-at-t=0) arrival process.
+
+    Semantics mirror the PipeANN reference open-loop driver (see
+    library/algorithms/pipeann/vendor/search_openloop.cpp, which times in C++):
+    per-query latency = completion time - *scheduled* arrival time (so queueing
+    delay under load is included, not just service time), and the first
+    `warmup_fraction` of issued queries are dropped from the reported
+    percentiles as steady-state warm-up.
+
+    CAVEATS vs. PipeANN's C++ driver (documented, not yet verified against a
+    live diskannpy build - treat this mode as best-effort):
+    - Timed in Python with ThreadPoolExecutor, so scheduling jitter adds noise
+      at the microsecond scale the C++ driver doesn't have; don't treat
+      absolute microsecond latencies as precise as PipeANN's.
+    - diskannpy's StaticDiskIndex.search() thread-safety for concurrent calls
+      from multiple Python threads is not documented/verified here, so this
+      serializes native search calls behind a lock (num_workers threads
+      contend for one at a time). That still validly models a single-server
+      FIFO queue under Poisson load - which is what this mode measures - but
+      it means num_workers > 1 does NOT model concurrent multi-worker
+      throughput the way PipeANN's driver does. Verifying thread-safety and
+      dropping the lock (to get real multi-worker queueing behavior) is a
+      follow-up, not done here.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    num_queries = int(arrival.get("num_queries", 10000))
+    poisson = arrival.get("mode") == "poisson"
+    rate_qps = arrival.get("rate_qps")
+    lam = float(rate_qps) if poisson and rate_qps else 0.0
+    num_workers = int(arrival.get("num_workers") or 1)
+    seed = int(arrival.get("seed", 12345))
+    warmup_fraction = float(arrival.get("warmup_fraction", 0.1))
+
+    rng = np.random.default_rng(seed)
+    arrivals = np.cumsum(rng.exponential(1.0 / lam, size=num_queries)) if lam > 0 else np.zeros(num_queries)
+    qids = np.arange(num_queries) % len(queries)
+
+    latencies_ms = np.zeros(num_queries)
+    service_ms = np.zeros(num_queries)
+    predicted = np.full((num_queries, k), -1, dtype=np.int64)
+    lock = threading.Lock()
+    t0 = time.perf_counter()
+
+    def worker(i: int) -> None:
+        at = t0 + arrivals[i]
+        now = time.perf_counter()
+        if now < at:
+            time.sleep(at - now)
+        start = time.perf_counter()
+        with lock:  # diskannpy StaticDiskIndex is not documented thread-safe for concurrent search
+            labels, _ = index.index.search(  # type: ignore[union-attr]
+                queries[qids[i]], k_neighbors=k, complexity=Ls, beam_width=beam_width
+            )
+        end = time.perf_counter()
+        latencies_ms[i] = (end - at) * 1000.0
+        service_ms[i] = (end - start) * 1000.0
+        predicted[i, : len(labels)] = labels[:k]
+
+    with ThreadPoolExecutor(max_workers=num_workers) as pool:
+        list(pool.map(worker, range(num_queries)))
+
+    wall = time.perf_counter() - t0
+    achieved_qps = num_queries / wall if wall > 0 else 0.0
+
+    warmup_n = int(num_queries * warmup_fraction)
+    lat_window = latencies_ms[warmup_n:]
+    svc_window = service_ms[warmup_n:]
+
+    def _pct(values: np.ndarray, p: float) -> float:
+        return float(np.percentile(values, p)) if len(values) else 0.0
+
+    recall = None
+    if ground_truth is not None:
+        gt_window = ground_truth[qids[warmup_n:]]
+        recall = compute_recall(predicted[warmup_n:], gt_window, k)
+
+    open_loop = {
+        "achieved_qps": achieved_qps,
+        "arrival_rate_qps": rate_qps if lam > 0 else None,
+        "num_queries": num_queries,
+        "num_workers": num_workers,
+        "warmup_fraction": warmup_fraction,
+        "latency_ms": {
+            "mean": float(np.mean(lat_window)) if len(lat_window) else 0.0,
+            "p50": _pct(lat_window, 50),
+            "p90": _pct(lat_window, 90),
+            "p99": _pct(lat_window, 99),
+            "p999": _pct(lat_window, 99.9),
+        },
+        "service_time_ms": {
+            "mean": float(np.mean(svc_window)) if len(svc_window) else 0.0,
+            "p99": _pct(svc_window, 99),
+        },
+        "note": (
+            "Timed in Python (ThreadPoolExecutor); native search calls are "
+            "serialized behind a lock (thread-safety unverified). See "
+            "run_openloop_search docstring for caveats vs. the PipeANN C++ driver."
+        ),
+    }
+
+    return {
+        "status": "success",
+        "total_queries": num_queries,
+        "total_time_seconds": wall,
+        "qps": achieved_qps,
+        "recall": recall,
+        "mean_latency_ms": open_loop["latency_ms"]["mean"],
+        "p50_latency_ms": open_loop["latency_ms"]["p50"],
+        "p95_latency_ms": None,
+        "p99_latency_ms": open_loop["latency_ms"]["p99"],
+        "max_latency_ms": float(np.max(lat_window)) if len(lat_window) else None,
+        "open_loop": open_loop,
+    }
+
+
 def run_build(config: dict[str, Any]) -> dict[str, Any]:
     """Execute the build phase.
 
@@ -446,6 +573,34 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
 
         warmup_duration_seconds = time.perf_counter() - warmup_start
         warmup_end_timestamp = datetime.now(UTC).isoformat()
+
+        # Open-loop (arrival-rate) mode: hand off to a dedicated Poisson/closed
+        # arrival-schedule driver instead of the ordinary batch/serial timed
+        # loop below. See run_openloop_search()'s docstring for caveats
+        # (Python-timed, best-effort vs. PipeANN's C++ driver).
+        arrival = config.get("arrival")
+        if arrival:
+            query_start_timestamp = datetime.now(UTC).isoformat()
+            openloop_result = run_openloop_search(
+                index, queries, k, Ls, beam_width, arrival, ground_truth
+            )
+            query_end_timestamp = datetime.now(UTC).isoformat()
+            openloop_result.update(
+                {
+                    "warmup_duration_seconds": warmup_duration_seconds,
+                    "query_start_timestamp": query_start_timestamp,
+                    "query_end_timestamp": query_end_timestamp,
+                    "warmup_start_timestamp": warmup_start_timestamp,
+                    "warmup_end_timestamp": warmup_end_timestamp,
+                    "load_duration_seconds": load_duration_seconds,
+                    "load_start_timestamp": load_start_timestamp,
+                    "load_end_timestamp": load_end_timestamp,
+                    "cache_warmup_queries_requested": cache_warmup_queries,
+                    "cache_warmup_queries_executed": cache_warmup_queries_executed,
+                    "cache_warmup_duration_seconds": cache_warmup_duration_seconds,
+                }
+            )
+            return openloop_result
 
         # Run timed search - emit timestamps for resource window filtering
         # Reset instrumented counters so stats cover only the timed window.
