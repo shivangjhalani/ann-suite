@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from cpuset import native_cmd_prefix
 
 REPO = Path(__file__).resolve().parents[2]
 CONFIG = REPO / "configs/docker_overhead_diskann_10m.yaml"
@@ -122,9 +123,7 @@ def run_native(threads: int, ls: int) -> dict[str, Any]:
     }
     proc = subprocess.run(
         [
-            "taskset",
-            "-c",
-            CPUS,
+            *native_cmd_prefix(CPUS),
             str(NATIVE_PY),
             "-m",
             "algorithm.runner",
@@ -152,9 +151,7 @@ def run_cpp(threads: int, ls: int, scratch: Path, gt: np.ndarray) -> dict[str, A
     prefix = scratch / f"cpp_T{threads}_L{ls}"
     proc = subprocess.run(
         [
-            "taskset",
-            "-c",
-            CPUS,
+            *native_cmd_prefix(CPUS),
             str(CPP_SEARCH),
             "--data_type",
             "uint8",

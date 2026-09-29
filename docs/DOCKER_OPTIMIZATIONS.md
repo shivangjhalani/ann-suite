@@ -22,6 +22,50 @@ and ann-suite's monitoring add no measurable search cost, and the Python runner 
 batch mode matches the C++ driver. Raw data: `results/docker_overhead/2026-09-29_15-50-06/`
 on the isfcr host. Re-run after changing hardware, kernel, or the runner.
 
+Extended with `tools/docker_overhead/run_diskann_extra.py` (same index/setup): serial
+per-query latency percentiles, Poisson open-loop search, and search under a memory cap
+(Docker `--memory` vs. an equivalent cgroup limit natively). All three also land at
+ratio ~1.0 (0.96-1.06). Note: DiskANN reads via O_DIRECT, so the memory-cap test mostly
+exercises cgroup-limit *parity*, not real cache-pressure behavior (nothing to evict).
+
+## Native-arm pinning bug: `taskset` vs. cgroup cpuset (found via PipeANN)
+
+`tools/docker_overhead/run_pipeann_spann.py` runs the same check for PipeANN
+(BIGANN-10M, R=64/L=128/pq=32, pipe_search/SQPOLL mode) and SPANN. The first PipeANN
+run showed suite (Docker) **2.7-3.7x faster** than native at every Ls and repeat -
+the opposite of overhead, and large enough to be a methodology bug, not a real effect.
+
+**Cause:** every native arm pinned CPUs with `taskset -c <cpus>` (a raw
+`sched_setaffinity` mask), while Docker's `--cpuset-cpus` is backed by the cpuset
+*cgroup* controller - a different kernel mechanism that also changes how the CFS load
+balancer treats the pinned threads. DiskANN's search (num_threads == pinned cores)
+never exposed this. PipeANN's pipe_search mode does: with SQPOLL, each of the 8
+worker threads gets its own busy-polling kernel thread, so 16 runnable threads
+contend for 8 cores - exactly the case where cgroup-cpuset load balancing and raw
+affinity-mask balancing diverge. `/proc/<pid>/task/*/stat` during a native run showed
+all 16 threads persistently `R` (running/runnable); under Docker's cpuset several
+polling threads properly sat `S` (idle) between bursts.
+
+**Confirmed on the live binary** (same index, same config, Ls=100, 8 threads):
+
+| Pinning mechanism | QPS |
+| :-- | :-- |
+| `taskset -c 0-7` | 304 |
+| `systemd-run --scope -p AllowedCPUs=0-7` (cgroup cpuset) | ~2000 |
+| Docker `--cpuset-cpus 0-7`, same moment | ~2000 |
+
+memlock ulimit (Docker's container default is 8 MB vs. the host shell's ~7.8 GB) was
+also checked and ruled out - forcing native down to 8 MB changed nothing.
+
+**Fix:** `tools/docker_overhead/cpuset.py` gives every native arm a
+`systemd-run --scope --user -p AllowedCPUs=<cpus>` prefix instead of `taskset`,
+matching Docker's actual mechanism. Re-running PipeANN's full 3-repeat sweep with the
+fix: closed-loop ratio 0.96-1.24 (4 Ls values), open-loop 1.00 (3 rates) - both back
+in the normal noise band. **Takeaway: always pin a native comparison process with a
+cgroup cpuset, not `taskset`, whenever it can spawn more runnable threads than pinned
+cores** (io_uring SQPOLL, thread pools sized independently of a `num_threads` config,
+etc.) - `taskset` alone will understate that arm's real throughput.
+
 ## Summary of Optimizations
 
 | Feature | Setting | Purpose | Impact on Benchmark |
