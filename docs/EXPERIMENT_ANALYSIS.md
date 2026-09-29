@@ -360,10 +360,10 @@ datasets:
 
 **Option B: Restrict container memory.** Set `memory_limit: "30m"` to force the 19.4 MB index to be evicted from page cache during search. This is artificial but works for validating disk I/O metrics.
 
-**Option C: Drop caches between runs.** Set `search.warmup.drop_caches_before: true` —
-the suite now drops the OS page cache before each search phase automatically
-(requires root or sudo; set the `ANN_SUITE_SUDO_PASSWORD` env var for passworded
-sudo). Manual alternative:
+**Option C: Drop caches between runs.** This is the default
+(`search.warmup.drop_caches_before: true`): the suite drops the OS page cache before
+each search phase and fails the point if it cannot (requires root or sudo; set the
+`ANN_SUITE_SUDO_PASSWORD` env var for passworded sudo). Manual alternative:
 
 ```bash
 sudo sync && echo 3 | sudo tee /proc/sys/vm/drop_caches

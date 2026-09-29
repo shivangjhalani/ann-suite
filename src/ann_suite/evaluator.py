@@ -107,7 +107,7 @@ ARRIVAL_RATE_SWEEP_KEY = "_arrival_rate_qps"
 
 
 def search_sweep_params(algo_config: AlgorithmConfig) -> list[dict[str, Any]]:
-    """Return explicit search points or expand the legacy Cartesian sweep.
+    """Return explicit search points or expand list-valued args as a Cartesian sweep.
 
     When search.arrival is configured with a list-valued rate_qps, each sweep
     point is additionally expanded across every rate, so a run like
@@ -276,6 +276,15 @@ class _BuildContext:
     build_params: dict[str, Any]
     prebuilt: bool = False
     prebuilt_additional_volumes: dict[str, dict[str, str]] | None = None
+
+
+def _run_conditions(algo_config: AlgorithmConfig) -> dict[str, Any]:
+    return {
+        "memory_limit": algo_config.memory_limit,
+        "cpu_affinity": algo_config.cpu_affinity,
+        "cpu_limit": algo_config.cpu_limit,
+        "page_cache_dropped": algo_config.search.warmup.drop_caches_before,
+    }
 
 
 def _empty_resource_summary() -> ResourceSummary:
@@ -629,6 +638,7 @@ class BenchmarkEvaluator:
                 "search": search_params,
                 "k": algo_config.search.k,
             },
+            run_conditions=_run_conditions(algo_config),
         )
 
     def _ensure_build(
@@ -769,7 +779,7 @@ class BenchmarkEvaluator:
             prebuilt_additional_volumes=context.prebuilt_additional_volumes,
         )
 
-        return self._aggregate_results(
+        result = self._aggregate_results(
             algo_config,
             dataset_config,
             context.build_result,
@@ -777,6 +787,8 @@ class BenchmarkEvaluator:
             build_params=context.build_params,
             search_params_override=search_params,
         )
+        result.run_conditions = _run_conditions(algo_config)
+        return result
 
     def _run_build_phase(
         self,
@@ -897,15 +909,13 @@ class BenchmarkEvaluator:
                 "untimed queries before benchmark"
             )
 
-        # Cold-start benchmarking: drop the OS page cache so index reads hit disk
         if warmup_config.drop_caches_before:
-            if self.container_runner.drop_caches():
-                logger.info(f"[{self._run_id}] Dropped OS page caches before search phase")
-            else:
-                logger.warning(
-                    f"[{self._run_id}] drop_caches_before=true but the cache drop FAILED; "
-                    "this search point will run with a warm page cache"
+            if not self.container_runner.drop_caches():
+                raise RuntimeError(
+                    "drop_caches_before=true but the page-cache drop failed; refusing to "
+                    "run this point warm. Set ANN_SUITE_SUDO_PASSWORD or run as root."
                 )
+            logger.info(f"[{self._run_id}] Dropped OS page caches before search phase")
 
         container_result, resources = self.container_runner.run_phase(
             algorithm=algo_config,
@@ -923,15 +933,10 @@ class BenchmarkEvaluator:
             ),
         )
 
-        # Create time bases from container result and algorithm output
-        # Support both old "load_" and new "warmup_" field names for backward compatibility
-        warmup_duration = container_result.output.get(
-            "warmup_duration_seconds", container_result.output.get("load_duration_seconds")
-        )
         time_bases = TimeBases(
             container_duration_seconds=container_result.duration_seconds,
             sample_span_seconds=resources.duration_seconds,
-            warmup_duration_seconds=warmup_duration,
+            warmup_duration_seconds=container_result.output.get("warmup_duration_seconds"),
             query_duration_seconds=container_result.output.get("total_time_seconds"),
             query_start_timestamp=container_result.output.get("query_start_timestamp"),
             query_end_timestamp=container_result.output.get("query_end_timestamp"),

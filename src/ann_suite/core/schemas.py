@@ -194,6 +194,7 @@ class BenchmarkSummaryDict(TypedDict):
     metadata: MetadataDict
     debug_artifacts: DebugArtifactsDict
     hyperparameters: dict[str, Any]
+    run_conditions: dict[str, Any]
     open_loop: dict[str, Any] | None
 
 
@@ -243,7 +244,7 @@ class BuildConfig(BaseModel):
         description=(
             "Reuse a built index across search-phase sweep points within this run instead of "
             "rebuilding it for every point. Set false to rebuild for each benchmark point "
-            "(legacy behavior; needed when build cost itself is under study)."
+            "(needed when build cost itself is under study)."
         ),
     )
 
@@ -256,15 +257,15 @@ class WarmupConfig(BaseModel):
     This controls how the index is prepared before timed query execution:
     - collect_metrics: Whether to collect and report warmup phase metrics
     - cache_warmup_queries: Number of untimed queries to warm OS/algorithm caches
-    - drop_caches_before: Drop the OS page cache before each search phase so index
-      reads hit physical disk (cold-start benchmarking). Requires root or sudo;
-      a password may be supplied via the ANN_SUITE_SUDO_PASSWORD environment
-      variable. On failure the run continues with a warm cache and logs a warning.
+    - drop_caches_before: Drop the OS page cache before each search phase so every
+      point starts from the same cold state (default). Requires root or sudo; a
+      password may be supplied via the ANN_SUITE_SUDO_PASSWORD environment variable.
+      If the drop fails, the search point fails rather than running warm.
 
     Example scenarios:
-    - Cold start benchmark: drop_caches_before=True, cache_warmup_queries=0
+    - Default (cold start, independent points): drop_caches_before=True
     - Warm cache benchmark: cache_warmup_queries=1000
-    - Default (realistic): both disabled
+    - Deliberately inherit page-cache state: drop_caches_before=False
     """
 
     collect_metrics: bool = Field(
@@ -277,11 +278,11 @@ class WarmupConfig(BaseModel):
         description="Number of random queries to run before timed benchmark to warm caches",
     )
     drop_caches_before: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "Drop the OS page cache before each search phase (cold-start benchmarking). "
-            "Requires root or sudo; set ANN_SUITE_SUDO_PASSWORD for passworded sudo. "
-            "If the drop fails, the search runs with a warm cache and a warning is logged."
+            "Drop the OS page cache before each search phase so points do not inherit "
+            "each other's cache state. Requires root or sudo; set ANN_SUITE_SUDO_PASSWORD "
+            "for passworded sudo. If the drop fails, the search point fails."
         ),
     )
 
@@ -514,6 +515,25 @@ class DatasetConfig(BaseModel):
         return self
 
 
+class ResourceLimits(BaseModel):
+    """Resource envelope shared by every algorithm in a benchmark.
+
+    Comparisons are only fair when every algorithm runs under the same DRAM and CPU
+    budget. The cgroup v2 memory limit also counts page cache, so it bounds how much
+    of a disk index can sit in RAM. Algorithm-level values override these.
+    """
+
+    memory_limit: str | list[str] | None = Field(
+        default=None,
+        description=(
+            "e.g. '16g'. A list sweeps budgets: each algorithm without its own limit is "
+            "expanded into one copy per budget, named '<name>@<budget>'."
+        ),
+    )
+    cpu_affinity: str | None = Field(default=None, description="cpuset, e.g. '0-7'")
+    cpu_limit: float | None = Field(default=None, gt=0, description="CPU quota in cores")
+
+
 class BenchmarkConfig(BaseModel):
     """Top-level benchmark configuration.
 
@@ -534,6 +554,40 @@ class BenchmarkConfig(BaseModel):
         default=False,
         description="Also include raw samples in results_detailed.json (debug JSONL always stored)",
     )
+    resources: ResourceLimits = Field(
+        default_factory=ResourceLimits,
+        description="Resource envelope applied to every algorithm that does not set its own",
+    )
+
+    @model_validator(mode="after")
+    def apply_shared_resources(self) -> BenchmarkConfig:
+        budgets = self.resources.memory_limit
+        if isinstance(budgets, list):
+            expanded: list[AlgorithmConfig] = []
+            for algo in self.algorithms:
+                if algo.memory_limit is not None:
+                    expanded.append(algo)
+                    continue
+                if algo.build.prebuilt_path is None:
+                    # Each budget copy would otherwise rebuild the index, under the
+                    # (small) search budget.
+                    raise ValueError(
+                        f"Algorithm '{algo.name}': a memory_limit budget sweep requires "
+                        "build.prebuilt_path. Build the index first with an unlimited config."
+                    )
+                for budget in budgets:
+                    expanded.append(
+                        algo.model_copy(
+                            deep=True,
+                            update={"name": f"{algo.name}@{budget}", "memory_limit": budget},
+                        )
+                    )
+            self.algorithms = expanded
+        for algo in self.algorithms:
+            for field in ("memory_limit", "cpu_affinity", "cpu_limit"):
+                if getattr(algo, field) is None:
+                    setattr(algo, field, getattr(self.resources, field))
+        return self
 
     @property
     def enabled_algorithms(self) -> list[AlgorithmConfig]:
@@ -1198,7 +1252,7 @@ class BenchmarkResult(BaseModel):
     dataset: str
     timestamp: datetime = Field(default_factory=datetime.now)
 
-    # Phase results (contain raw ResourceSummary for backward compatibility)
+    # Phase results (raw ResourceSummary per phase)
     build_result: PhaseResult | None = Field(default=None)
     search_result: PhaseResult | None = Field(default=None)
 
@@ -1228,6 +1282,13 @@ class BenchmarkResult(BaseModel):
     # Configuration (hyperparameters used for this run)
     hyperparameters: dict[str, Any] = Field(
         default_factory=dict, description="Combined build and search hyperparameters"
+    )
+    run_conditions: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Conditions the search ran under: memory_limit, cpu_affinity, cpu_limit, "
+            "page_cache_dropped. Results are only comparable under equal conditions."
+        ),
     )
 
     # Open-loop (arrival-rate) search results, present only when search.arrival was
@@ -1277,6 +1338,7 @@ class BenchmarkResult(BaseModel):
             metadata=self._build_metadata_dict(),
             debug_artifacts=self._build_debug_artifacts_dict(),
             hyperparameters=self.hyperparameters,
+            run_conditions=self.run_conditions,
             open_loop=self.open_loop,
         )
 
@@ -1442,6 +1504,9 @@ class BenchmarkResult(BaseModel):
         for key, value in _flatten_dict(self.hyperparameters).items():
             data[f"hp_{key}"] = value
 
+        for key, value in self.run_conditions.items():
+            data[f"cond_{key}"] = value
+
         # Flatten algorithm-reported stats into stats_* columns for the dashboard.
         if self.algorithm_stats is not None:
             for key, value in _flatten_dict(self.algorithm_stats.to_dict()).items():
@@ -1515,7 +1580,7 @@ class ContainerProtocol(BaseModel):
         warmup_duration_seconds: float | None = Field(default=None, ge=0)
         warmup_start_timestamp: str | None = Field(default=None)
         warmup_end_timestamp: str | None = Field(default=None)
-        # Backward-compatible legacy "load_*" fields (older containers).
+        # Index-load portion of the warmup window (excludes cache warmup queries).
         load_duration_seconds: float | None = Field(default=None, ge=0)
         load_start_timestamp: str | None = Field(default=None)
         load_end_timestamp: str | None = Field(default=None)

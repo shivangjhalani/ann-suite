@@ -30,8 +30,27 @@ datasets:
 | `index_dir` | path | `"./indices"` | Index output directory |
 | `monitor_interval_ms` | int | `100` | Resource sampling interval (50-1000) |
 | `include_raw_samples` | bool | `false` | Also include raw samples in results_detailed.json (debug files always stored separately) |
+| `resources` | object | `{}` | Shared resource envelope (see below) |
 | `algorithms` | list | `[]` | Algorithm configurations |
 | `datasets` | list | `[]` | Dataset configurations |
+
+### Shared Resource Envelope (`resources`)
+
+Algorithms are only comparable when they run under the same DRAM and CPU budget
+(the SPANN paper's method: fix the memory budget, then compare recall/QPS). Set the
+budget once at the top level and every algorithm inherits it:
+
+```yaml
+resources:
+  memory_limit: "16g"   # cgroup v2 memory.max; counts page cache too
+  cpu_affinity: "0-7"
+  cpu_limit: null
+```
+
+An algorithm-level `memory_limit` / `cpu_affinity` / `cpu_limit` overrides the shared
+value (useful only when the budget itself is the swept variable). Every result
+records the limits it actually ran under in `run_conditions` (`cond_*` CSV columns),
+together with `page_cache_dropped`.
 
 ## Algorithm Configuration
 
@@ -152,7 +171,7 @@ DiskANN `u8bin` data require `vector_dtype: uint8` and uint8 queries.
 |-------|------|---------|-------------|
 | `collect_metrics` | bool | `true` | Report warmup phase metrics |
 | `cache_warmup_queries` | int | `0` | Untimed queries after load |
-| `drop_caches_before` | bool | `false` | Drop the OS page cache before each search phase (cold-start benchmarking). Requires root or sudo; set the `ANN_SUITE_SUDO_PASSWORD` env var for passworded sudo. On failure the search runs with a warm cache and a warning is logged. |
+| `drop_caches_before` | bool | `true` | Drop the OS page cache before each search phase so points never inherit each other's cache state. Requires root or sudo; set the `ANN_SUITE_SUDO_PASSWORD` env var for passworded sudo. If the drop fails, the search point fails instead of running warm. Set `false` only when warm-cache carry-over is the thing under study. |
 
 ## Dataset Configuration
 
@@ -227,7 +246,7 @@ collide.
 > [!NOTE]
 > With reuse enabled, later search points may observe a warmer OS page cache than the
 > first point (the index was just read by prior searches). For cold-cache studies set
-> `reuse_index: false` (legacy behavior: rebuild for every point) or clear caches
+> `reuse_index: false` (rebuild for every point) or clear caches
 > manually between runs.
 
 Set `build.reuse_index: false` when build cost itself is under study or you need

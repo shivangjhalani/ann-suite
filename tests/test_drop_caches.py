@@ -120,9 +120,7 @@ class TestResourceLimits:
         assert limits["mem_limit"] == "8g"
         assert limits["memswap_limit"] == "8g"
 
-    def test_cpu_affinity_sets_cpuset_mems_when_numa_available(
-        self, tmp_path: Path
-    ) -> None:
+    def test_cpu_affinity_sets_cpuset_mems_when_numa_available(self, tmp_path: Path) -> None:
         """cpu_affinity should also pin memory to the matching NUMA node."""
         with (
             patch("ann_suite.runners.container_runner.docker.from_env") as from_env,
@@ -138,16 +136,12 @@ class TestResourceLimits:
                 results_dir=tmp_path / "results",
             )
             algo = AlgorithmConfig(name="A", docker_image="a:latest", cpu_affinity="0-3")
-            with patch(
-                "ann_suite.runners.container_runner.cpuset_to_numa_nodes", return_value="0"
-            ):
+            with patch("ann_suite.runners.container_runner.cpuset_to_numa_nodes", return_value="0"):
                 limits = runner._prepare_resource_limits(algo)
         assert limits["cpuset_cpus"] == "0-3"
         assert limits["cpuset_mems"] == "0"
 
-    def test_cpu_affinity_omits_cpuset_mems_when_no_numa(
-        self, tmp_path: Path
-    ) -> None:
+    def test_cpu_affinity_omits_cpuset_mems_when_no_numa(self, tmp_path: Path) -> None:
         """On single-node/non-NUMA hosts, memory placement is left at the default."""
         with (
             patch("ann_suite.runners.container_runner.docker.from_env") as from_env,
@@ -315,7 +309,11 @@ class TestEvaluatorDropCachesHook:
         evaluator._prepare_dataset_files = MagicMock(  # type: ignore[method-assign]
             return_value=(tmp_path / "b.npy", tmp_path / "q.npy", None)
         )
-        algo = AlgorithmConfig(name="A", docker_image="a:latest")
+        algo = AlgorithmConfig(
+            name="A",
+            docker_image="a:latest",
+            search={"k": 10, "warmup": {"drop_caches_before": False}},
+        )
         dataset = DatasetConfig(name="ds", base_path=Path("base.npy"), dimension=8)
         evaluator.config = BenchmarkConfig(
             data_dir=tmp_path / "data",
@@ -326,3 +324,106 @@ class TestEvaluatorDropCachesHook:
         )
         evaluator.run()
         evaluator.container_runner.drop_caches.assert_not_called()
+
+    def test_drop_is_default(self) -> None:
+        assert AlgorithmConfig(name="A", docker_image="a").search.warmup.drop_caches_before
+
+    def test_failed_drop_fails_point_instead_of_running_warm(self, tmp_path: Path) -> None:
+        evaluator = BenchmarkEvaluator(
+            BenchmarkConfig(
+                data_dir=tmp_path / "data",
+                results_dir=tmp_path / "results",
+                index_dir=tmp_path / "indices",
+            )
+        )
+        evaluator.container_runner = MagicMock()
+        evaluator.container_runner.pull_image.return_value = True
+        evaluator.container_runner.drop_caches.return_value = False
+        evaluator.container_runner.run_phase.return_value = (
+            SimpleNamespace(
+                success=True,
+                exit_code=0,
+                stdout="",
+                stderr="",
+                duration_seconds=1.0,
+                output={"status": "success"},
+                error_message=None,
+                warmup_resources=None,
+                stdout_path=None,
+                stderr_path=None,
+            ),
+            ResourceSummary(
+                peak_memory_mb=0.0,
+                avg_memory_mb=0.0,
+                avg_cpu_percent=0.0,
+                peak_cpu_percent=0.0,
+                total_blkio_read_mb=0.0,
+                total_blkio_write_mb=0.0,
+                avg_read_iops=0.0,
+                avg_write_iops=0.0,
+                sample_count=0,
+                duration_seconds=0.0,
+            ),
+        )
+        evaluator._prepare_dataset = MagicMock(  # type: ignore[method-assign]
+            return_value=(None, None, None)
+        )
+        evaluator._prepare_dataset_files = MagicMock(  # type: ignore[method-assign]
+            return_value=(tmp_path / "b.npy", tmp_path / "q.npy", None)
+        )
+        evaluator.config = BenchmarkConfig(
+            data_dir=tmp_path / "data",
+            results_dir=tmp_path / "results",
+            index_dir=tmp_path / "indices",
+            resources={"memory_limit": "8g", "cpu_affinity": "0-3"},
+            algorithms=[AlgorithmConfig(name="A", docker_image="a:latest")],
+            datasets=[DatasetConfig(name="ds", base_path=Path("base.npy"), dimension=8)],
+        )
+        results: list[Any] = evaluator.run()
+
+        assert len(results) == 1
+        assert results[0].qps is None
+        assert results[0].run_conditions == {
+            "memory_limit": "8g",
+            "cpu_affinity": "0-3",
+            "cpu_limit": None,
+            "page_cache_dropped": True,
+        }
+        # Only the build ran; the search phase was never started warm.
+        calls = [c[0] for c in evaluator.container_runner.method_calls]
+        assert calls == ["pull_image", "run_phase", "drop_caches"]
+
+
+class TestSharedResources:
+    def test_applied_to_algorithms_without_own_limits(self) -> None:
+        config = BenchmarkConfig(
+            resources={"memory_limit": "16g", "cpu_affinity": "0-7"},
+            algorithms=[
+                AlgorithmConfig(name="A", docker_image="a"),
+                AlgorithmConfig(name="B", docker_image="b", memory_limit="4g"),
+            ],
+        )
+        a, b = config.algorithms
+        assert (a.memory_limit, a.cpu_affinity) == ("16g", "0-7")
+        assert (b.memory_limit, b.cpu_affinity) == ("4g", "0-7")
+
+    def test_budget_list_expands_prebuilt_algorithms(self) -> None:
+        config = BenchmarkConfig(
+            resources={"memory_limit": ["2g", "8g"], "cpu_affinity": "0-7"},
+            algorithms=[
+                AlgorithmConfig(name="A", docker_image="a", build={"prebuilt_path": "A/idx"}),
+                AlgorithmConfig(name="B", docker_image="b", memory_limit="4g"),
+            ],
+        )
+        assert [(a.name, a.memory_limit, a.cpu_affinity) for a in config.algorithms] == [
+            ("A@2g", "2g", "0-7"),
+            ("A@8g", "8g", "0-7"),
+            ("B", "4g", "0-7"),
+        ]
+
+    def test_budget_list_requires_prebuilt_index(self) -> None:
+        with pytest.raises(ValueError, match="prebuilt_path"):
+            BenchmarkConfig(
+                resources={"memory_limit": ["2g", "8g"]},
+                algorithms=[AlgorithmConfig(name="A", docker_image="a")],
+            )
