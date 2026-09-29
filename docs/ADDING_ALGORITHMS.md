@@ -277,6 +277,7 @@ The suite includes production implementations you can use as templates:
 | HNSW | `library/algorithms/hnsw/` | in-memory | hnswlib |
 | DiskANN | `library/algorithms/diskann/` | disk-based | diskannpy |
 | SPANN | `library/algorithms/spann/` | disk-based | Microsoft SPTAG |
+| PipeANN | `library/algorithms/pipeann/` | disk-based | [PipeANN](https://github.com/thustorage/PipeANN) C++ binaries |
 
 ### Key Files to Study
 
@@ -291,6 +292,12 @@ The suite includes production implementations you can use as templates:
 **SPANN (memory/SSD hybrid example):**
 - [runner.py](../library/algorithms/spann/algorithm/runner.py) - SPTAG binary conversion and CLI integration
 - [Dockerfile](../library/algorithms/spann/Dockerfile) - Reproducible SPTAG source build
+
+**PipeANN (patched third-party source, open-loop search example):**
+- [runner.py](../library/algorithms/pipeann/algorithm/runner.py) - C++ binary subprocess integration, open-loop driver invocation
+- [Dockerfile](../library/algorithms/pipeann/Dockerfile) - Pinned-commit source build with an applied patch + vendored files
+- [patches/load_aware.patch](../library/algorithms/pipeann/patches/load_aware.patch) - Example of vendoring a small fork's changes reproducibly
+- [docs/PIPEANN.md](./PIPEANN.md) / [docs/OPEN_LOOP.md](./OPEN_LOOP.md) - Full write-up
 
 ---
 

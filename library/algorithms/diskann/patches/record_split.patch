@@ -1,0 +1,211 @@
+Adjacency-only residency for DiskANN (the "record split").
+
+A DiskANN node record is [vector][nnbrs][nbrs]: 132 B of adjacency against a
+260 B (uint8) or 644 B (float32) record, so adjacency is 20-51% of the record and
+a 4,096 B sector read yields 132 B of graph structure -- 31x amplification.
+
+Two facts in cached_beam_search make the split possible:
+  * _nhood_cache membership ALONE decides whether a node needs a disk read; a node
+    found there never enters `frontier`, so no I/O is issued for it.
+  * _coord_cache is consulted only to compute an expanded node's EXACT distance.
+
+So caching adjacency WITHOUT coordinates removes the disk read while costing only
+distance precision -- which the PQ table already approximates. For SIFT10M that is
+1.32 GB instead of 6.4 GB, ~5x less memory for the same elimination of reads.
+
+Motivation: full residency was measured at 11.77x QPS (192.9 -> 2,271.0) at
+bit-identical recall 0.9521, but it costs 6.4 GB. Every cheaper mechanism tried --
+frequency cache selection, sector admission, in-degree ranking, BFS / greedy-
+neighbour / spatial / profile-guided layout, page-native construction -- failed
+because each had to SELECT a subset, and which nodes a future query touches is
+unpredictable (Jaccard 0.011 between disjoint query halves). Adjacency-only
+residency selects nothing: coverage is total. See
+Results/layout-refutation-and-the-record-split.
+
+WHAT THIS MEASURES: recall under PQ-only expansion. The patch does NOT add a rerank
+pass, so every expanded node's distance is the PQ estimate and the final ranking is
+PQ-based. That makes the measured recall a LOWER BOUND -- a deployment would rerank
+the top-k by reading k full vectors (~10 reads/query), recovering precision at small
+cost. The number of interest is how far the candidate set degrades without it.
+
+Env-gated by DISKANN_ADJ_ONLY_CACHE=1; completely inert when unset, so the same
+image reproduces stock behaviour. Applies to a clean tree (touches only
+src/pq_flash_index.cpp; robin_map_hash_fix.patch touches include/pq_flash_index.h,
+so the two do not conflict). Build from ann-suite/diskann:hashfix.
+
+This is a TIMED-measurement image: it adds no counters or tracing.
+
+index 9580537e..4da1878d 100644
+ADDENDUM (2026-09-19): top-R exact rerank, env-gated by DISKANN_RERANK_TOPR.
+
+Adjacency-only residency measured recall 0.9521 -> 0.8068 on SIFT10M, and widening
+the search does NOT repair it: Ls 100/150/200/300 gives 0.8068/0.8155/0.8192/0.8229,
+clearly saturating. Tripling Ls buys 1.6 recall points. So the true neighbours are
+already in the candidate pool and merely mis-ordered by PQ -- the deficit is ranking
+PRECISION, not candidate DISCOVERY, and breadth cannot fix it.
+
+The rerank re-reads the top-R candidates' full vectors and re-sorts on exact distance.
+It mirrors DiskANN's own use_reorder_data path but reads NODE sectors via
+get_node_sector + offset_to_node, so it needs no separate reorder-data region and
+works on any index. Cost is exactly R page reads per query against ~116 for an
+uncached search, so R is the knob trading recall against I/O. R is clamped to
+defaults::MAX_N_SECTOR_READS (128), the sector-scratch capacity.
+
+Both features are independently env-gated and inert when unset.
+
+index 9580537e..ef76e694 100644
+--- a/src/pq_flash_index.cpp
++++ b/src/pq_flash_index.cpp
+@@ -9,6 +9,9 @@
+ #include "pq_flash_index.h"
+ #include "cosine_similarity.h"
+ 
++// ann-suite research instrumentation (env-var gated; see DISKANN_ADJ_ONLY_CACHE)
++#include <cstdlib>
++
+ #ifdef _WINDOWS
+ #include "windows_aligned_file_reader.h"
+ #else
+@@ -213,12 +216,29 @@ template <typename T, typename LabelT> void PQFlashIndex<T, LabelT>::load_cache_
+     _nhood_cache_buf = new uint32_t[num_cached_nodes * (_max_degree + 1)];
+     memset(_nhood_cache_buf, 0, num_cached_nodes * (_max_degree + 1));
+ 
+-    // Allocate space for coordinate cache
+-    size_t coord_cache_buf_len = num_cached_nodes * _aligned_dim;
+-    diskann::alloc_aligned((void **)&_coord_cache_buf, coord_cache_buf_len * sizeof(T), 8 * sizeof(T));
+-    memset(_coord_cache_buf, 0, coord_cache_buf_len * sizeof(T));
++    // --- ann-suite: adjacency-only residency (DISKANN_ADJ_ONLY_CACHE) ---
++    // _nhood_cache membership alone decides whether a node needs a disk read; _coord_cache
++    // is consulted only to compute an expanded node's EXACT distance. So caching adjacency
++    // without coordinates removes the I/O while costing only distance precision, which the
++    // PQ table already approximates. Adjacency is 132 B/node against a 260-644 B record, so
++    // this is ~5x less memory than full residency for the same elimination of reads.
++    // When set, coordinates are still READ (read_nodes needs the buffers) but discarded into
++    // a small per-block scratch instead of a per-node array, and never inserted.
++    const bool ann_suite_adj_only = [] {
++        const char *e = std::getenv("DISKANN_ADJ_ONLY_CACHE");
++        return e != nullptr && e[0] != '\0' && e[0] != '0';
++    }();
+ 
+     size_t BLOCK_SIZE = 8;
++
++    // Allocate space for coordinate cache
++    size_t coord_cache_buf_len = (ann_suite_adj_only ? BLOCK_SIZE : num_cached_nodes) * _aligned_dim;
++    diskann::alloc_aligned((void **)&_coord_cache_buf, coord_cache_buf_len * sizeof(T), 8 * sizeof(T));
++    memset(_coord_cache_buf, 0, coord_cache_buf_len * sizeof(T));
++    if (ann_suite_adj_only)
++        diskann::cout << "[ann-suite] adjacency-only cache: coordinates read but not retained ("
++                      << (num_cached_nodes * _aligned_dim * sizeof(T)) / (1024 * 1024)
++                      << " MB of coord cache skipped)" << std::endl;
+     size_t num_blocks = DIV_ROUND_UP(num_cached_nodes, BLOCK_SIZE);
+     for (size_t block = 0; block < num_blocks; block++)
+     {
+@@ -232,7 +252,8 @@ template <typename T, typename LabelT> void PQFlashIndex<T, LabelT>::load_cache_
+         for (size_t node_idx = start_idx; node_idx < end_idx; node_idx++)
+         {
+             nodes_to_read.push_back(node_list[node_idx]);
+-            coord_buffers.push_back(_coord_cache_buf + node_idx * _aligned_dim);
++            coord_buffers.push_back(_coord_cache_buf +
++                                    (ann_suite_adj_only ? (node_idx - start_idx) : node_idx) * _aligned_dim);
+             nbr_buffers.emplace_back(0, _nhood_cache_buf + node_idx * (_max_degree + 1));
+         }
+ 
+@@ -244,7 +265,8 @@ template <typename T, typename LabelT> void PQFlashIndex<T, LabelT>::load_cache_
+         {
+             if (read_status[i] == true)
+             {
+-                _coord_cache.insert(std::make_pair(nodes_to_read[i], coord_buffers[i]));
++                if (!ann_suite_adj_only)
++                    _coord_cache.insert(std::make_pair(nodes_to_read[i], coord_buffers[i]));
+                 _nhood_cache.insert(std::make_pair(nodes_to_read[i], nbr_buffers[i]));
+             }
+         }
+@@ -1486,14 +1508,22 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
+         for (auto &cached_nhood : cached_nhoods)
+         {
+             auto global_cache_iter = _coord_cache.find(cached_nhood.first);
+-            T *node_fp_coords_copy = global_cache_iter->second;
+             float cur_expanded_dist;
+-            if (!_use_disk_index_pq)
++            if (global_cache_iter == _coord_cache.end())
+             {
++                // ann-suite: adjacency-only residency -- no full vector retained for this
++                // node, so fall back to the PQ estimate. This is the precision cost that
++                // buys the ~5x memory reduction; it is the quantity the experiment measures.
++                compute_dists(&cached_nhood.first, 1, &cur_expanded_dist);
++            }
++            else if (!_use_disk_index_pq)
++            {
++                T *node_fp_coords_copy = global_cache_iter->second;
+                 cur_expanded_dist = _dist_cmp->compare(aligned_query_T, node_fp_coords_copy, (uint32_t)_aligned_dim);
+             }
+             else
+             {
++                T *node_fp_coords_copy = global_cache_iter->second;
+                 if (metric == diskann::Metric::INNER_PRODUCT)
+                     cur_expanded_dist = _disk_pq_table.inner_product(query_float, (uint8_t *)node_fp_coords_copy);
+                 else
+@@ -1613,6 +1643,63 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
+     // re-sort by distance
+     std::sort(full_retset.begin(), full_retset.end());
+ 
++    // --- ann-suite: top-R exact rerank over NODE sectors (DISKANN_RERANK_TOPR) ---
++    // Under adjacency-only residency every expanded node's distance is a PQ estimate,
++    // so the final ordering is PQ-ranked. Measured effect on SIFT10M: recall 0.9521 ->
++    // 0.8068, and widening the search does NOT repair it (Ls 100->300 buys only
++    // 0.8068 -> 0.8229 and is saturating) -- the true neighbours are already in the
++    // pool, merely mis-ordered. So the repair is precision, not breadth: re-read the
++    // top-R candidates' full vectors and re-sort on exact distance.
++    //
++    // This mirrors DiskANN's own use_reorder_data path but reads the NODE sectors
++    // (get_node_sector + offset_to_node), so it needs no separate reorder-data region
++    // and works on any index. Cost is exactly R page reads per query, against ~116 for
++    // an uncached search -- so R is the knob trading recall against I/O.
++    //
++    // R is clamped to the sector scratch capacity. Inert when unset.
++    {
++        const char *ann_suite_rr = std::getenv("DISKANN_RERANK_TOPR");
++        uint64_t ann_suite_R = (ann_suite_rr != nullptr && ann_suite_rr[0] != '\0')
++                                   ? (uint64_t)std::atoi(ann_suite_rr)
++                                   : 0;
++        if (ann_suite_R > 0 && !full_retset.empty())
++        {
++            if (ann_suite_R > defaults::MAX_N_SECTOR_READS)
++                ann_suite_R = defaults::MAX_N_SECTOR_READS;
++            if (full_retset.size() > ann_suite_R)
++                full_retset.erase(full_retset.begin() + ann_suite_R, full_retset.end());
++
++            std::vector<AlignedRead> ann_suite_reqs;
++            for (size_t i = 0; i < full_retset.size(); ++i)
++            {
++                ann_suite_reqs.emplace_back(get_node_sector((size_t)full_retset[i].id) * defaults::SECTOR_LEN,
++                                            defaults::SECTOR_LEN, sector_scratch + i * defaults::SECTOR_LEN);
++                if (stats != nullptr)
++                {
++                    stats->n_4k++;
++                    stats->n_ios++;
++                }
++            }
++            io_timer.reset();
++#ifdef USE_BING_INFRA
++            reader->read(ann_suite_reqs, ctx, true);
++#else
++            reader->read(ann_suite_reqs, ctx);
++#endif
++            if (stats != nullptr)
++                stats->io_us += io_timer.elapsed();
++
++            for (size_t i = 0; i < full_retset.size(); ++i)
++            {
++                char *ann_suite_nb = offset_to_node(sector_scratch + i * defaults::SECTOR_LEN,
++                                                    (size_t)full_retset[i].id);
++                full_retset[i].distance =
++                    _dist_cmp->compare(aligned_query_T, offset_to_node_coords(ann_suite_nb), (uint32_t)_aligned_dim);
++            }
++            std::sort(full_retset.begin(), full_retset.end());
++        }
++    }
++
+     if (use_reorder_data)
+     {
+         if (!(this->_reorder_data_exists))

@@ -79,3 +79,95 @@ datasets:
     base_count: 1000000
     query_count: 1000
     point_type: float32
+
+  # ============================================================================
+  # BIGANN / DEEP prefixes (big-ann-benchmarks binary format)
+  #
+  # NOT part of the `ann-suite download` HDF5 pipeline above - `download.py`/
+  # `prepare.py` only know how to fetch+convert a `train`/`test`/`neighbors`
+  # HDF5 file into .npy. These stay in their NATIVE .u8bin/.fbin binary
+  # format instead (`<u4 count><u4 dim><row-major vectors...>`, ground truth
+  # `<u4 n><u4 k><u32 ids...>`), which
+  # `ann_suite.datasets.loader.DatasetLoader._load_binary`/
+  # `_load_ground_truth` already read directly via memmap - no .npy
+  # conversion needed. Registered here for discoverability/provenance;
+  # prepared via `tools/research/prepare_bigann.py` /
+  # `tools/research/prepare_deep.py`, not `ann-suite download`. Reference
+  # these paths from a benchmark config's `datasets:` list with
+  # `point_type: uint8` (BIGANN) / `point_type: float32` (DEEP) - see
+  # docs/ADDING_DATASETS.md and configs/pipeann_bigann10m_*.yaml.
+  # ============================================================================
+
+  bigann-10m:
+    description: >
+      BIGANN (SIFT1B) first 10M base vectors, 128D uint8, L2. Migrated from
+      the ANN-on-SSD latency-under-load research project (isfcr benchmark
+      host, ~/data/bigann/base10m.u8bin) - a 10M-vector prefix of the same
+      base.1B.u8bin file used below, matching the lead researcher's existing
+      indices and standalone PipeANN reference numbers exactly (same bytes,
+      same query set, same top-100 ground truth).
+    format: bigann_bin
+    prepare_script: tools/research/prepare_bigann.py
+    prepare_example: >
+      uv run python tools/research/prepare_bigann.py --output-dir data/bigann-10m
+      --base-count 10000000 --pipeann-bin <path-to-PipeANN-build>/tests
+    base_url: "https://dl.fbaipublicfiles.com/billion-scale-ann-benchmarks/bigann/base.1B.u8bin"
+    query_url: "https://dl.fbaipublicfiles.com/billion-scale-ann-benchmarks/bigann/query.public.10K.u8bin"
+    distance_metric: L2
+    dimension: 128
+    point_type: uint8
+    base_count: 10000000
+    query_count: 10000
+    ground_truth_k: 100
+    files:
+      base: base10m.u8bin
+      query: query.u8bin
+      ground_truth: gt10m.bin
+
+  bigann-100m:
+    description: >
+      BIGANN (SIFT1B) first 100M base vectors, 128D uint8, L2. Same source
+      file as bigann-10m (base.1B.u8bin), range-downloaded to a 100M-vector
+      prefix instead of 10M. Migrated from isfcr:~/data/bigann/base100m.u8bin.
+    format: bigann_bin
+    prepare_script: tools/research/prepare_bigann.py
+    prepare_example: >
+      uv run python tools/research/prepare_bigann.py --output-dir data/bigann-100m
+      --base-count 100000000 --pipeann-bin <path-to-PipeANN-build>/tests
+    base_url: "https://dl.fbaipublicfiles.com/billion-scale-ann-benchmarks/bigann/base.1B.u8bin"
+    query_url: "https://dl.fbaipublicfiles.com/billion-scale-ann-benchmarks/bigann/query.public.10K.u8bin"
+    distance_metric: L2
+    dimension: 128
+    point_type: uint8
+    base_count: 100000000
+    query_count: 10000
+    ground_truth_k: 100
+    files:
+      base: base100m.u8bin
+      query: query.u8bin
+      ground_truth: gt100m.bin
+
+  deep-100m:
+    description: >
+      DEEP1B first 100M base vectors, 96D float32, L2. Migrated from isfcr:
+      ~/data/deep/base100m.fbin. Ground truth was not yet computed by the
+      lead researcher at migration time (see docs/PIPEANN.md provenance
+      note) - compute with tools/research/prepare_deep.py or PipeANN's
+      compute_groundtruth before using this dataset for recall-bearing runs.
+    format: bigann_bin
+    prepare_script: tools/research/prepare_deep.py
+    prepare_example: >
+      uv run python tools/research/prepare_deep.py --output-dir data/deep-100m
+      --base-count 100000000 --pipeann-bin <path-to-PipeANN-build>/tests
+    base_url: "https://storage.yandexcloud.net/yandex-research/ann-datasets/DEEP/base.1B.fbin"
+    query_url: "https://storage.yandexcloud.net/yandex-research/ann-datasets/DEEP/query.public.10K.fbin"
+    distance_metric: L2
+    dimension: 96
+    point_type: float32
+    base_count: 100000000
+    query_count: 10000
+    ground_truth_k: 100
+    files:
+      base: base100m.fbin
+      query: query.fbin
+      ground_truth: gt100m.bin

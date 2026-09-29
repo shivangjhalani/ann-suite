@@ -70,6 +70,16 @@ class CollectorSample:
     throttled_usec: int = 0
     # Queue depth (in-flight I/O ops summed over physical block devices, from /sys/block)
     queue_depth: int = 0
+    # Device-level read counters (from /sys/block/<dev>/stat), summed across physical
+    # devices. System-wide (not cgroup-scoped), but a reliable fallback for read
+    # service time when the cgroup's io.stat has no rusec/wusec (see
+    # read_device_io_totals()).
+    device_reads_completed: int = 0
+    device_read_ticks_ms: int = 0
+    # System-wide CPU busy/total jiffies (from /proc/stat), for machine-level
+    # utilization during the search window (distinct from the per-cgroup cpu_percent).
+    machine_cpu_busy_ticks: int = 0
+    machine_cpu_total_ticks: int = 0
 
 
 @dataclass
@@ -183,6 +193,13 @@ class CollectorResult:
     avg_queue_depth: float = 0.0
     max_queue_depth: int = 0
     p95_queue_depth: float | None = None
+    # Device-level (system-wide) read IOPS and mean read service time, from
+    # /sys/block/<dev>/stat deltas across the window. Fallback/complement for
+    # avg_read_service_time_ms when the cgroup's io.stat rusec is unavailable.
+    device_read_iops: float | None = None
+    device_avg_read_service_time_ms: float | None = None
+    # System-wide CPU utilization (0-1) during the window, from /proc/stat deltas.
+    machine_cpu_util: float | None = None
     # Meta
     duration_seconds: float = 0.0
     sample_count: int = 0
@@ -266,6 +283,75 @@ def read_system_queue_depth() -> int:
         return 0
 
     return total
+
+
+def read_device_io_totals() -> tuple[int, int]:
+    """Read cumulative read completions and read ticks across physical block devices.
+
+    Sources /sys/block/<dev>/stat, whose fields are (per Documentation/ABI/stable
+    /sysfs-block-device, and the same fields the PipeANN reference open-loop driver
+    reads): field 0 = reads completed, field 3 = milliseconds spent reading. These
+    are monotonic counters maintained by the kernel block layer for every device,
+    independent of cgroups, so they are available even when a cgroup's io.stat
+    lacks rusec/wusec (not all kernels/controllers populate those fields, which is
+    why `avg_read_service_time_ms` could read as 0/None despite real disk I/O).
+
+    Returns:
+        (reads_completed, read_ticks_ms) summed over all physical devices; (0, 0)
+        if /sys/block is unreadable.
+    """
+    sys_block = Path("/sys/block")
+    if not sys_block.exists():
+        return 0, 0
+
+    total_reads = 0
+    total_read_ticks_ms = 0
+    try:
+        for device_dir in sys_block.iterdir():
+            if device_dir.name.startswith(("loop", "ram", "dm-", "sr", "fd")):
+                continue
+            stat_path = device_dir / "stat"
+            if not stat_path.exists():
+                continue
+            try:
+                fields = stat_path.read_text().split()
+                # fields[0] = reads completed successfully, fields[3] = ms spent reading
+                if len(fields) >= 4:
+                    total_reads += int(fields[0])
+                    total_read_ticks_ms += int(fields[3])
+            except (ValueError, PermissionError, OSError):
+                continue
+    except (PermissionError, OSError):
+        return 0, 0
+
+    return total_reads, total_read_ticks_ms
+
+
+def read_machine_cpu_ticks() -> tuple[int, int]:
+    """Read system-wide CPU busy/total jiffies from /proc/stat's aggregate 'cpu' line.
+
+    Mirrors the PipeANN reference open-loop driver's read_cpu(): total is the sum of
+    the first 8 fields (user, nice, system, idle, iowait, irq, softirq, steal), busy
+    is total minus idle and iowait. This is a machine-wide gauge, not scoped to the
+    benchmarked container/cgroup, so it is most meaningful when the host is otherwise
+    quiet (the same caveat that applies to read_system_queue_depth()).
+
+    Returns:
+        (busy_ticks, total_ticks); (0, 0) if /proc/stat is unreadable.
+    """
+    try:
+        with open("/proc/stat") as f:
+            line = f.readline()
+        parts = line.split()
+        if not parts or parts[0] != "cpu" or len(parts) < 9:
+            return 0, 0
+        values = [int(x) for x in parts[1:9]]
+        total = sum(values)
+        idle_and_iowait = values[3] + values[4]
+        busy = total - idle_and_iowait
+        return busy, total
+    except (ValueError, PermissionError, OSError, IndexError):
+        return 0, 0
 
 
 def get_system_block_size() -> int:

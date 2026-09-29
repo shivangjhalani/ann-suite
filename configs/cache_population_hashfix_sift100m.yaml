@@ -59,7 +59,7 @@ algorithms:
 
 datasets:
   - name: sift100m
-    base_path: sift100m/queries.npy
+    base_path: sift100m/base.npy
     query_path: sift100m/queries.npy
     ground_truth_path: sift100m/ground_truth.npy
     distance_metric: L2

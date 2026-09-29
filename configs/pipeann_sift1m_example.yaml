@@ -1,0 +1,93 @@
+# PipeANN on SIFT1M: builds a Vamana disk index (+ in-memory entry point),
+# then runs a closed-loop Ls sweep and an open-loop (Poisson arrival) rate
+# sweep against it. See docs/PIPEANN.md and docs/OPEN_LOOP.md.
+#
+#   uv run ann-suite build --algorithm pipeann
+#   uv run ann-suite run --config configs/pipeann_sift1m_example.yaml
+
+name: "PipeANN on SIFT1M (closed-loop + open-loop)"
+description: "PipeANN pipelined search: closed-loop Ls sweep, then an open-loop arrival-rate sweep at a fixed Ls."
+data_dir: "./data"
+results_dir: "./results"
+index_dir: "./indices"
+monitor_interval_ms: 50
+
+algorithms:
+  # Closed-loop: ordinary back-to-back queries, sweeping Ls (candidate list
+  # size) for a recall/latency curve.
+  - name: PipeANN
+    docker_image: ann-suite/pipeann:latest
+    algorithm_type: disk
+    datasets: [sift1m]
+    build:
+      timeout_seconds: 3600
+      args:
+        index_prefix: pipeann
+        R: 64
+        L: 100
+        pq_bytes: 32
+        build_memory_gb: 32
+        num_threads: 16
+        nbr_type: pq          # pq (supports update) | rabitq | rabitq{3-5} (search-only)
+        build_mem_index: true # in-memory entry-point index from a 1% sample
+    search:
+      timeout_seconds: 1200
+      k: 10
+      batch_mode: false
+      args:
+        index_prefix: pipeann
+        mode: 2                # 0 DiskANN beam search, 2 PipeANN pipelined (recommended), 3 CoroSearch
+        beam_width: 32
+        mem_L: 10               # 0 to skip the in-memory entry-point index
+        num_threads: 8
+        Ls: [20, 40, 60, 80]     # sweeps -> one benchmark point per value
+        sqpoll: true             # false -> PIPEANN_SQPOLL=0 (disable io_uring SQPOLL per thread)
+        # qstar: 64              # PIPEANN_QSTAR: device queue depth governor cap (unset = stock behavior)
+        # wmin: 2                # PIPEANN_WMIN: minimum per-query in-flight width under the governor
+
+  # Open-loop: same built index (reuse_index keeps the build from the point
+  # above), fixed Ls, sweeping the Poisson arrival rate to find the
+  # latency-under-load knee.
+  - name: PipeANN-openloop
+    docker_image: ann-suite/pipeann:latest
+    algorithm_type: disk
+    datasets: [sift1m]
+    build:
+      timeout_seconds: 3600
+      args:
+        index_prefix: pipeann
+        R: 64
+        L: 100
+        pq_bytes: 32
+        build_memory_gb: 32
+        num_threads: 16
+        nbr_type: pq
+        build_mem_index: true
+    search:
+      timeout_seconds: 1800
+      k: 10
+      args:
+        index_prefix: pipeann
+        mode: 2
+        beam_width: 32
+        mem_L: 10
+        num_threads: 8
+      arrival:
+        mode: poisson
+        rate_qps: [500, 1000, 2000, 4000, 8000]
+        num_queries: 50000
+        seed: 12345
+        warmup_fraction: 0.1
+        num_workers: 8       # defaults to search.args.num_threads when omitted
+        raw_dump: false
+
+datasets:
+  - name: sift1m
+    base_path: sift1m/base.npy
+    query_path: sift1m/queries.npy
+    ground_truth_path: sift1m/ground_truth.npy
+    distance_metric: L2
+    dimension: 128
+    point_type: uint8
+    base_count: 1000000
+    query_count: 10000

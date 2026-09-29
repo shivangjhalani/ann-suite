@@ -100,7 +100,7 @@ datasets:
   - name: sift100m
     # The prebuilt indexes contain the 100M base vectors, so the suite only
     # needs a small placeholder base to satisfy its dataset contract.
-    base_path: sift100m/queries.npy
+    base_path: sift100m/base.npy
     query_path: sift100m/queries.npy
     ground_truth_path: sift100m/ground_truth.npy
     distance_metric: L2
