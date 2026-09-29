@@ -104,3 +104,6 @@ data/
 !data/sift1m/metadata.yaml
 !data/sift10m/
 !data/sift10m/metadata.yaml
+
+# Scratch experiment outputs (large binaries, not source)
+experiments/
