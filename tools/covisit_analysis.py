@@ -15,6 +15,7 @@ Note on the FLOOR: ceil(distinct/NPS) is only achievable if a single static layo
 satisfy every query at once. When queries overlap partially it is unachievable, so the
 floor is a loose bound and the greedy number is the meaningful one.
 """
+
 import numpy as np, sys
 from collections import defaultdict
 
@@ -23,14 +24,17 @@ path = sys.argv[1]
 raw = np.fromfile(path, dtype=np.uint32)
 qs, i = [], 0
 while i < len(raw):
-    n = int(raw[i]); i += 1
-    qs.append(np.unique(raw[i:i+n])); i += n
+    n = int(raw[i])
+    i += 1
+    qs.append(np.unique(raw[i : i + n]))
+    i += n
 
 uniq = np.array([len(q) for q in qs])
 print(f"queries {len(qs):,}  distinct/query mean {uniq.mean():.2f}")
-print(f"FLOOR (loose)        {np.ceil(uniq/NPS).mean():.2f} pages/query")
-today = np.array([len(np.unique(q//NPS)) for q in qs])
+print(f"FLOOR (loose)        {np.ceil(uniq / NPS).mean():.2f} pages/query")
+today = np.array([len(np.unique(q // NPS)) for q in qs])
 print(f"TODAY (build order)  {today.mean():.2f} pages/query")
+
 
 def greedy_pack(query_list, cap=64):
     """Seed each page with the highest-weight unplaced node, fill with its strongest
@@ -48,28 +52,40 @@ def greedy_pack(query_list, cap=64):
     order = sorted(deg, key=lambda x: -deg[x])
     slot, nxt, placed = {}, 0, set()
     for seed in order:
-        if seed in placed: continue
-        page = [seed]; placed.add(seed)
+        if seed in placed:
+            continue
+        page = [seed]
+        placed.add(seed)
         for b, _ in sorted(co[seed].items(), key=lambda kv: -kv[1])[:cap]:
-            if len(page) >= NPS: break
+            if len(page) >= NPS:
+                break
             if b not in placed:
-                page.append(b); placed.add(b)
-        for nid in page: slot[nid] = nxt; nxt += 1
-        if len(page) < NPS: nxt += (NPS - len(page))
+                page.append(b)
+                placed.add(b)
+        for nid in page:
+            slot[nid] = nxt
+            nxt += 1
+        if len(page) < NPS:
+            nxt += NPS - len(page)
     return slot, nxt
+
 
 def score(slot, query_list, label, fb):
     per = []
     for q in query_list:
-        pages = {(slot[n]//NPS) if n in slot else fb + int(n)//NPS for n in q.tolist()}
+        pages = {(slot[n] // NPS) if n in slot else fb + int(n) // NPS for n in q.tolist()}
         per.append(len(pages))
-    m = float(np.mean(per)); print(f"{label:<38} {m:>8.2f} pages/query"); return m
+    m = float(np.mean(per))
+    print(f"{label:<38} {m:>8.2f} pages/query")
+    return m
 
-s, nx = greedy_pack(qs); score(s, qs, "GREEDY co-visit (foreknowledge)", nx)
-half = len(qs)//2
+
+s, nx = greedy_pack(qs)
+score(s, qs, "GREEDY co-visit (foreknowledge)", nx)
+half = len(qs) // 2
 sa, na = greedy_pack(qs[:half])
 cov = sum(1 for q in qs[half:] for n in q.tolist() if n in sa)
 tot = sum(len(q) for q in qs[half:])
-print(f"held-out coverage {cov:,}/{tot:,} ({cov/tot*100:.1f}%)")
+print(f"held-out coverage {cov:,}/{tot:,} ({cov / tot * 100:.1f}%)")
 score(sa, qs[half:], "GREEDY held-out (DEPLOYABLE)", na)
 score({}, qs[half:], "  control: build order", 0)

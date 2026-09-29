@@ -81,9 +81,9 @@ python -m algorithm.runner --mode <build|search> --config '<json_string>'
     "p50_latency_ms": 0.4,
     "p95_latency_ms": 0.8,
     "p99_latency_ms": 1.2,
-    "load_duration_seconds": 0.1,
-    "load_start_timestamp": "2026-01-28T21:46:45.000000+00:00",
-    "load_end_timestamp": "2026-01-28T21:46:45.100000+00:00",
+    "warmup_duration_seconds": 0.1,
+    "warmup_start_timestamp": "2026-01-28T21:46:45.000000+00:00",
+    "warmup_end_timestamp": "2026-01-28T21:46:45.100000+00:00",
     "query_start_timestamp": "2026-01-28T21:46:45.100000+00:00",
     "query_end_timestamp": "2026-01-28T21:46:45.600000+00:00"
 }
@@ -91,9 +91,9 @@ python -m algorithm.runner --mode <build|search> --config '<json_string>'
 
 > [!WARNING]
 > **Required for Research-Grade Metrics**: The timestamp fields enable accurate resource metrics:
-> - `load_duration_seconds`: Time spent loading the index from disk
-> - `load_start_timestamp`: ISO-8601 UTC timestamp when index loading began
-> - `load_end_timestamp`: ISO-8601 UTC timestamp when index loading completed
+> - `warmup_duration_seconds`: Warmup window: index load plus any untimed cache-warmup queries
+> - `warmup_start_timestamp`: ISO-8601 UTC timestamp when the warmup window (index load) began
+> - `warmup_end_timestamp`: ISO-8601 UTC timestamp when the warmup window ended
 > - `query_start_timestamp`: ISO-8601 UTC timestamp when query execution began
 > - `query_end_timestamp`: ISO-8601 UTC timestamp when query execution ended
 >
@@ -200,7 +200,7 @@ def run_search(config: dict) -> dict:
         "qps": len(queries) / total_time,
         "recall": recall,
         # ... latency percentiles
-        "load_duration_seconds": load_duration_seconds,
+        "warmup_duration_seconds": load_duration_seconds,
         "query_start_timestamp": query_start_timestamp,
         "query_end_timestamp": query_end_timestamp,
     }
@@ -388,9 +388,9 @@ def run_search(config):
         "recall": recall,
         **latency_stats,
         # Required for research-grade metrics:
-        "load_duration_seconds": load_duration,
-        "load_start_timestamp": load_start.isoformat(),
-        "load_end_timestamp": load_end.isoformat(),
+        "warmup_duration_seconds": load_duration,
+        "warmup_start_timestamp": load_start.isoformat(),
+        "warmup_end_timestamp": load_end.isoformat(),
         "query_start_timestamp": query_start.isoformat(),
         "query_end_timestamp": query_end.isoformat(),
     }

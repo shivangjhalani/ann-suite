@@ -140,8 +140,16 @@ class TestCgroupsV2Collector:
         collector = CgroupsV2Collector(interval_ms=100)
         now = datetime.now()
 
-        def sample(i: int, *, some: int, full: int, pgmajfault: int, pgfault: int,
-                   nr_throttled: int, throttled_usec: int) -> CollectorSample:
+        def sample(
+            i: int,
+            *,
+            some: int,
+            full: int,
+            pgmajfault: int,
+            pgfault: int,
+            nr_throttled: int,
+            throttled_usec: int,
+        ) -> CollectorSample:
             return CollectorSample(
                 timestamp=now + timedelta(seconds=i),
                 memory_usage_bytes=100 * 1024 * 1024,
@@ -160,9 +168,33 @@ class TestCgroupsV2Collector:
 
         # Healthy run: counters increase, then a final post-exit sample reads zeros.
         collector._samples = [
-            sample(0, some=1000, full=500, pgmajfault=10, pgfault=1000, nr_throttled=0, throttled_usec=0),
-            sample(1, some=5000, full=2500, pgmajfault=50, pgfault=5000, nr_throttled=2, throttled_usec=4000),
-            sample(2, some=9000, full=4500, pgmajfault=90, pgfault=9000, nr_throttled=4, throttled_usec=8000),
+            sample(
+                0,
+                some=1000,
+                full=500,
+                pgmajfault=10,
+                pgfault=1000,
+                nr_throttled=0,
+                throttled_usec=0,
+            ),
+            sample(
+                1,
+                some=5000,
+                full=2500,
+                pgmajfault=50,
+                pgfault=5000,
+                nr_throttled=2,
+                throttled_usec=4000,
+            ),
+            sample(
+                2,
+                some=9000,
+                full=4500,
+                pgmajfault=90,
+                pgfault=9000,
+                nr_throttled=4,
+                throttled_usec=8000,
+            ),
             # post-exit teardown sample: all counters reset to zero
             sample(3, some=0, full=0, pgmajfault=0, pgfault=0, nr_throttled=0, throttled_usec=0),
         ]

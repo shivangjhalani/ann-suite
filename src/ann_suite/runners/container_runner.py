@@ -752,10 +752,8 @@ class ContainerRunner:
                     logger.warning(f"Failed to cleanup metrics file: {e}")
             error_msg = output.get("error_message") if output.get("status") == "error" else None
 
-            # Calculate warmup phase metrics if timestamps available
-            # Support both old "load_" and new "warmup_" field names for backward compatibility
-            warmup_start = output.get("warmup_start_timestamp", output.get("load_start_timestamp"))
-            warmup_end = output.get("warmup_end_timestamp", output.get("load_end_timestamp"))
+            warmup_start = output.get("warmup_start_timestamp")
+            warmup_end = output.get("warmup_end_timestamp")
             warmup_resources_obj = None
 
             if warmup_start and warmup_end:

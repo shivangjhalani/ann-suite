@@ -35,7 +35,9 @@ from pathlib import Path
 DIM = 96
 BYTES_PER_COMPONENT = 4
 BASE_URL = "https://storage.yandexcloud.net/yandex-research/ann-datasets/DEEP/base.1B.fbin"
-QUERY_URL = "https://storage.yandexcloud.net/yandex-research/ann-datasets/DEEP/query.public.10K.fbin"
+QUERY_URL = (
+    "https://storage.yandexcloud.net/yandex-research/ann-datasets/DEEP/query.public.10K.fbin"
+)
 HEADER_BYTES = 8
 
 
@@ -80,13 +82,25 @@ def compute_ground_truth_native(
     if not compute_gt.exists():
         raise FileNotFoundError(f"compute_groundtruth not found at {compute_gt}")
     subprocess.run(
-        [str(compute_gt), "float", "l2", str(base), str(query), str(k), str(output), "null", "null"],
+        [
+            str(compute_gt),
+            "float",
+            "l2",
+            str(base),
+            str(query),
+            str(k),
+            str(output),
+            "null",
+            "null",
+        ],
         check=True,
     )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--base-count", type=int, required=True)
     parser.add_argument("--pipeann-bin", type=Path, default=None, help="PipeANN build/tests dir")
@@ -97,7 +111,9 @@ def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    query_path = download_query(args.output_dir) if not args.skip_query else args.output_dir / "query.fbin"
+    query_path = (
+        download_query(args.output_dir) if not args.skip_query else args.output_dir / "query.fbin"
+    )
     base_path = range_download_base(args.output_dir, args.base_count)
 
     print(f"base: {base_path}", file=sys.stderr)

@@ -4,7 +4,7 @@ Covers:
 - build_combo_slug: determinism, order-insensitivity, uniqueness, sanitization
 - BuildConfig.reuse_index schema field
 - Evaluator loop restructure: build-once/search-many with reuse_index=True
-- Legacy behavior: rebuild per point with reuse_index=False
+- Rebuild per point with reuse_index=False
 - Build x search cartesian product pairing
 - Build failure fan-out (one failed result per search combo)
 """
@@ -182,9 +182,7 @@ datasets:
 
 
 class TestPrebuiltIndexes:
-    def test_prebuilt_path_skips_build_and_mounts_resolved_directory(
-        self, tmp_path: Path
-    ) -> None:
+    def test_prebuilt_path_skips_build_and_mounts_resolved_directory(self, tmp_path: Path) -> None:
         evaluator, container_runner = make_evaluator(tmp_path)
         prebuilt = tmp_path / "indices" / "diskann"
         prebuilt.mkdir(parents=True)
@@ -394,7 +392,7 @@ class TestRunLoopNesting:
         assert [c.kwargs["mode"] for c in runner.run_phase.call_args_list].count("build") == 2
         assert [c.kwargs["mode"] for c in runner.run_phase.call_args_list].count("search") == 4
 
-    def test_legacy_mode_rebuilds_per_point(self, tmp_path: Path) -> None:
+    def test_no_reuse_rebuilds_per_point(self, tmp_path: Path) -> None:
         algo = make_algo(
             build={"reuse_index": False},
             search={"k": 10, "args": {"Ls": [10, 20]}},

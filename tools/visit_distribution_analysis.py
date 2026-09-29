@@ -42,8 +42,8 @@ def main() -> None:
     touched = int((counts > 0).sum())
 
     print(f"nodes:          {len(counts):,}")
-    print(f"total visits:   {total:,}  ({total/args.queries:.4f} per query -- this is A)")
-    print(f"nodes touched:  {touched:,} ({touched/len(counts)*100:.4f}% of the graph)")
+    print(f"total visits:   {total:,}  ({total / args.queries:.4f} per query -- this is A)")
+    print(f"nodes touched:  {touched:,} ({touched / len(counts) * 100:.4f}% of the graph)")
     print(f"max visits:     {counts.max():,} on a single node")
 
     points = [n for n in [10**e for e in range(0, 9)] if n <= len(counts)]
@@ -52,13 +52,17 @@ def main() -> None:
 
     h = lorenz(counts, points)
     uniform = 1.0 / len(counts)
-    print(f"\n{'N':>12} {'fraction':>10} {'H(N)':>9} {'lift':>10} {'marginal/node':>14} {'vs random':>10}")
+    print(
+        f"\n{'N':>12} {'fraction':>10} {'H(N)':>9} {'lift':>10} {'marginal/node':>14} {'vs random':>10}"
+    )
     prev_n, prev_h = 0, 0.0
     for n in points:
         frac = n / len(counts)
         marginal = (h[n] - prev_h) / (n - prev_n)
-        print(f"{n:>12,} {frac:>10.6f} {h[n]:>9.4f} {h[n]/frac:>9.1f}x "
-              f"{marginal:>14.3e} {marginal/uniform:>9.2f}x")
+        print(
+            f"{n:>12,} {frac:>10.6f} {h[n]:>9.4f} {h[n] / frac:>9.1f}x "
+            f"{marginal:>14.3e} {marginal / uniform:>9.2f}x"
+        )
         prev_n, prev_h = n, h[n]
 
     if not args.cache_list:
@@ -72,8 +76,10 @@ def main() -> None:
         h_diskann = float(counts[chosen].astype(np.int64).sum()) / total
         h_oracle = h[n]
         captured = h_diskann / h_oracle if h_oracle > 0 else float("nan")
-        print(f"{n:>12,} {h_diskann:>11.4f} {h_oracle:>10.4f} {captured*100:>9.1f}% "
-              f"{h_oracle-h_diskann:>9.4f}")
+        print(
+            f"{n:>12,} {h_diskann:>11.4f} {h_oracle:>10.4f} {captured * 100:>9.1f}% "
+            f"{h_oracle - h_diskann:>9.4f}"
+        )
     print("\ncaptured = fraction of the achievable hit rate DiskANN's sample-based")
     print("selection actually gets. 100% would mean its ranking matches the oracle.")
 

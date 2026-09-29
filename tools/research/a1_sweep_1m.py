@@ -4,6 +4,7 @@ failure across R in {32,64,96} at 1M scale, plus a beam-width sweep on R=32
 to quantify how much beam search recovers vs. pure greedy (mirrors the
 HNSW ef sweep for direct algorithm comparison).
 """
+
 from __future__ import annotations
 import sys
 import numpy as np
@@ -52,8 +53,11 @@ def main():
         32: "/home/gem/shivang/ann-suite/indices/DiskANN/sift1m-prebuilt/L-50_R-32_build-memory-maximum-0-27_index-prefix-c9390d63/ann_disk.index",
     }
     import glob
+
     for R in (64, 96):
-        hits = glob.glob(f"/home/gem/shivang/ann-suite/indices/DiskANN/sift1m/L-100_R-{R}_*/ann_disk.index")
+        hits = glob.glob(
+            f"/home/gem/shivang/ann-suite/indices/DiskANN/sift1m/L-100_R-{R}_*/ann_disk.index"
+        )
         if hits:
             paths[R] = hits[0]
         else:
@@ -65,7 +69,7 @@ def main():
         deg = nv.mean_out_degree(adj)
         eps_l = nv.local_failure(base, adj, rng, 20000)
         eps_g = nv.global_failure(base, adj, medoid, rng, 2000, max_hops=200)
-        print(f"{R:>4} {deg:>7.2f} {eps_l:>10.4f} {eps_g:>18.4f} {1/deg:>8.4f}")
+        print(f"{R:>4} {deg:>7.2f} {eps_l:>10.4f} {eps_g:>18.4f} {1 / deg:>8.4f}")
 
     print("\nBeam-width sweep on R=32 (does small beam width recover navigability, like HNSW ef?):")
     adj, medoid, npts = nv.parse_disk_index_graph_only(paths[32])

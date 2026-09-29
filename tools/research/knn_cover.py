@@ -70,23 +70,34 @@ def load_ground_truth(path: Path, fmt: str, count: int | None = None) -> np.ndar
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--base", type=Path, required=True)
     parser.add_argument("--base-format", choices=["npy", "bigann_bin"], default="npy")
-    parser.add_argument("--base-dtype", default="uint8", help="numpy dtype for bigann_bin base file")
+    parser.add_argument(
+        "--base-dtype", default="uint8", help="numpy dtype for bigann_bin base file"
+    )
     parser.add_argument("--queries", type=Path, required=True)
     parser.add_argument("--query-format", choices=["npy", "bigann_bin"], default="npy")
-    parser.add_argument("--query-dtype", default="uint8", help="numpy dtype for bigann_bin query file")
+    parser.add_argument(
+        "--query-dtype", default="uint8", help="numpy dtype for bigann_bin query file"
+    )
     parser.add_argument("--ground-truth", type=Path, required=True)
     parser.add_argument("--gt-format", choices=["npy", "bigann_bin"], default="npy")
     parser.add_argument("--dim", type=int, required=True)
     parser.add_argument("--num-queries", type=int, default=2000)
     parser.add_argument(
-        "--anchor-ranks", type=int, nargs="+", default=[0, 1, 4],
+        "--anchor-ranks",
+        type=int,
+        nargs="+",
+        default=[0, 1, 4],
         help="0-indexed ground-truth ranks to use as expansion anchors (default: rank1,2,5)",
     )
     parser.add_argument("--anchor-k", type=int, nargs="+", default=[16, 32, 64])
-    parser.add_argument("--gt-depth", type=int, default=10, help="Depth of 'true top-k' being covered")
+    parser.add_argument(
+        "--gt-depth", type=int, default=10, help="Depth of 'true top-k' being covered"
+    )
     parser.add_argument("--add-batch-size", type=int, default=1_000_000)
     args = parser.parse_args()
 
@@ -119,8 +130,7 @@ def main() -> None:
                 ]
             )
             print(
-                f"anchor=rank{rank + 1} k={k} "
-                f"coverage_of_true_top{args.gt_depth}={cov:.3f}",
+                f"anchor=rank{rank + 1} k={k} coverage_of_true_top{args.gt_depth}={cov:.3f}",
                 flush=True,
             )
 

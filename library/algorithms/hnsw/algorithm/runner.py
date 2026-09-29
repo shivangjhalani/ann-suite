@@ -285,7 +285,7 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
         warmup_start_timestamp = datetime.now(UTC).isoformat()
         warmup_start = time.perf_counter()
 
-        # Track legacy "load_*" timing for backward compatibility / diagnostics
+        # Index-load timing, reported separately from cache warmup
         load_start_timestamp = datetime.now(UTC).isoformat()
         load_start = time.perf_counter()
 
@@ -403,7 +403,7 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
             "query_end_timestamp": query_end_timestamp,
             "warmup_start_timestamp": warmup_start_timestamp,
             "warmup_end_timestamp": warmup_end_timestamp,
-            # Backward-compatible legacy load timing
+            # Index-load portion of the warmup window
             "load_duration_seconds": load_duration_seconds,
             "load_start_timestamp": load_start_timestamp,
             "load_end_timestamp": load_end_timestamp,

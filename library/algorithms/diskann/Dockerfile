@@ -41,8 +41,8 @@ RUN echo "deb [trusted=yes] https://apt.repos.intel.com/mkl all main" \
     apt-get update && apt-get install -y --no-install-recommends intel-mkl-64bit-2020.4-912 && \
     rm -rf /var/lib/apt/lists/*
 
-# Fetch upstream DiskANN on the cpp_main branch (diskannpy 0.7.1, which matches
-# the local checkout /home/gem/shivang/DiskANN/diskann_code) and apply the
+# Fetch upstream DiskANN on the cpp_main branch (diskannpy 0.7.1, the same commit
+# as the native build in ~/diskann/DiskANN on the isfcr host) and apply the
 # search-statistics patch. cpp_main currently points at 78256bbab... (= 0.7.1);
 # pin to that commit for reproducibility.
 ARG DISKANN_COMMIT=78256bbab4685e1774e78d331e081a153be26823

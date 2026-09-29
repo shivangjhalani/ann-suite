@@ -328,9 +328,9 @@ python -m algorithm.runner --mode search --config '{"index_path": "/data/index",
     "p50_latency_ms": 0.20,
     "p95_latency_ms": 0.45,
     "p99_latency_ms": 0.80,
-    "load_duration_seconds": 0.15,
-    "load_start_timestamp": "2026-01-29T10:00:00.000000+00:00",
-    "load_end_timestamp": "2026-01-29T10:00:00.150000+00:00",
+    "warmup_duration_seconds": 0.15,
+    "warmup_start_timestamp": "2026-01-29T10:00:00.000000+00:00",
+    "warmup_end_timestamp": "2026-01-29T10:00:00.150000+00:00",
     "query_start_timestamp": "2026-01-29T10:00:00.150000+00:00",
     "query_end_timestamp": "2026-01-29T10:00:00.650000+00:00"
 }
@@ -338,7 +338,7 @@ python -m algorithm.runner --mode search --config '{"index_path": "/data/index",
 
 > [!IMPORTANT]
 > **Required for research-grade metrics**: The timestamp fields enable query-window filtering:
-> - `load_start_timestamp` / `load_end_timestamp`: Index loading phase boundaries
+> - `warmup_start_timestamp` / `warmup_end_timestamp`: Index loading phase boundaries
 > - `query_start_timestamp` / `query_end_timestamp`: Query execution boundaries
 >
 > Timestamps must be ISO-8601 format with timezone (UTC recommended).

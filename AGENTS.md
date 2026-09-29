@@ -29,17 +29,20 @@ uv run ann-suite run --config configs/example.yaml
   - `core/schemas.py`: Pydantic models - key types: `BenchmarkConfig`, `AlgorithmConfig`, `DatasetConfig`, `BenchmarkResult`, `ContainerProtocol`
   - `core/config.py`: YAML/JSON config loading with validation
   - `runners/container_runner.py`: Docker lifecycle (volumes mount to `/data`, `/data/index`, `/results`)
-  - `monitoring/`: `ResourceMonitor` (Docker stats), `CgroupsV2Collector` (enhanced I/O metrics)
+  - `monitoring/`: `CgroupsV2Collector` reads the container's cgroup v2 files (CPU, memory, io.stat, PSI); `base.py` has collector types and device-level readers
   - `datasets/`: Download and load HDF5/NumPy datasets
   - `results/storage.py`: JSON/CSV result persistence
-- **library/algorithms/**: Each algorithm has Dockerfile + `runner.py`; use `base_runner.py` utilities
-- **configs/**: YAML benchmark configs with parameter sweeps (list values auto-expand)
+- **library/algorithms/**: Each algorithm has a Dockerfile + `algorithm/runner.py`; shared helpers (recall, latency percentiles) live in `library/algorithms/utils.py`. Variant images (`Dockerfile.hashfix`, `.visittrace`, `.cachedump`) apply extra DiskANN patches
+- **configs/**: current benchmark configs; `configs/archive/` holds configs of past experiments (cited from the research vault)
+- **tools/**: result analysis scripts; `tools/research/` holds offline research analyses (navigability, co-location, dataset prep)
 
 ## Key Patterns
 
 - **Container protocol**: Algorithms receive JSON config via `--mode build|search --config '{...}'`, output JSON to stdout or `/results/metrics.json`
 - **Metrics hierarchy**: `BenchmarkResult` contains structured `CPUMetrics`, `MemoryMetrics`, `DiskIOMetrics`, `LatencyMetrics`
-- **Parameter sweeps**: List values in `search.args` expand via `itertools.product`
+- **Parameter sweeps**: list values in `build.args`/`search.args` expand via `itertools.product`; `search.sweep` gives explicit points. Each unique build is built once and reused by its search points
+- **Fair comparison**: set the top-level `resources:` (memory_limit, cpu_affinity) so every algorithm gets the same budget; results record it in `run_conditions`
+- **Cache reset**: every search point runs in a fresh container after an OS page-cache drop (`drop_caches_before`, default true; set `ANN_SUITE_SUDO_PASSWORD` when sudo needs a password). A failed drop fails the point
 - **Error handling**: Return partial `BenchmarkResult` on failure; check `PhaseResult.success`
 
 ## Code Style

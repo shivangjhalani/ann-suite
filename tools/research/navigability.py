@@ -13,6 +13,7 @@ against the R=32/64/96 sift-10k indices already built on this box) and computes:
 then compares both against the Theta(1/R) frontier predicted by
 arXiv:2607.14564 / arXiv:2609.02498.
 """
+
 from __future__ import annotations
 
 import struct
@@ -30,8 +31,11 @@ def parse_disk_index_graph_only(path: str):
     assert ndims_meta == 1
     meta = struct.unpack_from(f"<{npts_meta}Q", raw, 8)
     npts, ndims, medoid, max_node_len, nnodes_per_sector = meta[0:5]
-    print(f"  npts={npts} ndims={ndims} medoid={medoid} max_node_len={max_node_len} "
-          f"nnodes_per_sector={nnodes_per_sector}", file=sys.stderr)
+    print(
+        f"  npts={npts} ndims={ndims} medoid={medoid} max_node_len={max_node_len} "
+        f"nnodes_per_sector={nnodes_per_sector}",
+        file=sys.stderr,
+    )
 
     SECTOR_LEN = 4096
     elem_size = None
@@ -69,8 +73,11 @@ def parse_disk_index(path: str):
     meta = struct.unpack_from(f"<{npts_meta}Q", raw, 8)
     npts, ndims, medoid, max_node_len, nnodes_per_sector = meta[0:5]
     vamana_frozen_num, vamana_frozen_loc, append_reorder = meta[5:8]
-    print(f"  npts={npts} ndims={ndims} medoid={medoid} max_node_len={max_node_len} "
-          f"nnodes_per_sector={nnodes_per_sector}", file=sys.stderr)
+    print(
+        f"  npts={npts} ndims={ndims} medoid={medoid} max_node_len={max_node_len} "
+        f"nnodes_per_sector={nnodes_per_sector}",
+        file=sys.stderr,
+    )
 
     SECTOR_LEN = 4096
     # detect element size (float32 coords, or uint8 PQ-compressed disk_pq mode):
@@ -97,7 +104,9 @@ def parse_disk_index(path: str):
             if cur_id >= npts:
                 break
             node_off = sec_off + slot * max_node_len
-            coords = np.frombuffer(raw, dtype=dtype, count=ndims, offset=node_off).astype(np.float32)
+            coords = np.frombuffer(raw, dtype=dtype, count=ndims, offset=node_off).astype(
+                np.float32
+            )
             vecs[cur_id] = coords
             nnbrs = struct.unpack_from("<I", raw, node_off + coord_bytes)[0]
             nbrs = struct.unpack_from(f"<{nnbrs}I", raw, node_off + coord_bytes + 4)
@@ -108,7 +117,9 @@ def parse_disk_index(path: str):
     return vecs, adj, medoid
 
 
-def local_failure(vecs: np.ndarray, adj: list[list[int]], rng: np.random.Generator, n_samples: int) -> float:
+def local_failure(
+    vecs: np.ndarray, adj: list[list[int]], rng: np.random.Generator, n_samples: int
+) -> float:
     n = len(vecs)
     fails = 0
     trials = 0
@@ -126,8 +137,14 @@ def local_failure(vecs: np.ndarray, adj: list[list[int]], rng: np.random.Generat
     return fails / trials if trials else float("nan")
 
 
-def global_failure(vecs: np.ndarray, adj: list[list[int]], medoid: int, rng: np.random.Generator,
-                    n_samples: int, max_hops: int = 100) -> float:
+def global_failure(
+    vecs: np.ndarray,
+    adj: list[list[int]],
+    medoid: int,
+    rng: np.random.Generator,
+    n_samples: int,
+    max_hops: int = 100,
+) -> float:
     n = len(vecs)
     fails = 0
     for _ in range(n_samples):
@@ -181,10 +198,14 @@ def main():
         results.append((R, deg, eps_l, eps_g, pred))
         print(f"{R:>10} {deg:>9.2f} {eps_l:>10.4f} {eps_g:>11.4f} {pred:>9.4f}")
 
-    print("\nGap (eps_global / eps_local), i.e. how much worse end-to-end greedy is than the local edge condition:")
+    print(
+        "\nGap (eps_global / eps_local), i.e. how much worse end-to-end greedy is than the local edge condition:"
+    )
     for R, deg, eps_l, eps_g, pred in results:
         ratio = eps_g / eps_l if eps_l > 0 else float("inf")
-        print(f"  R={R}: eps_local={eps_l:.4f} eps_global={eps_g:.4f} ratio={ratio:.2f}x  (1/R predicts {pred:.4f})")
+        print(
+            f"  R={R}: eps_local={eps_l:.4f} eps_global={eps_g:.4f} ratio={ratio:.2f}x  (1/R predicts {pred:.4f})"
+        )
 
 
 if __name__ == "__main__":

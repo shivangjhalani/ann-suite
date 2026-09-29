@@ -77,6 +77,22 @@ tools/research/fio_characterize.sh \
   results/fio/bigann10m_nvme.tsv
 ```
 
+## Graph navigability (Direction A1)
+
+Measure how often greedy / beam search fails to reach a target on a built graph.
+
+- `navigability.py` - parses DiskANN's disk-index layout and measures local and
+  global greedy-search failure rates (library module, also runnable).
+- `a1_sweep_1m.py` - navigability failure across R in {32,64,96} at 1M, plus a
+  beam-width sweep on R=32.
+- `beam_sweep_fixed.py <dataset> [n_samples]` - beam-width recovery sweep for
+  DiskANN (best-first search matching DiskANN's search list).
+- `hnsw_navigability.py` - the same global-failure measurement on an HNSW graph
+  (needs `hnswlib`, in the `research` group).
+
+Run from the repo root, e.g. `uv run python tools/research/beam_sweep_fixed.py sift-10k 1000`;
+the scripts import `navigability` from their own directory.
+
 ## Provenance
 
 Ported 2026-09 from `~/research/py/{colocate.py,largek.py,knn_cover.py}` and

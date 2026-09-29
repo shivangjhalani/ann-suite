@@ -103,11 +103,11 @@ were verified identical before/after for every file.
 
 | Config | Reproduces | Notes |
 |---|---|---|
-| `pipeann_bigann10m_degree_build.yaml` | `~/data/build_deg.sh` + `~/data/build10m.sh` | Fresh-builds R in {32,64,128,256} at their paired L (128/128/192/320). R=512 excluded (aborted upstream). |
-| `pipeann_bigann10m_prebuilt_degrees.yaml` | Same R sweep, search-only | Reuses the migrated prebuilt indices above via `build.prebuilt_path` instead of rebuilding - use this one unless you're specifically testing the build phase. |
-| `pipeann_sqpoll_comparison.yaml` | isfcr SQPOLL on/off A/B test | Pipe mode W=32, 24 workers, BIGANN-10M R=64, rates 500/2000/4000 QPS. |
-| `pipeann_closed_loop_lsweep.yaml` | Closed-loop 1-thread Ls x mem_L sweep | beam W8 (mode 0) vs pipe W32 (mode 2), Ls in {20,40,80,150} x mem_L in {0,10}. |
-| `pipeann_ol4_static_width_sweep.yaml` | `~/research/runs/ol4.sh` | Open-loop static-width sweep: beamW4/W8, pipeW4/8/16/32, rates 500/2000/3500/4500 QPS. See the config's header comment for the `num_queries` reproduction caveat. |
+| `archive/pipeann_bigann10m_degree_build.yaml` | `~/data/build_deg.sh` + `~/data/build10m.sh` | Fresh-builds R in {32,64,128,256} at their paired L (128/128/192/320). R=512 excluded (aborted upstream). |
+| `archive/pipeann_bigann10m_prebuilt_degrees.yaml` | Same R sweep, search-only | Reuses the migrated prebuilt indices above via `build.prebuilt_path` instead of rebuilding - use this one unless you're specifically testing the build phase. |
+| `archive/pipeann_sqpoll_comparison.yaml` | isfcr SQPOLL on/off A/B test | Pipe mode W=32, 24 workers, BIGANN-10M R=64, rates 500/2000/4000 QPS. |
+| `archive/pipeann_closed_loop_lsweep.yaml` | Closed-loop 1-thread Ls x mem_L sweep | beam W8 (mode 0) vs pipe W32 (mode 2), Ls in {20,40,80,150} x mem_L in {0,10}. |
+| `archive/pipeann_ol4_static_width_sweep.yaml` | `~/research/runs/ol4.sh` | Open-loop static-width sweep: beamW4/W8, pipeW4/8/16/32, rates 500/2000/3500/4500 QPS. See the config's header comment for the `num_queries` reproduction caveat. |
 | `pipeann_prebuilt_example.yaml` | n/a | Generic illustrative example (sift1m), not tied to isfcr data. |
 
 All BIGANN-10M search-only configs above use `index_prefix: idx` (matching
@@ -122,10 +122,10 @@ On the isfcr research host, once `~/research/BENCH_LOCK` is clear:
 ```bash
 cd ~/shivang/ann-suite
 uv run ann-suite build --algorithm pipeann      # once, or after algorithm changes
-uv run ann-suite run --config configs/pipeann_bigann10m_prebuilt_degrees.yaml
-uv run ann-suite run --config configs/pipeann_sqpoll_comparison.yaml
-uv run ann-suite run --config configs/pipeann_closed_loop_lsweep.yaml
-uv run ann-suite run --config configs/pipeann_ol4_static_width_sweep.yaml   # x3 for "3 reps"
+uv run ann-suite run --config configs/archive/pipeann_bigann10m_prebuilt_degrees.yaml
+uv run ann-suite run --config configs/archive/pipeann_sqpoll_comparison.yaml
+uv run ann-suite run --config configs/archive/pipeann_closed_loop_lsweep.yaml
+uv run ann-suite run --config configs/archive/pipeann_ol4_static_width_sweep.yaml   # x3 for "3 reps"
 ```
 
 Results land under `results/<config-name>_<timestamp>/`. See

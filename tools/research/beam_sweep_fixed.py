@@ -15,6 +15,7 @@ to-target) pairs; each round, expand the `beam_width` best *unvisited*
 candidates (add their neighbors to the pool); stop when the target id is
 visited, or the pool of unvisited candidates is exhausted.
 """
+
 from __future__ import annotations
 import sys
 import time
@@ -22,9 +23,15 @@ import numpy as np
 import navigability as nv
 
 
-def beam_global_failure(vecs: np.ndarray, adj: list[list[int]], medoid: int,
-                         rng: np.random.Generator, n_samples: int, beam_width: int,
-                         max_rounds: int = 400) -> tuple[float, float]:
+def beam_global_failure(
+    vecs: np.ndarray,
+    adj: list[list[int]],
+    medoid: int,
+    rng: np.random.Generator,
+    n_samples: int,
+    beam_width: int,
+    max_rounds: int = 400,
+) -> tuple[float, float]:
     n = len(vecs)
     fails = 0
     total_expansions = 0
@@ -78,8 +85,13 @@ def main():
 
     print(f"{label} -- unbounded beam search (sanity check)", file=sys.stderr)
     for bw in (1, 2, 4, 8):
-        eps_g, mean_exp = beam_global_failure(base, adj, medoid, rng, n_samples, beam_width=bw, max_rounds=400)
-        print(f"  beam_width={bw}: eps_global={eps_g:.4f} mean_expansions={mean_exp:.1f}", file=sys.stderr)
+        eps_g, mean_exp = beam_global_failure(
+            base, adj, medoid, rng, n_samples, beam_width=bw, max_rounds=400
+        )
+        print(
+            f"  beam_width={bw}: eps_global={eps_g:.4f} mean_expansions={mean_exp:.1f}",
+            file=sys.stderr,
+        )
 
     print(f"\n{label} -- FIXED ROUND-TRIP BUDGET sweep (the real question)", file=sys.stderr)
     print("round_budget,beam_width,eps_global,mean_expansions")
@@ -87,10 +99,14 @@ def main():
         rng2 = np.random.default_rng(0)  # same target sequence across beam widths, per budget
         for bw in (1, 2, 4, 8):
             t0 = time.time()
-            eps_g, mean_exp = beam_global_failure(base, adj, medoid, rng2, n_samples, beam_width=bw,
-                                                    max_rounds=round_budget)
-            print(f"round_budget={round_budget:>2} beam_width={bw:>2}  eps_global={eps_g:.4f}  "
-                  f"mean_expansions={mean_exp:.1f}  ({time.time()-t0:.1f}s)", file=sys.stderr)
+            eps_g, mean_exp = beam_global_failure(
+                base, adj, medoid, rng2, n_samples, beam_width=bw, max_rounds=round_budget
+            )
+            print(
+                f"round_budget={round_budget:>2} beam_width={bw:>2}  eps_global={eps_g:.4f}  "
+                f"mean_expansions={mean_exp:.1f}  ({time.time() - t0:.1f}s)",
+                file=sys.stderr,
+            )
             print(f"{round_budget},{bw},{eps_g:.4f},{mean_exp:.1f}")
 
 

@@ -76,22 +76,30 @@ def main() -> None:
     print(f"latency_ms = {intercept:.4f} + {slope:.6f} * pages_per_query")
     print(f"max |residual| = {max_residual:.2f}%")
     if max_residual > 10:
-        print("  WARNING: linear latency model fits poorly; break-even numbers below are unreliable")
+        print(
+            "  WARNING: linear latency model fits poorly; break-even numbers below are unreliable"
+        )
 
     baseline = rows[0]
     baseline_lat = intercept + slope * baseline["pages"]
 
-    print(f"\n{'fraction':>10} {'cache_n':>12} {'extra_warmup_s':>15} "
-          f"{'ms_saved/query':>15} {'break_even_queries':>19}")
+    print(
+        f"\n{'fraction':>10} {'cache_n':>12} {'extra_warmup_s':>15} "
+        f"{'ms_saved/query':>15} {'break_even_queries':>19}"
+    )
     for r in rows[1:]:
         extra_warmup = r["warmup_s"] - baseline["warmup_s"]
         saved_ms = baseline_lat - (intercept + slope * r["pages"])
         break_even = extra_warmup * 1000.0 / saved_ms if saved_ms > 1e-9 else float("inf")
-        print(f"{r['fraction']:>10.5f} {r['cache_n']:>12,.0f} {extra_warmup:>15.1f} "
-              f"{saved_ms:>15.3f} {break_even:>19,.0f}")
+        print(
+            f"{r['fraction']:>10.5f} {r['cache_n']:>12,.0f} {extra_warmup:>15.1f} "
+            f"{saved_ms:>15.3f} {break_even:>19,.0f}"
+        )
 
-    print(f"\n{'query_budget':>14} {'optimal_cache_n':>17} {'optimal_fraction':>17} "
-          f"{'total_seconds':>15} {'saving_vs_no_cache':>19}")
+    print(
+        f"\n{'query_budget':>14} {'optimal_cache_n':>17} {'optimal_fraction':>17} "
+        f"{'total_seconds':>15} {'saving_vs_no_cache':>19}"
+    )
     for budget in [10**e for e in range(3, 9)]:
         best = min(
             rows,
@@ -100,8 +108,10 @@ def main() -> None:
         best_cost = best["warmup_s"] + budget * (intercept + slope * best["pages"]) / 1000.0
         no_cache_cost = baseline["warmup_s"] + budget * baseline_lat / 1000.0
         saving = (1 - best_cost / no_cache_cost) * 100
-        print(f"{budget:>14,} {best['cache_n']:>17,.0f} {best['fraction']:>17.5f} "
-              f"{best_cost:>15,.1f} {saving:>18.1f}%")
+        print(
+            f"{budget:>14,} {best['cache_n']:>17,.0f} {best['fraction']:>17.5f} "
+            f"{best_cost:>15,.1f} {saving:>18.1f}%"
+        )
 
 
 if __name__ == "__main__":

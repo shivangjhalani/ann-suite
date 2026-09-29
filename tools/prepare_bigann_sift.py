@@ -39,9 +39,7 @@ def load_ivecs(path: Path) -> np.ndarray:
 
 def save_float32_npy(source: np.ndarray, path: Path, chunk_size: int = 250_000) -> None:
     """Convert a vector source to float32 NPY incrementally."""
-    destination = np.lib.format.open_memmap(
-        path, mode="w+", dtype=np.float32, shape=source.shape
-    )
+    destination = np.lib.format.open_memmap(path, mode="w+", dtype=np.float32, shape=source.shape)
     for start in range(0, len(source), chunk_size):
         end = min(start + chunk_size, len(source))
         destination[start:end] = source[start:end]

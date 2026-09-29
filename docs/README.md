@@ -1,6 +1,6 @@
 # ANN Benchmarking Suite Documentation
 
-Welcome to the ANN Benchmarking Suite documentation. This suite provides production-grade benchmarking for Approximate Nearest Neighbor (ANN) algorithms with containerized isolation and deep observability.
+Welcome to the ANN Benchmarking Suite documentation. This suite benchmarks for Approximate Nearest Neighbor (ANN) algorithms with containerized isolation and deep observability.
 
 ## Documentation Index
 

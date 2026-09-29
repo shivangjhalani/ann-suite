@@ -27,17 +27,25 @@ import numpy as np
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--base", type=Path, required=True, help="Base vectors (.npy)")
     parser.add_argument("--queries", type=Path, required=True, help="Query vectors (.npy)")
-    parser.add_argument("--ground-truth", type=Path, required=True, help="Ground-truth neighbor ids (.npy)")
+    parser.add_argument(
+        "--ground-truth", type=Path, required=True, help="Ground-truth neighbor ids (.npy)"
+    )
     parser.add_argument("--dim", type=int, required=True)
-    parser.add_argument("--gt-depth", type=int, default=10, help="Depth of true top-k used (default 10)")
+    parser.add_argument(
+        "--gt-depth", type=int, default=10, help="Depth of true top-k used (default 10)"
+    )
     parser.add_argument("--group-sizes", type=int, nargs="+", default=[8, 32, 128])
     parser.add_argument("--kmeans-iters", type=int, default=10)
     parser.add_argument("--max-points-per-centroid", type=int, default=64)
     parser.add_argument("--num-probe-candidates", type=int, default=512)
-    parser.add_argument("--recall-target", type=int, default=9, help="neighbors-found threshold out of gt-depth")
+    parser.add_argument(
+        "--recall-target", type=int, default=9, help="neighbors-found threshold out of gt-depth"
+    )
     parser.add_argument("--seed", type=int, default=1)
     args = parser.parse_args()
 

@@ -22,7 +22,9 @@ import numpy as np
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--base", required=True, type=__import__("pathlib").Path)
     parser.add_argument("--queries", required=True, type=__import__("pathlib").Path)
     parser.add_argument("--dim", type=int, required=True)

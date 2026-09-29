@@ -9,6 +9,7 @@ so it directly gives us epsilon_global under the same protocol: sample a
 random point t already in the index, search for it with its own vector as
 the query, ef=1, k=1 -- "reached" iff the returned id is t itself.
 """
+
 from __future__ import annotations
 import sys
 import numpy as np

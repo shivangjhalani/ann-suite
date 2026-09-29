@@ -55,7 +55,9 @@ from pathlib import Path
 
 DIM = 128
 BASE_URL = "https://dl.fbaipublicfiles.com/billion-scale-ann-benchmarks/bigann/base.1B.u8bin"
-QUERY_URL = "https://dl.fbaipublicfiles.com/billion-scale-ann-benchmarks/bigann/query.public.10K.u8bin"
+QUERY_URL = (
+    "https://dl.fbaipublicfiles.com/billion-scale-ann-benchmarks/bigann/query.public.10K.u8bin"
+)
 HEADER_BYTES = 8
 
 
@@ -124,13 +126,25 @@ def compute_ground_truth_native(
     if not compute_gt.exists():
         raise FileNotFoundError(f"compute_groundtruth not found at {compute_gt}")
     subprocess.run(
-        [str(compute_gt), "uint8", "l2", str(base), str(query), str(k), str(output), "null", "null"],
+        [
+            str(compute_gt),
+            "uint8",
+            "l2",
+            str(base),
+            str(query),
+            str(k),
+            str(output),
+            "null",
+            "null",
+        ],
         check=True,
     )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--base-count", type=int, required=True)
     parser.add_argument("--from-existing-base", type=Path, default=None)
