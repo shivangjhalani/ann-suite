@@ -1,6 +1,26 @@
 # Docker Optimization Reference
 
-This document details the specific Docker runtime configurations used by `ann-suite` to ensure "research-grade" performance and reproducibility. These settings mimic bare-metal performance while maintaining container isolation.
+This document details the Docker runtime configurations `ann-suite` uses so containerized runs match bare-metal performance.
+
+## Measured Overhead (DiskANN, BIGANN-10M, 2026-09-29)
+
+`tools/docker_overhead/run.py` compares three arms on one prebuilt index (DiskANN C++
+R=100/L=100, commit 78256bb), the same 10k queries, P-cores 0-7, W=2, no node cache,
+and a dropped page cache before every point, over Ls in {10..200} x {1, 8} threads,
+3 interleaved repeats:
+
+| Arm | What it is |
+| :-- | :-- |
+| suite | `ann-suite run` (container, cgroup monitoring on) |
+| native | the same runner + same diskannpy build, run directly on the host |
+| cpp | DiskANN's C++ `search_disk_index` |
+
+Result: recall and I/Os per query are identical across arms at every point. QPS
+suite/native geo-mean is **1.008** (range 0.98-1.06) and cpp/native **1.016**
+(0.98-1.12), both inside the repeat-to-repeat spread (median 3-4%, max 18%). Docker
+and ann-suite's monitoring add no measurable search cost, and the Python runner in
+batch mode matches the C++ driver. Raw data: `results/docker_overhead/2026-09-29_15-50-06/`
+on the isfcr host. Re-run after changing hardware, kernel, or the runner.
 
 ## Summary of Optimizations
 
@@ -34,7 +54,7 @@ Many high-performance numerical libraries (like Intel MKL, OpenBLAS, and FAISS) 
 *   **The Fix**: Setting `seccomp=unconfined` allows the algorithm to use the full range of Linux kernel system calls. This is essential for disk-based algorithms (like DiskANN) that need to squeeze every ounce of IOPS from an NVMe drive.
 
 ### 4. CPU Affinity (`cpuset_cpus`) + NUMA Memory Pinning (`cpuset_mems`)
-OS schedulers constantly move processes between cores to balance heat and load. This "migration" wipes CPU caches (L1/L2), causing massive performance implementations.
+OS schedulers constantly move processes between cores to balance heat and load. This "migration" wipes CPU caches (L1/L2) and adds noise. On hybrid CPUs (e.g. the isfcr host's Core Ultra 9 285K: P-cores 0-7, E-cores 8-23) it also mixes core types, so pin to one core type.
 *   **The Setting**: `cpu_affinity="0-3"` restricts placement to those logical CPUs.
 *   **NUMA**: On multi-socket / multi-NUMA-node hosts, restricting CPUs alone is not enough. The kernel may still place the container's memory (page cache, heap) on a *different* node than the pinned CPUs, forcing every access across the NUMA interconnect — a real, measurable penalty for both in-memory (HNSW) and disk-based (DiskANN) workloads.
 *   **The Optimization**: When `cpu_affinity` is set, `ann-suite` reads the host NUMA topology (`/sys/devices/system/node/node*/cpulist`) and sets `cpuset_mems` to the node(s) the affinity cores belong to. CPU and memory are therefore pinned together, so all allocations stay local to the working cores. This is applied automatically; no extra config is required.
@@ -47,4 +67,12 @@ OS schedulers constantly move processes between cores to balance heat and load. 
 *   **Recommendation**: For latency-sensitive ANN research, prefer `cpu_affinity` (NUMA-pinned cores, no throttling) over `cpu_limit`. If you must cap usage (e.g., to mimic a target core budget), combine affinity + limit and watch the `CPUThrottlingMetrics` (`nr_throttled` / `throttled_percent`) in your results to quantify the noise. When no limit is configured, throttling counters are always 0.
 
 ## Reproducing These Results
-All these optimizations are applied automatically by the `ContainerRunner`. You do not need to manually configure them. They are baked into the Python runner logic to ensuring that `ann-suite run` is always a valid scientific measurement.
+These settings are applied automatically by the `ContainerRunner`; no config is needed.
+
+To re-measure overhead on a host (needs the DiskANN image and a prebuilt index; see the
+constants at the top of `run.py`):
+
+```bash
+tools/docker_overhead/setup_native_diskannpy.sh     # same diskannpy, built on the host
+ANN_SUITE_SUDO_PASSWORD=... uv run python tools/docker_overhead/run.py --repeats 3
+```
