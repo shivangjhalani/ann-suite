@@ -192,6 +192,9 @@ class DiskANNIndex:
             index_directory=str(self.index_path),
             num_threads=self.num_threads,
             num_nodes_to_cache=num_nodes_to_cache,
+            # Mechanism 1 replays every sample query to pick cache nodes even when
+            # nothing will be cached (~60 s/load at 1 thread on 10M); skip it then.
+            cache_mechanism=1 if num_nodes_to_cache > 0 else 0,
             distance_metric=self.metric,
             vector_dtype=self.vector_dtype,
             dimensions=dimension,

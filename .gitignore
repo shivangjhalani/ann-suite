@@ -107,3 +107,6 @@ data/
 
 # Scratch experiment outputs (large binaries, not source)
 experiments/
+
+# Native (non-Docker) builds for the Docker-overhead check
+.native/
