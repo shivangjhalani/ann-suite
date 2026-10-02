@@ -124,7 +124,9 @@ def build_index(algo: str, index_dir: Path) -> None:
     print(proc.stdout.strip().splitlines()[-1], file=sys.stderr)
 
 
-def run_native(algo: str, index_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
+def run_native(
+    algo: str, index_dir: Path, config: dict[str, Any], memory_max: str | None = None
+) -> dict[str, Any]:
     spec = ALGOS[algo]
     env = {
         **os.environ,
@@ -133,7 +135,7 @@ def run_native(algo: str, index_dir: Path, config: dict[str, Any]) -> dict[str, 
     }
     cfg = {**config, "index_path": str(index_dir)}
     cmd = [
-        *native_cmd_prefix(CPUS),
+        *native_cmd_prefix(CPUS, memory_max),
         sys.executable,
         "-m",
         "algorithm.runner",

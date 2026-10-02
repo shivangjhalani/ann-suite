@@ -172,6 +172,7 @@ DiskANN `u8bin` data require `vector_dtype: uint8` and uint8 queries.
 | `collect_metrics` | bool | `true` | Report warmup phase metrics |
 | `cache_warmup_queries` | int | `0` | Untimed queries after load |
 | `drop_caches_before` | bool | `true` | Drop the OS page cache before each search phase so points never inherit each other's cache state. Requires root or sudo; set the `ANN_SUITE_SUDO_PASSWORD` env var for passworded sudo. If the drop fails, the search point fails instead of running warm. Set `false` only when warm-cache carry-over is the thing under study. |
+| `probe_device_state` | bool | `true` | Before each disk/hybrid search point, probe the index files' 4 KiB O_DIRECT read speed and record host CPU/NVMe state as `cond_*` columns; warns when the SSD state drifts between points. See docs/METRICS.md, "Device State". |
 
 ## Dataset Configuration
 

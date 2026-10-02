@@ -7,7 +7,7 @@ uv sync                              # Install dependencies
 uv run pytest                        # Run all tests
 uv run pytest tests/test_schemas.py  # Run single test file
 uv run pytest -k "test_valid_config" # Run tests matching pattern
-uv run ruff check src tests          # Lint
+uv run ruff check src tests library   # Lint (library/ holds the in-container runners)
 uv run ruff format src tests         # Format
 uv run mypy src                      # Type check (strict mode)
 uv run ann-suite --help              # CLI entrypoint
@@ -43,6 +43,7 @@ uv run ann-suite run --config configs/example.yaml
 - **Parameter sweeps**: list values in `build.args`/`search.args` expand via `itertools.product`; `search.sweep` gives explicit points. Each unique build is built once and reused by its search points
 - **Fair comparison**: set the top-level `resources:` (memory_limit, cpu_affinity) so every algorithm gets the same budget; results record it in `run_conditions`
 - **Cache reset**: every search point runs in a fresh container after an OS page-cache drop (`drop_caches_before`, default true; set `ANN_SUITE_SUDO_PASSWORD` when sudo needs a password). A failed drop fails the point
+- **One run per index dir**: SPANN/PipeANN runners write scratch files (`queries.bin`, `search-results.txt`) into the index directory, so two concurrent runs on the same index corrupt each other (seen as recall 0.0 reported for a fast "success"). Run sequentially
 - **Error handling**: Return partial `BenchmarkResult` on failure; check `PhaseResult.success`
 
 ## Code Style

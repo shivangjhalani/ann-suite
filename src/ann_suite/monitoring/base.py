@@ -65,6 +65,8 @@ class CollectorSample:
     file_mapped_bytes: int = 0
     active_file_bytes: int = 0
     inactive_file_bytes: int = 0
+    # Anonymous memory (heap/stack, not file-backed): the RSS-like part of memory.current
+    anon_bytes: int = 0
     # CPU throttling (from cpu.stat)
     nr_throttled: int = 0
     throttled_usec: int = 0
@@ -177,6 +179,9 @@ class CollectorResult:
     peak_active_file_bytes: int = 0
     avg_inactive_file_bytes: float = 0.0
     peak_inactive_file_bytes: int = 0
+    # Anonymous memory (memory.stat anon) gauges
+    avg_anon_bytes: float = 0.0
+    peak_anon_bytes: int = 0
     # CPU throttling deltas
     nr_throttled_delta: int = 0
     throttled_usec_delta: int = 0

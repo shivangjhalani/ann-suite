@@ -117,10 +117,9 @@ class TestCgroupsV2Collector:
 
         summary = collector.get_summary(window_start, window_end)
 
-        # Should include indices 3, 4, 5 (timestamps 3.0, 4.0, 5.0)
-        # Duration: from 3.0 to 5.0 = 2.0 seconds
-        assert summary.duration_seconds == pytest.approx(2.0, rel=0.01)
-        assert summary.sample_count == 3
+        # Samples 3, 4, 5 plus the nearest samples outside each edge (2 and 6)
+        assert summary.duration_seconds == pytest.approx(4.0, rel=0.01)
+        assert summary.sample_count == 5
 
     def test_empty_samples(self) -> None:
         """Test handling of no samples."""
@@ -663,3 +662,72 @@ class TestCPUThrottling:
         )
         assert sample.nr_throttled == 0
         assert sample.throttled_usec == 0
+
+
+class TestAnonMemory:
+    def test_anon_peak_and_average(self) -> None:
+        collector = CgroupsV2Collector(interval_ms=100)
+        now = datetime.now()
+        collector._samples = [
+            CollectorSample(
+                timestamp=now + timedelta(seconds=i),
+                memory_usage_bytes=(300 + 100 * i) * 1024 * 1024,
+                cpu_time_ns=i * 10**9,
+                file_bytes=200 * 1024 * 1024,
+                anon_bytes=(100 + 100 * i) * 1024 * 1024,
+            )
+            for i in range(3)
+        ]
+        summary = collector._aggregate_samples()
+        # memory.current includes the page cache; anon does not
+        assert summary.peak_memory_mb == pytest.approx(500.0)
+        assert summary.peak_anon_bytes == 300 * 1024 * 1024
+        assert summary.avg_anon_bytes == pytest.approx(200 * 1024 * 1024)
+
+
+class TestWindowBracketing:
+    def _samples(self, start: datetime) -> list[CollectorSample]:
+        # 10 reads from index load, then idle until 0.5 s, then 100 reads/s until 1.5 s,
+        # then idle: a query phase between quiet load and teardown phases.
+        def reads(t: float) -> int:
+            return 10 + round(100 * min(max(t - 0.5, 0.0), 1.0))
+
+        return [
+            CollectorSample(
+                timestamp=start + timedelta(milliseconds=50 * i),
+                memory_usage_bytes=100 * 1024 * 1024,
+                cpu_time_ns=(i + 1) * 50_000_000,
+                blkio_read_ops=reads(0.05 * i),
+                blkio_read_bytes=reads(0.05 * i) * 4096,
+            )
+            for i in range(41)
+        ]
+
+    def test_window_contains_all_query_work(self) -> None:
+        collector = CgroupsV2Collector(interval_ms=50)
+        t0 = datetime.now()
+        collector._samples = self._samples(t0)
+        # Query phase 0.5 s .. 1.5 s, but the window edges fall mid-interval
+        summary = collector.get_summary(
+            t0 + timedelta(milliseconds=520), t0 + timedelta(milliseconds=1480)
+        )
+        assert summary.total_read_ops == 100  # all of it, none lost at the edges
+        assert summary.duration_seconds == pytest.approx(1.0)  # samples at 0.50 .. 1.50
+
+    def test_no_samples_beyond_last(self) -> None:
+        collector = CgroupsV2Collector(interval_ms=50)
+        t0 = datetime.now()
+        collector._samples = self._samples(t0)
+        summary = collector.get_summary(t0 + timedelta(seconds=1), t0 + timedelta(seconds=10))
+        assert summary.total_read_ops == 50  # 1.0 s .. last sample at 2.0 s
+
+    def test_counter_reset_beyond_end_is_ignored(self) -> None:
+        collector = CgroupsV2Collector(interval_ms=50)
+        t0 = datetime.now()
+        samples = self._samples(t0)
+        samples.append(CollectorSample(timestamp=t0 + timedelta(seconds=3), memory_usage_bytes=0))
+        collector._samples = samples
+        summary = collector.get_summary(
+            t0 + timedelta(milliseconds=100), t0 + timedelta(milliseconds=2500)
+        )
+        assert summary.total_read_ops == 100

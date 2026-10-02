@@ -177,22 +177,32 @@ Metrics are separated by phase (build → warmup → search) for accurate analys
 
 ```python
 class MemoryMetrics:
-    # Build phase
-    build_peak_rss_mb: float   # Peak RSS during build phase in MB
+    # *_rss_mb  = cgroup memory.current: anon + page cache + kernel (NOT process RSS;
+    #             the historical name is kept for compatibility). What memory_limit enforces.
+    # *_anon_mb = memory.stat anon: heap/stack the processes allocated (closest to RSS).
+    build_peak_rss_mb: float
+    build_peak_anon_mb: float
 
     # Warmup phase (index loading during search container startup)
-    warmup_peak_rss_mb: float    # Peak RSS during index warmup/load phase in MB
+    warmup_peak_rss_mb: float
+    warmup_peak_anon_mb: float
 
     # Search phase (query execution)
-    search_peak_rss_mb: float  # Peak RSS during search phase in MB
-    search_avg_rss_mb: float   # Average RSS during search phase in MB
+    search_peak_rss_mb: float
+    search_avg_rss_mb: float
+    search_peak_anon_mb: float
+    search_avg_anon_mb: float
 
     # Page-cache hit rate (search phase)
     search_page_cache_hit_rate: float | None  # 1 - pgmajfault/pgfault (see note below)
 ```
 
 **How it's measured:**
-- Read from `memory.current` (cgroups v2)
+- `*_rss_mb`: `memory.current` (cgroups v2). Includes page cache, so an index read
+  with buffered I/O inflates it; e.g. SPANN's head index files are ~40% of it at 10M.
+- `*_anon_mb`: the `anon` line of `memory.stat`, sampled at the same interval.
+  Note the container's own runner (Python, NumPy arrays of queries/ground truth) is
+  included in both; it is not the algorithm binary alone.
 - Samples filtered to exclude zeros (container stopped)
 - Converted from bytes to megabytes: `bytes / (1024 × 1024)`
 
@@ -200,6 +210,13 @@ class MemoryMetrics:
 - **Build phase**: Entire build container lifetime
 - **Warmup phase**: From container start to `warmup_end_timestamp` (if provided by algorithm)
 - **Search phase**: From `query_start_timestamp` to `query_end_timestamp` (if provided)
+  The sample series is widened to the nearest sample at or beyond each timestamp, so
+  counter deltas hold the whole query phase plus at most one sampling interval of the
+  adjacent phases per edge. (Keeping only samples inside the window, as before 2026-10-03,
+  dropped up to one interval of query work per edge, e.g. -1.9% of reads at 1.6 s / 50 ms.)
+- **SPANN**: the runner timestamps `indexsearcher`'s output to find the timed query loop,
+  so warmup = index load and search QPS/latency are SPTAG's in-process numbers
+  (p95/p99 at 0.1 ms resolution; no p50).
 
 > [!NOTE]
 > If the algorithm container doesn't report timestamps, load and search phases are combined.
@@ -789,6 +806,34 @@ include_raw_samples: true  # Also include raw samples in results_detailed.json
    ```bash
    echo 3 | sudo tee /proc/sys/vm/drop_caches
    ```
+
+---
+
+## Device State (SSD and host)
+
+Absolute QPS/latency of a disk-resident index depends on SSD state the algorithm and Docker do
+not control. On the isfcr QLC drive (WD Blue SN5100), the same PipeANN index, code, config and CPU
+settings gave 2000, 3200 or 6850 QPS depending on which flash mode the file's pages sat in
+(measured with fio: 245k, 395k, 588k 4 KiB random-read IOPS). Docker was not involved: the
+suite/native ratio stayed ~1.0 throughout.
+
+Every disk/hybrid search point therefore records, before the container starts
+(`search.warmup.probe_device_state`, default on), these `run_conditions` (`cond_*` CSV columns):
+
+| Column | Meaning |
+|--------|---------|
+| `cond_probe_qd64_kiops`, `cond_probe_qd64_lat_us` | fio 4 KiB QD64 io_uring random-read IOPS and latency on the index's largest file (needs `fio`; omitted if absent). This is the one that tracked PipeANN QPS (395k vs 247k IOPS -> 3200 vs 1950 QPS) |
+| `cond_probe_qd1_p50_us` | Median QD1 read latency on the same file (pure Python, always available). Can move opposite to throughput: the fresh copy had *lower* QD1 latency (51 vs 75 us) yet lower QD64 IOPS and QPS, so QD1 alone is not a predictor |
+| `cond_host_cpu_governor`, `cond_host_cpu_epp`, `cond_host_cpu_mhz_mean` | CPU policy and frequency of the pinned cores at probe time (idle clock, before the load) |
+| `cond_host_nvme_temp_c`, `cond_host_load1` | Thermal state and host load |
+
+The suite logs a warning when either probe value moves >25% between consecutive points.
+**Rules:** compare absolute numbers only between points with matching probe values; measure A/B
+arms interleaved on the same files; treat a 3x shift with an unchanged probe as a bug, and with a
+changed probe as device state. Writing and deleting ~100 GB does not give a reproducible state: right
+after it the drive ran at ~6k IOPS for minutes, then settled at a different level than before.
+`tools/docker_overhead/ssd_state_ab.py` demonstrates the effect by comparing a fresh copy of an
+index with the original over time.
 
 ---
 

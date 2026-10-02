@@ -322,6 +322,8 @@ class ContainerRunner:
             peak_active_file_bytes=result.peak_active_file_bytes,
             avg_inactive_file_bytes=result.avg_inactive_file_bytes,
             peak_inactive_file_bytes=result.peak_inactive_file_bytes,
+            avg_anon_bytes=result.avg_anon_bytes,
+            peak_anon_bytes=result.peak_anon_bytes,
             nr_throttled_delta=result.nr_throttled_delta,
             throttled_usec_delta=result.throttled_usec_delta,
             top_read_device=result.top_read_device.to_dict() if result.top_read_device else None,

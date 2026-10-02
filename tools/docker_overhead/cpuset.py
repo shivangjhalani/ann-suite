@@ -25,9 +25,14 @@ Docker uses, via a user-level systemd transient scope (no sudo required).
 from __future__ import annotations
 
 
-def native_cmd_prefix(cpus: str) -> list[str]:
+def native_cmd_prefix(cpus: str, memory_max: str | None = None) -> list[str]:
     """Command prefix that confines the wrapped command to `cpus` via a cgroup
     cpuset (systemd scope), the same mechanism Docker's --cpuset-cpus uses -
     unlike `taskset`, which only sets a raw affinity mask. See module docstring.
+    `memory_max` (e.g. "2G") adds MemoryMax with swap disabled, the cgroup v2
+    equivalent of Docker's --memory == --memory-swap that the suite applies.
     """
-    return ["systemd-run", "--scope", "--user", "-p", f"AllowedCPUs={cpus}", "--"]
+    cmd = ["systemd-run", "--scope", "--user", "-p", f"AllowedCPUs={cpus}"]
+    if memory_max:
+        cmd += ["-p", f"MemoryMax={memory_max}", "-p", "MemorySwapMax=0"]
+    return [*cmd, "--"]

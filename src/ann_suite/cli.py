@@ -425,6 +425,10 @@ def _show_results_table(results: list[BenchmarkResult]) -> None:
             f"{r.memory.search_peak_rss_mb:.1f} MB" if r.memory.search_peak_rss_mb > 0 else "N/A",
         )
         main_table.add_row(
+            "  Search Peak Anon",
+            f"{r.memory.search_peak_anon_mb:.1f} MB" if r.memory.search_peak_anon_mb > 0 else "N/A",
+        )
+        main_table.add_row(
             "  Search Avg RAM",
             f"{r.memory.search_avg_rss_mb:.1f} MB" if r.memory.search_avg_rss_mb > 0 else "N/A",
         )

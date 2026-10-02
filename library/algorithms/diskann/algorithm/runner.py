@@ -350,7 +350,11 @@ def run_openloop_search(
     warmup_fraction = float(arrival.get("warmup_fraction", 0.1))
 
     rng = np.random.default_rng(seed)
-    arrivals = np.cumsum(rng.exponential(1.0 / lam, size=num_queries)) if lam > 0 else np.zeros(num_queries)
+    arrivals = (
+        np.cumsum(rng.exponential(1.0 / lam, size=num_queries))
+        if lam > 0
+        else np.zeros(num_queries)
+    )
     qids = np.arange(num_queries) % len(queries)
 
     latencies_ms = np.zeros(num_queries)
@@ -512,7 +516,11 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
         vector_dtype_name = str(
             search_args.get("vector_dtype", config.get("vector_dtype", "float32"))
         )
-        index_dtype = np.dtype(np.float32 if vector_dtype_name == "float32" else np.uint8) if vector_dtype_name else np.float32
+        index_dtype = (
+            np.dtype(np.float32 if vector_dtype_name == "float32" else np.uint8)
+            if vector_dtype_name
+            else np.float32
+        )
         queries = np.load(queries_path)
         if queries.dtype != index_dtype:
             queries = queries.astype(index_dtype)

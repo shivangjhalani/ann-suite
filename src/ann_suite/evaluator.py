@@ -45,6 +45,7 @@ from ann_suite.core.schemas import (
     _flatten_dict,
 )
 from ann_suite.datasets.loader import DatasetLoader
+from ann_suite.monitoring.host_state import drift_warning, host_state, probe_device
 from ann_suite.results.storage import ResultsStorage
 from ann_suite.runners.container_runner import ContainerRunner
 
@@ -334,6 +335,7 @@ class BenchmarkEvaluator:
         self.index_dir = Path(config.index_dir).resolve()
         self.results_dir = Path(config.results_dir).resolve()
         self._run_id: str = ""  # Set properly when run() is called
+        self._previous_state: dict[str, Any] | None = None  # last device probe, for drift checks
 
         # Ensure directories exist
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -768,6 +770,13 @@ class BenchmarkEvaluator:
 
         Caller must guarantee the build in ``context`` succeeded.
         """
+        state: dict[str, Any] = {}
+        if algo_config.search.warmup.probe_device_state:
+            state = host_state(algo_config.cpu_affinity)
+            if algo_config.algorithm_type in (AlgorithmType.DISK, AlgorithmType.HYBRID):
+                state.update(probe_device(context.host_index_dir))
+            self._note_state_drift(state)
+
         search_result = self._run_search_phase(
             algo_config,
             dataset_config,
@@ -787,8 +796,20 @@ class BenchmarkEvaluator:
             build_params=context.build_params,
             search_params_override=search_params,
         )
-        result.run_conditions = _run_conditions(algo_config)
+        result.run_conditions = {**_run_conditions(algo_config), **state}
         return result
+
+    def _note_state_drift(self, state: dict[str, Any]) -> None:
+        """Warn when the SSD read speed moved versus the previous point of this run."""
+        previous = self._previous_state
+        if previous is not None and (msg := drift_warning(previous, state)):
+            logger.warning(
+                f"[{self._run_id}] Device state drifted between points: {msg}. Absolute QPS/"
+                "latency of these points are not directly comparable (see docs/METRICS.md, "
+                "'Device state')."
+            )
+        if "probe_qd1_p50_us" in state:
+            self._previous_state = state
 
     def _run_build_phase(
         self,
@@ -1043,6 +1064,7 @@ class BenchmarkEvaluator:
                 # Build-only Memory metrics
                 memory=MemoryMetrics(
                     build_peak_rss_mb=build_res.peak_memory_mb,
+                    build_peak_anon_mb=build_res.peak_anon_bytes / (1024 * 1024),
                     warmup_peak_rss_mb=0.0,
                     search_peak_rss_mb=0.0,
                     search_avg_rss_mb=0.0,
@@ -1143,6 +1165,10 @@ class BenchmarkEvaluator:
             warmup_peak_rss_mb=warmup_res.peak_memory_mb if warmup_res else 0.0,
             search_peak_rss_mb=search_res.peak_memory_mb,
             search_avg_rss_mb=search_res.avg_memory_mb,
+            build_peak_anon_mb=build_res.peak_anon_bytes / (1024 * 1024),
+            warmup_peak_anon_mb=warmup_res.peak_anon_bytes / (1024 * 1024) if warmup_res else 0.0,
+            search_peak_anon_mb=search_res.peak_anon_bytes / (1024 * 1024),
+            search_avg_anon_mb=search_res.avg_anon_bytes / (1024 * 1024),
             search_major_faults=search_res.pgmajfault_delta,
             search_page_cache_hit_rate=page_cache_hit_rate,
         )

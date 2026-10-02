@@ -55,6 +55,7 @@ class BuildPhaseDict(TypedDict):
     cpu_time_seconds: float
     peak_cpu_percent: float
     peak_rss_mb: float
+    peak_anon_mb: float
     error: str | None
 
 
@@ -65,6 +66,7 @@ class WarmupPhaseDict(TypedDict):
     cpu_time_seconds: float
     peak_cpu_percent: float
     peak_rss_mb: float
+    peak_anon_mb: float
     read_mb: float
     write_mb: float
     io_stall_percent: float | None
@@ -123,6 +125,8 @@ class SearchPhaseDict(TypedDict):
     peak_cpu_percent: float
     peak_rss_mb: float
     avg_rss_mb: float
+    peak_anon_mb: float
+    avg_anon_mb: float
     disk_io: DiskIODict
     major_faults_per_query: float | None
     major_faults_per_second: float | None
@@ -283,6 +287,15 @@ class WarmupConfig(BaseModel):
             "Drop the OS page cache before each search phase so points do not inherit "
             "each other's cache state. Requires root or sudo; set ANN_SUITE_SUDO_PASSWORD "
             "for passworded sudo. If the drop fails, the search point fails."
+        ),
+    )
+    probe_device_state: bool = Field(
+        default=True,
+        description=(
+            "Before each disk-index search point, probe the index files' 4 KiB O_DIRECT "
+            "random-read latency/throughput and record host CPU/NVMe state in run_conditions "
+            "(cond_* columns). SSD flash state (e.g. SLC-cache residency) can shift absolute "
+            "QPS 3-5x with identical code; the probe makes such shifts visible."
         ),
     )
 
@@ -615,8 +628,12 @@ class ResourceSummary(BaseModel):
     where IOPS indicate disk access patterns.
     """
 
-    peak_memory_mb: float = Field(ge=0, description="Peak RSS in megabytes")
-    avg_memory_mb: float = Field(ge=0, description="Average RSS in megabytes")
+    peak_memory_mb: float = Field(
+        ge=0, description="Peak cgroup memory.current (anon + page cache + kernel) in MB"
+    )
+    avg_memory_mb: float = Field(
+        ge=0, description="Average cgroup memory.current (anon + page cache + kernel) in MB"
+    )
     cpu_time_total_seconds: float = Field(
         default=0.0, ge=0, description="Total CPU time from cgroups"
     )
@@ -663,6 +680,12 @@ class ResourceSummary(BaseModel):
     )
     peak_inactive_file_bytes: int = Field(
         default=0, ge=0, description="Peak inactive file cache bytes"
+    )
+    avg_anon_bytes: float = Field(
+        default=0.0, ge=0, description="Avg anonymous memory bytes (memory.stat anon)"
+    )
+    peak_anon_bytes: int = Field(
+        default=0, ge=0, description="Peak anonymous memory bytes (memory.stat anon)"
     )
     nr_throttled_delta: int = Field(default=0, ge=0, description="CPU throttle count (delta)")
     throttled_usec_delta: int = Field(
@@ -787,7 +810,12 @@ class CPUMetrics(BaseModel):
 class MemoryMetrics(BaseModel):
     """Structured memory metrics (HIGH priority).
 
-    Focuses on RSS (Resident Set Size) which represents actual physical memory used.
+    Two views of the container's memory, both from cgroup v2:
+    - *_rss_mb: memory.current, i.e. everything charged to the cgroup: anonymous memory
+      PLUS page cache (index files read buffered) PLUS kernel memory. Despite the
+      historical name this is NOT process RSS; it is what a memory limit is enforced on.
+    - *_anon_mb: memory.stat anon, the heap/stack memory the processes allocated. This is
+      the closest cgroup-level equivalent of RSS (it excludes file-backed mapped pages).
     Metrics are separated by phase for accurate analysis:
     - BUILD: Memory used during index construction
     - WARMUP: Memory used while loading index into memory/cache
@@ -796,20 +824,40 @@ class MemoryMetrics(BaseModel):
 
     # BUILD phase memory
     build_peak_rss_mb: float = Field(
-        default=0.0, ge=0, description="Peak RSS during index build phase in MB"
+        default=0.0,
+        ge=0,
+        description="Peak cgroup memory.current (incl. page cache) during index build in MB",
+    )
+    build_peak_anon_mb: float = Field(
+        default=0.0, ge=0, description="Peak anonymous memory during index build in MB"
     )
 
     # WARMUP phase memory (index loading)
     warmup_peak_rss_mb: float = Field(
-        default=0.0, ge=0, description="Peak RSS during index warmup/load phase in MB"
+        default=0.0,
+        ge=0,
+        description="Peak cgroup memory.current (incl. page cache) during index warmup/load in MB",
+    )
+    warmup_peak_anon_mb: float = Field(
+        default=0.0, ge=0, description="Peak anonymous memory during index warmup/load in MB"
     )
 
     # SEARCH phase memory (primary metric)
     search_peak_rss_mb: float = Field(
-        default=0.0, ge=0, description="Peak RSS during search phase in MB"
+        default=0.0,
+        ge=0,
+        description="Peak cgroup memory.current (incl. page cache) during search in MB",
     )
     search_avg_rss_mb: float = Field(
-        default=0.0, ge=0, description="Average RSS during search phase in MB"
+        default=0.0,
+        ge=0,
+        description="Average cgroup memory.current (incl. page cache) during search in MB",
+    )
+    search_peak_anon_mb: float = Field(
+        default=0.0, ge=0, description="Peak anonymous memory during search in MB"
+    )
+    search_avg_anon_mb: float = Field(
+        default=0.0, ge=0, description="Average anonymous memory during search in MB"
     )
 
     # Cache/fault statistics (optional - requires /proc or memory.stat access).
@@ -1287,7 +1335,9 @@ class BenchmarkResult(BaseModel):
         default_factory=dict,
         description=(
             "Conditions the search ran under: memory_limit, cpu_affinity, cpu_limit, "
-            "page_cache_dropped. Results are only comparable under equal conditions."
+            "page_cache_dropped, plus probe_* (SSD read speed of the index files) and host_* "
+            "(CPU governor/frequency, NVMe temperature, load) at search time. Results are only "
+            "comparable under equal conditions."
         ),
     )
 
@@ -1355,6 +1405,7 @@ class BenchmarkResult(BaseModel):
             cpu_time_seconds=self.cpu.build_cpu_time_seconds,
             peak_cpu_percent=self.cpu.build_peak_cpu_percent,
             peak_rss_mb=self.memory.build_peak_rss_mb,
+            peak_anon_mb=self.memory.build_peak_anon_mb,
             error=self.build_result.error_message if self.build_result else None,
         )
 
@@ -1364,6 +1415,7 @@ class BenchmarkResult(BaseModel):
             cpu_time_seconds=self.cpu.warmup_cpu_time_seconds,
             peak_cpu_percent=self.cpu.warmup_peak_cpu_percent,
             peak_rss_mb=self.memory.warmup_peak_rss_mb,
+            peak_anon_mb=self.memory.warmup_peak_anon_mb,
             read_mb=self.disk_io.warmup_read_mb,
             write_mb=self.disk_io.warmup_write_mb,
             io_stall_percent=self.disk_io.warmup_io_stall_percent,
@@ -1381,6 +1433,8 @@ class BenchmarkResult(BaseModel):
             peak_cpu_percent=self.cpu.search_peak_cpu_percent,
             peak_rss_mb=self.memory.search_peak_rss_mb,
             avg_rss_mb=self.memory.search_avg_rss_mb,
+            peak_anon_mb=self.memory.search_peak_anon_mb,
+            avg_anon_mb=self.memory.search_avg_anon_mb,
             disk_io=self._build_disk_io_dict(),
             major_faults_per_query=self.disk_io.search_major_faults_per_query,
             major_faults_per_second=self.disk_io.search_major_faults_per_second,

@@ -128,6 +128,41 @@ def _monotonic_delta(samples: list[CollectorSample], field: str) -> int:
     return max(0, peak - first)
 
 
+def _counters_reset(a: CollectorSample, b: CollectorSample) -> bool:
+    """True if cumulative counters went backwards between a and b (cgroup torn down)."""
+    return b.cpu_time_ns < a.cpu_time_ns or b.blkio_read_ops < a.blkio_read_ops
+
+
+def window_samples(
+    samples: list[CollectorSample], start: datetime | None, end: datetime | None
+) -> list[CollectorSample]:
+    """Samples covering [start, end]: those inside it plus the nearest sample at or beyond
+    each boundary, so every counter delta contains the whole query phase.
+
+    The window edges are phase transitions (e.g. disk reads jump from ~0 after index load
+    to full rate at query start), so keeping only the samples inside the window drops up to
+    one sampling interval of query work per edge, and linear interpolation at the edges is
+    biased low for the same reason. Widening instead adds at most one interval of the
+    adjacent phases' activity per edge. `samples` must be sorted by timestamp. Across the
+    end boundary, a sample whose counters reset (cgroup torn down) is not used.
+    """
+    out = [
+        s
+        for s in samples
+        if (start is None or s.timestamp >= start) and (end is None or s.timestamp <= end)
+    ]
+    if start is not None:
+        before = [s for s in samples if s.timestamp < start]
+        if before and (not out or out[0].timestamp > start):
+            out.insert(0, before[-1])
+    if end is not None:
+        after = [s for s in samples if s.timestamp > end]
+        widen = after and (not out or out[-1].timestamp < end)
+        if widen and (not out or not _counters_reset(out[-1], after[0])):
+            out.append(after[0])
+    return out
+
+
 class CgroupsV2Collector(BaseCollector):
     """Collector that reads metrics directly from cgroups v2 filesystem.
 
@@ -409,6 +444,7 @@ class CgroupsV2Collector(BaseCollector):
             file_mapped_bytes=memory_stat.get("file_mapped", 0),
             active_file_bytes=memory_stat.get("active_file", 0),
             inactive_file_bytes=memory_stat.get("inactive_file", 0),
+            anon_bytes=memory_stat.get("anon", 0),
             nr_throttled=cpu_stat.get("nr_throttled", 0),
             throttled_usec=cpu_stat.get("throttled_usec", 0),
             queue_depth=read_system_queue_depth(),
@@ -561,6 +597,7 @@ class CgroupsV2Collector(BaseCollector):
             "file_mapped": 0,
             "active_file": 0,
             "inactive_file": 0,
+            "anon": 0,
         }
         memory_stat_path = self._cgroup_path / "memory.stat"  # type: ignore
 
@@ -596,13 +633,8 @@ class CgroupsV2Collector(BaseCollector):
             return CollectorResult()
 
         if start_timestamp or end_timestamp:
-            filtered_samples = []
-            for s in samples:
-                if start_timestamp and s.timestamp < start_timestamp:
-                    continue
-                if end_timestamp and s.timestamp > end_timestamp:
-                    continue
-                filtered_samples.append(s)
+            samples.sort(key=lambda s: s.timestamp)
+            filtered_samples = window_samples(samples, start_timestamp, end_timestamp)
 
             if len(filtered_samples) < 2 and len(samples) >= 2:
                 logger.debug(
@@ -897,6 +929,9 @@ class CgroupsV2Collector(BaseCollector):
         peak_file_mapped_bytes = max(file_mapped_values) if file_mapped_values else 0
         peak_active_file_bytes = max(active_file_values) if active_file_values else 0
         peak_inactive_file_bytes = max(inactive_file_values) if inactive_file_values else 0
+        anon_values = [s.anon_bytes for s in samples]
+        avg_anon_bytes = sum(anon_values) / len(anon_values) if anon_values else 0
+        peak_anon_bytes = max(anon_values) if anon_values else 0
 
         # CPU throttling deltas (monotonic counters; same reset hazard as PSI).
         nr_throttled_delta = _monotonic_delta(samples, "nr_throttled")
@@ -1007,6 +1042,8 @@ class CgroupsV2Collector(BaseCollector):
             peak_active_file_bytes=peak_active_file_bytes,
             avg_inactive_file_bytes=avg_inactive_file_bytes,
             peak_inactive_file_bytes=peak_inactive_file_bytes,
+            avg_anon_bytes=avg_anon_bytes,
+            peak_anon_bytes=peak_anon_bytes,
             nr_throttled_delta=nr_throttled_delta,
             throttled_usec_delta=throttled_usec_delta,
             top_read_device=top_read_device,

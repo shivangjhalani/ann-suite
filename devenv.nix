@@ -16,6 +16,7 @@
     pkgs.stdenv.cc.cc.lib # for many python wheels on linux
     pkgs.glib
     pkgs.gcc
+    pkgs.fio # device-state probe (QD64 read speed of index files)
   ];
 
   # https://devenv.sh/languages/
