@@ -63,11 +63,27 @@ to ann-suite for this) and are cached by a hash of the program source without
 and merges its points into `frontier_bigann10m_q2k.json`. Systems: SPANN (native
 10M indices from `/home/isfcr/spann`), PipeANN (pipelined and beam search, PQ 10
 and 32 B), DiskANN (diskannpy, uint8, PQ 10 and 34 B), Starling, PageANN and LAANN
-(each at B = 0.1 and 0.32 GB, with and without page caching). Baseline pages/query
+(each at B = 0.1 and 0.32 GB, with and without page caching; PageANN also in its
+low-memory mode, `baselines/pageann_lowmem.yaml`: PQ inline on disk, 0.07 / 0.15 GB
+hot-PQ budget, nav graph over 50k / 200k sampled pages; 0.07 GB is the minimum its
+page-graph builder accepts at 10M). Configurations whose search exceeded the cap
+were OOM-killed and are absent by design. Baseline pages/query
 is the binaries' own O_DIRECT read count (`stats.io_reads`); SPANN's is io.stat for
 the query window. All run under the same 785 MB cap, 8 pinned cores, 2000 queries.
 `tools/evolve/run_baselines.sh` runs them in two lanes; the scored metrics are
 per-container, so lanes may overlap (only QPS, which is not scored, is disturbed).
+
+**Reference designs.** Classic designs that no packaged system covers are
+implemented as harness programs in `tools/evolve/reference/` and added with
+`evolve_bench.py add-reference <prog> --name N --system S`, measured exactly like
+candidates. Without them the evolver is credited for rediscovering textbook
+methods (the first OpenEvolve mutation reproduced IVFADC+R and scored +0.28 on
+index size alone). Current references: IVF-Flat on disk (= the seed, so evolution
+starts at 0) and IVFADC+R with 32 / 16 B PQ in DRAM (Jegou et al. 2011).
+
+Measured caveat: PipeANN's search-phase anonymous memory is ~490 MB with 10 B PQ
+(100 MB of codes), independent of thread count; DiskANN with the same PQ uses
+~100 MB. The excess is unexplained; check before citing PipeANN DRAM numbers.
 
 ## Score
 

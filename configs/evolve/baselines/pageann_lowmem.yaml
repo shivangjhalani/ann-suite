@@ -2,6 +2,7 @@
 # of rarely referenced neighbors stored inline in the pages, only mem_budget_gb of
 # hot neighbors' PQ cached in DRAM, and a navigation graph over a sample of pages.
 # PQ size stays at B = 0.32 (34 B/vector) while DRAM is set by the budget.
+# 0.07 GB is the minimum generate_page_graph accepts at 10M (it rejects 0.03).
 # Run: uv run python tools/evolve/evolve_bench.py baselines configs/evolve/baselines/pageann_lowmem.yaml
 name: "frontier-pageann-lowmem-bigann10m"
 data_dir: "/home/isfcr/data"
@@ -29,7 +30,7 @@ x-search: &search
   args: {num_threads: 8, beam_width: 5, nav_L: 10, cache_ratio: 0.0}
   sweep: [{Ls: 15}, {Ls: 25}, {Ls: 40}, {Ls: 60}, {Ls: 100}, {Ls: 160}, {Ls: 250}]
 algorithms:
-  - name: PageANN-mem0.03-nav50k
+  - name: PageANN-mem0.07-nav50k
     x-system: PageANN
     docker_image: ann-suite/pageann:latest
     algorithm_type: disk
@@ -38,7 +39,7 @@ algorithms:
       timeout_seconds: 21600
       memory_limit: none
       cpu_affinity: none   # pin searches only; builds use all cores
-      args: {variant: pageann, R: 48, L: 128, B: 0.32, mem_budget_gb: 0.03, nav_sampled_pages: 50000, M: 16, num_threads: 24}
+      args: {variant: pageann, R: 48, L: 128, B: 0.32, mem_budget_gb: 0.07, nav_sampled_pages: 50000, M: 16, num_threads: 24}
     search: *search
   - name: PageANN-mem0.15-nav200k
     x-system: PageANN

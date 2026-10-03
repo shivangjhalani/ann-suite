@@ -6,6 +6,8 @@ Subcommands (run from the ann-suite root; see docs/EVOLVE.md):
               the evolved harness floor (a null program through the full pipeline)
   baselines   run configs/evolve/baselines_*.yaml and write the frontier point set
   candidate   build + search one candidate program, score it, print one JSON line
+  add-reference  measure a reference program (a known design on the harness) and
+              add its points to the frontier as a named baseline
 
 `candidate` is what OpenEvolve's evaluator calls (over SSH). It holds a file lock
 for the whole evaluation: every search point drops the OS page cache, so two
@@ -134,6 +136,22 @@ def cmd_floors(cfg: dict[str, Any]) -> None:
 # ------------------------------------------------------------------ baselines
 
 
+def _merge_frontier(out: Path, points: list[Point], names: set[str]) -> list[Point]:
+    """Merge points into the frontier file under a lock (configs may run in
+    parallel), replacing earlier points of the same configuration name."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with (out.parent / ".frontier.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        old = (
+            [p for p in load_points(out) if p.label.split(":")[0].split("@")[0] not in names]
+            if out.exists()
+            else []
+        )
+        allp = old + points
+        save_points(allp, out)
+    return allp
+
+
 def cmd_baselines(cfg: dict[str, Any], baseline_config: Path) -> None:
     _ensure_sudo_env()
     floors = _floors(cfg)
@@ -161,18 +179,7 @@ def cmd_baselines(cfg: dict[str, Any], baseline_config: Path) -> None:
         points.append(point_from_result(r, systems.get(base, base), floor))
     out = REPO / cfg["frontier"]
     out.parent.mkdir(parents=True, exist_ok=True)
-    # Baseline configs may run in parallel: merge under a lock, replacing earlier
-    # points of the same algorithm configuration (the label's name part).
-    names = {r.algorithm.split("@")[0] for r in results}
-    with (out.parent / ".frontier.lock").open("w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        old = (
-            [p for p in load_points(out) if p.label.split(":")[0].split("@")[0] not in names]
-            if out.exists()
-            else []
-        )
-        allp = old + points
-        save_points(allp, out)
+    allp = _merge_frontier(out, points, {r.algorithm.split("@")[0] for r in results})
     front = pareto(allp)
     print(
         json.dumps(
@@ -415,6 +422,27 @@ def _tail(path: Any, n: int = 3000) -> str:
         return ""
 
 
+def _harness_points(
+    good: list[dict[str, Any]], index_bytes: int, floor: float, system: str, prefix: str
+) -> list[Point]:
+    return [
+        Point(
+            system=system,
+            label=f"{prefix}{p['point']}:{json.dumps(p['params'])}",
+            miss=1.0 - p["recall"],
+            pages=p["pages"],
+            dram_mb=max(0.0, (p["peak_anon_mb"] or 0.0) - floor),
+            index_gb=index_bytes / 1e9,
+            extra={
+                "rounds": p["rounds"],
+                "cpu_ms_per_query": p["cpu_ms_per_query"],
+                "recall": p["recall"],
+            },
+        )
+        for p in good
+    ]
+
+
 def _evaluate(
     cfg: dict[str, Any],
     program: Path,
@@ -459,18 +487,7 @@ def _evaluate(
                 )
                 return report
         if stage == "full" and score_it:
-            cand_points = [
-                Point(
-                    system="candidate",
-                    label=f"point{p['point']}:{json.dumps(p['params'])}",
-                    miss=1.0 - p["recall"],
-                    pages=p["pages"],
-                    dram_mb=max(0.0, (p["peak_anon_mb"] or 0.0) - floor),
-                    index_gb=res["index_bytes"] / 1e9,
-                    extra={"rounds": p["rounds"], "cpu_ms_per_query": p["cpu_ms_per_query"]},
-                )
-                for p in good
-            ]
+            cand_points = _harness_points(good, res["index_bytes"], floor, "candidate", "point")
             baselines = load_points(REPO / cfg["frontier"])
             sc = score(cand_points, baselines, Box.from_config(cfg["box"]))
             report.update({k: sc[k] for k in ("combined_score", "hv_gain", "distance")})
@@ -508,6 +525,28 @@ def cmd_candidate(cfg: dict[str, Any], program: Path, cand: str, stages: list[st
     print(json.dumps(report, default=str))
 
 
+def cmd_reference(cfg: dict[str, Any], program: Path, name: str, system: str) -> None:
+    """Measure a reference program (a published design implemented on the harness)
+    on the full stage and merge its points into the frontier as baseline `system`.
+    Use for classic designs no packaged system covers, so the evolver earns no
+    credit for rediscovering them."""
+    if not re.fullmatch(r"[A-Za-z0-9_.+-]{1,64}", name):
+        raise SystemExit("reference name must match [A-Za-z0-9_.+-]{1,64}")
+    lock_path = Path(cfg["index_dir"]) / ".evolve.lock"
+    with lock_path.open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        report = _evaluate(cfg, program, f"ref-{name}", ["full"], score_it=False)
+    st = report["stages"].get("full", {})
+    if not st.get("ok"):
+        raise SystemExit(f"reference failed: {report.get('error')}")
+    good = [p for p in st["points"] if p["ok"]]
+    floor = _floors(cfg).get(cfg["image"], 0.0)
+    # Labels "<name>:p<i>:<params>": the name part keys merge replacement.
+    points = _harness_points(good, st["index_bytes"], floor, system, f"{name}:p")
+    allp = _merge_frontier(REPO / cfg["frontier"], points, {name})
+    print(json.dumps({"added": len(points), "points": len(allp), "pareto": len(pareto(allp))}))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--config", type=Path, default=REPO / "configs/evolve/bigann10m.yaml")
@@ -519,6 +558,10 @@ def main() -> None:
     c.add_argument("program", type=Path)
     c.add_argument("--id", required=True)
     c.add_argument("--stages", default="sanity,full")
+    r = sub.add_parser("add-reference")
+    r.add_argument("program", type=Path)
+    r.add_argument("--name", required=True)
+    r.add_argument("--system", required=True)
     ns = ap.parse_args()
     _quiet_logs()
     os.chdir(REPO)
@@ -527,6 +570,8 @@ def main() -> None:
         cmd_floors(cfg)
     elif ns.cmd == "baselines":
         cmd_baselines(cfg, ns.baseline_config)
+    elif ns.cmd == "add-reference":
+        cmd_reference(cfg, ns.program, ns.name, ns.system)
     else:
         cmd_candidate(cfg, ns.program, ns.id, ns.stages.split(","))
 
