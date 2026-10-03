@@ -118,11 +118,16 @@ class DiskANNIndex:
         data_file = self.index_path / "data.bin"
 
         # Write vectors in diskann binary format
-        # Format: [uint32 num_points][uint32 dimension][float32 vectors...]
+        # Format: [uint32 num_points][uint32 dimension][vectors...]. uint8 data
+        # (BIGANN/SIFT bvecs) stays uint8: casting it to float32 quadruples the
+        # on-disk node size and the pages read per query, a handicap the native
+        # DiskANN does not have. Search then needs search_args.vector_dtype: uint8.
+        vector_dtype = np.uint8 if data.dtype == np.uint8 else np.float32
         with open(data_file, "wb") as f:
             np.array([n_vectors], dtype=np.uint32).tofile(f)
             np.array([dimension], dtype=np.uint32).tofile(f)
-            data.astype(np.float32).tofile(f)
+            for i in range(0, n_vectors, 1_000_000):
+                np.ascontiguousarray(data[i : i + 1_000_000], dtype=vector_dtype).tofile(f)
 
         # Build index
         start_time = time.perf_counter()
@@ -138,7 +143,7 @@ class DiskANNIndex:
             pq_disk_bytes=pq_disk_bytes,
             build_memory_maximum=build_memory_maximum,
             search_memory_maximum=kwargs.get("search_memory_maximum", 0.5),
-            vector_dtype=np.float32,
+            vector_dtype=vector_dtype,
         )
 
         build_time = time.perf_counter() - start_time
@@ -447,7 +452,9 @@ def run_build(config: dict[str, Any]) -> dict[str, Any]:
     try:
         # Load dataset
         dataset_path = Path(config["dataset_path"])
-        data = np.load(dataset_path).astype(np.float32)
+        data = np.load(dataset_path, mmap_mode="r")
+        if data.dtype != np.uint8:
+            data = data.astype(np.float32)
         print(f"Loaded {len(data)} vectors from {dataset_path}", file=sys.stderr)
 
         # Extract configuration
