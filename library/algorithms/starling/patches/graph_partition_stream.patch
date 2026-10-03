@@ -1,0 +1,167 @@
+diff --git a/include/partitioner.h b/include/partitioner.h
+index 203a865..8bcd8df 100644
+--- a/include/partitioner.h
++++ b/include/partitioner.h
+@@ -148,31 +148,49 @@ class graph_partitioner {
+       }
+       relayout_adj(_freq_nei_list, full_graph);
+     }
+-    // copy to direct_graph
+-    direct_graph.clear();
+-    direct_graph.resize(full_graph.size());
++    // direct_graph is a full second copy of full_graph unless --cut truncates it.
++    // On a 100M index that copy, plus the reverse graph, does not fit in RAM,
++    // so skip it when the adjacency lists are not being shortened.
++    if (cut != INF || full_graph.empty()) {
++      direct_graph.clear();
++      direct_graph.resize(full_graph.size());
+ #pragma omp parallel for
+-    for (unsigned i = 0; i < _nd; i++) {
+-      direct_graph[i].assign(full_graph[i].begin(), full_graph[i].end());
+-    }
+-    // cut graph
+-    if(cut !=INF){
+-      std::cout << "direct graph will be cut, it degree become "<<cut << std::endl;
+-    }
++      for (unsigned i = 0; i < _nd; i++) {
++        direct_graph[i].assign(full_graph[i].begin(), full_graph[i].end());
++      }
++      if (cut != INF) {
++        std::cout << "direct graph will be cut, it degree become " << cut << std::endl;
++      }
+ #pragma omp parallel for
++      for (unsigned i = 0; i < _nd; i++) {
++        if (cut < direct_graph[i].size()) {
++          direct_graph[i].resize(cut);
++        }
++      }
++    } else {
++      std::cout << "keeping a single adjacency copy for LDG" << std::endl;
++    }
++    auto &fwd = direct_graph.empty() ? full_graph : direct_graph;
++    // reverse graph. A mutex per node is ~40B * npts (4GB at 100M) and is only
++    // there to serialize appends, so stripe the locks instead.
++    std::vector<unsigned> indeg(_nd, 0);
+     for (unsigned i = 0; i < _nd; i++) {
+-      if (cut < direct_graph[i].size()) {
+-        direct_graph[i].resize(cut);
++      for (unsigned dst : fwd[i]) {
++        if (dst < _nd) indeg[dst]++;
+       }
+     }
+-    // reverse graph
+-    std::vector<std::mutex> ms(_nd);
+     reverse_graph.resize(_nd);
+-#pragma omp parallel for shared(reverse_graph, direct_graph)
+     for (unsigned i = 0; i < _nd; i++) {
+-      for (unsigned j = 0; j < direct_graph[i].size(); j++) {
+-        std::lock_guard<std::mutex> lock(ms[direct_graph[i][j]]);
+-        reverse_graph[direct_graph[i][j]].emplace_back(i);
++      reverse_graph[i].reserve(indeg[i]);
++    }
++    constexpr unsigned nlocks = 65536;
++    std::vector<std::mutex> ms(nlocks);
++#pragma omp parallel for schedule(dynamic, 1024)
++    for (unsigned i = 0; i < _nd; i++) {
++      for (unsigned dst : fwd[i]) {
++        if (dst >= _nd) continue;
++        std::lock_guard<std::mutex> lock(ms[dst & (nlocks - 1)]);
++        reverse_graph[dst].emplace_back(i);
+       }
+     }
+     std::cout << "reverse graph done." << std::endl;
+@@ -298,30 +316,25 @@ class graph_partitioner {
+ 
+       _partition_number = ROUND_UP(_nd, C) / C;
+ 
+-      std::unique_ptr<char[]> mem_index = std::make_unique<char[]>(_partition_number * SECTOR_LEN);
+-      in.open(index_name, std::ios::binary);
+-      in.seekg(SECTOR_LEN, std::ios::beg);
+-      in.read(mem_index.get(), _partition_number * SECTOR_LEN);
+-      in.close();
++      // Stream the index a sector at a time. Loading all of it (tens of GB)
++      // at once sits on top of the adjacency lists and gets the process killed.
+       full_graph.resize(_nd);
+       _u64 des = 0;
+-#pragma omp parallel for schedule(dynamic, 1) reduction(+ : des)
+-      for (unsigned i = 0; i < _partition_number; i++) {
+-        std::unique_ptr<char[]> sector_buf = std::make_unique<char[]>(SECTOR_LEN);
+-        memcpy(sector_buf.get(), mem_index.get() + i * SECTOR_LEN, SECTOR_LEN);
++      std::vector<char> sector_buf(SECTOR_LEN);
++      in.open(index_name, std::ios::binary);
++      in.seekg(SECTOR_LEN, std::ios::beg);
++      for (_u64 i = 0; i < _partition_number; i++) {
++        in.read(sector_buf.data(), SECTOR_LEN);
+         for (unsigned j = 0; j < C && i * C + j < _nd; j++) {
+-          std::unique_ptr<char[]> node_buf = std::make_unique<char[]>(_max_node_len);
+-          memcpy(node_buf.get(), sector_buf.get() + j * _max_node_len, _max_node_len);
+-          unsigned &nnbr = *(unsigned *)(node_buf.get() + _dim * sizeof(T));
+-          unsigned *nhood_buf = (unsigned *)(node_buf.get() + (_dim * sizeof(T)) + sizeof(unsigned));
+-          std::vector<unsigned> tmp(nnbr);
++          char *node_buf = sector_buf.data() + j * _max_node_len;
++          unsigned nnbr = *(unsigned *)(node_buf + _dim * sizeof(T));
++          unsigned *nhood_buf = (unsigned *)(node_buf + (_dim * sizeof(T)) + sizeof(unsigned));
++          full_graph[i * C + j].assign(nhood_buf, nhood_buf + nnbr);
+           des += nnbr;
+-          memcpy((char *)tmp.data(), nhood_buf, nnbr * sizeof(unsigned));
+-          full_graph[i * C + j].assign(tmp.begin(), tmp.end());
+         }
+       }
++      in.close();
+       std::cout << "avg degree: " << (double)des / _nd << std::endl;
+-      mem_index.reset();
+       C = (SECTOR_LEN * BS) / _max_node_len;
+       _partition_number = ROUND_UP(_nd, C) / C;
+       std::cout << "_nd: " << _nd << " _dim:" << _dim << " C:" << C << " pn:" << _partition_number << std::endl;
+@@ -352,11 +365,7 @@ class graph_partitioner {
+       writer.write((char *)&s, sizeof(unsigned));
+       writer.write((char *)p.data(), sizeof(unsigned) * s);
+     }
+-    std::vector<unsigned> id2pidv(_nd);
+-    for (auto n : id2pid) {
+-      id2pidv[n.first] = n.second;
+-    }
+-    writer.write((char *)id2pidv.data(), sizeof(unsigned) * _nd);
++    writer.write((char *)id2pid.data(), sizeof(unsigned) * _nd);
+   }
+ 
+   /**
+@@ -386,7 +395,7 @@ class graph_partitioner {
+     re_id2pid();
+   }
+   void re_id2pid() {
+-    id2pid.clear();
++    id2pid.assign(_nd, INF);
+     for (unsigned i = 0; i < _partition_number; i++) {
+       for (unsigned j = 0; j < _partition[i].size(); j++) {
+         id2pid[_partition[i][j]] = i;
+@@ -453,7 +462,8 @@ class graph_partitioner {
+     unsigned res = INF;
+     std::unordered_map<unsigned, unsigned> pcount;
+     unsigned tpid = 0;
+-    for (auto n : direct_graph[i]) {
++    const auto &fwd = direct_graph.empty() ? full_graph[i] : direct_graph[i];
++    for (auto n : fwd) {
+       unsigned pid = id2pid[n];
+       if (pid == INF) continue;
+       pcount[pid] = pcount[pid] + 1;
+@@ -501,9 +511,7 @@ class graph_partitioner {
+ 
+   // graph partition
+   void graph_partition(const char *filename, int k, int lock_nums = 0) {
+-    for (unsigned i = 0; i < _nd; i++) {
+-      id2pid[i] = INF;
+-    }
++    id2pid.assign(_nd, INF);
+     _partition.clear();
+     _partition.resize(_partition_number);
+     std::unordered_set<unsigned> vis;
+@@ -644,7 +652,7 @@ class graph_partitioner {
+   int cur = 0;
+   std::vector<std::vector<unsigned>> reverse_graph;
+   std::vector<std::vector<unsigned>> undirect_graph;
+-  std::unordered_map<unsigned, unsigned> id2pid;
++  std::vector<unsigned> id2pid;
+   std::unordered_map<unsigned, unsigned> id2ratio;
+   int round = 0;
+   double ivf_time = 0.0;
