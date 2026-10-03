@@ -560,7 +560,7 @@ class ContainerRunner:
         volumes = self._prepare_volumes(algorithm, additional_volumes)
 
         # Prepare resource limits
-        resource_limits = self._prepare_resource_limits(algorithm)
+        resource_limits = self._prepare_resource_limits(algorithm, mode)
 
         container: Container | None = None
 
@@ -874,8 +874,15 @@ class ContainerRunner:
             volumes.update(additional_volumes)
         return volumes
 
-    def _prepare_resource_limits(self, algorithm: AlgorithmConfig) -> dict[str, Any]:
-        """Prepare resource limits for the container."""
+    def _prepare_resource_limits(
+        self, algorithm: AlgorithmConfig, mode: str = "search"
+    ) -> dict[str, Any]:
+        """Prepare resource limits for the container.
+
+        ``build.memory_limit`` and ``build.cpu_affinity`` override the algorithm's
+        limits for the build phase ("none" lifts them), so a search-time DRAM budget or
+        core pinning need not bind the build.
+        """
         limits: dict[str, Any] = {
             "network_mode": "host",  # Eliminate NAT overhead for accurate latency
             "shm_size": "2g",  # Large workloads (FAISS, etc.) need more than 64MB default
@@ -888,23 +895,27 @@ class ContainerRunner:
             "user": f"{os.getuid()}:{os.getgid()}",
         }
 
-        if algorithm.cpu_affinity:
-            limits["cpuset_cpus"] = algorithm.cpu_affinity
+        cpu_affinity = algorithm.cpu_affinity
+        if mode == "build" and algorithm.build.cpu_affinity is not None:
+            override = algorithm.build.cpu_affinity
+            cpu_affinity = None if override.lower() == "none" else override
+        if cpu_affinity:
+            limits["cpuset_cpus"] = cpu_affinity
             # Pin memory placement to the same NUMA node(s) as the pinned CPUs so
             # page-cache / malloc'd memory stays local to the cores doing the work.
             # This removes cross-NUMA traffic noise, which can distort ANN QPS and
             # latency measurements. If NUMA is unavailable (single-node/non-NUMA),
             # cpuset_mems is left to the Docker default (no-op).
-            numa_nodes = cpuset_to_numa_nodes(algorithm.cpu_affinity)
+            numa_nodes = cpuset_to_numa_nodes(cpu_affinity)
             if numa_nodes:
                 limits["cpuset_mems"] = numa_nodes
                 logger.info(
-                    f"cpu_affinity '{algorithm.cpu_affinity}' -> cpuset_cpus and "
+                    f"cpu_affinity '{cpu_affinity}' -> cpuset_cpus and "
                     f"cpuset_mems={numa_nodes} (NUMA-local memory pinning)"
                 )
             else:
                 logger.debug(
-                    f"cpu_affinity '{algorithm.cpu_affinity}' set; NUMA topology not "
+                    f"cpu_affinity '{cpu_affinity}' set; NUMA topology not "
                     "available, memory placement left at Docker default"
                 )
 
@@ -913,10 +924,13 @@ class ContainerRunner:
             # like 8.0 caps the container at 8 logical cores regardless of cpuset.
             limits["nano_cpus"] = int(algorithm.cpu_limit * 1e9)
 
-        if algorithm.memory_limit:
-            limits["mem_limit"] = algorithm.memory_limit
-            limits["memswap_limit"] = algorithm.memory_limit
-
+        memory_limit = algorithm.memory_limit
+        if mode == "build" and algorithm.build.memory_limit is not None:
+            override = algorithm.build.memory_limit
+            memory_limit = None if override.lower() == "none" else override
+        if memory_limit:
+            limits["mem_limit"] = memory_limit
+            limits["memswap_limit"] = memory_limit
         return limits
 
     def _stream_logs_to_files(

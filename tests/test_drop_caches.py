@@ -120,6 +120,27 @@ class TestResourceLimits:
         assert limits["mem_limit"] == "8g"
         assert limits["memswap_limit"] == "8g"
 
+    def test_build_memory_limit_none_lifts_build_cap_only(self, runner: ContainerRunner) -> None:
+        algo = AlgorithmConfig(
+            name="A", docker_image="a:latest", memory_limit="685m", build={"memory_limit": "none"}
+        )
+        assert "mem_limit" not in runner._prepare_resource_limits(algo, "build")
+        assert runner._prepare_resource_limits(algo, "search")["mem_limit"] == "685m"
+
+    def test_build_cpu_affinity_none_unpins_build_only(self, runner: ContainerRunner) -> None:
+        algo = AlgorithmConfig(
+            name="A", docker_image="a:latest", cpu_affinity="0-7", build={"cpu_affinity": "none"}
+        )
+        assert "cpuset_cpus" not in runner._prepare_resource_limits(algo, "build")
+        assert runner._prepare_resource_limits(algo, "search")["cpuset_cpus"] == "0-7"
+
+    def test_build_memory_limit_overrides_size(self, runner: ContainerRunner) -> None:
+        algo = AlgorithmConfig(
+            name="A", docker_image="a:latest", memory_limit="1g", build={"memory_limit": "32g"}
+        )
+        assert runner._prepare_resource_limits(algo, "build")["mem_limit"] == "32g"
+        assert runner._prepare_resource_limits(algo, "search")["memswap_limit"] == "1g"
+
     def test_cpu_affinity_sets_cpuset_mems_when_numa_available(self, tmp_path: Path) -> None:
         """cpu_affinity should also pin memory to the matching NUMA node."""
         with (

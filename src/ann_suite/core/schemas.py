@@ -243,6 +243,24 @@ class BuildConfig(BaseModel):
         ),
     )
     args: dict[str, Any] = Field(default_factory=dict, description="Algorithm-specific build args")
+    memory_limit: str | None = Field(
+        default=None,
+        description=(
+            "Memory limit for the build phase only, overriding the algorithm's memory_limit "
+            "(which then binds search alone). 'none' lifts the limit for the build. Use it "
+            "when the DRAM budget under study is a search-time budget: a 10M index cannot be "
+            "built inside a 640 MB search budget, and build memory is not what is measured."
+        ),
+    )
+    cpu_affinity: str | None = Field(
+        default=None,
+        description=(
+            "CPU set for the build phase only, overriding the algorithm's cpu_affinity "
+            "(which then pins search alone). 'none' removes pinning for the build. Search "
+            "pinning keeps measurements comparable; a pinned multi-threaded build only runs "
+            "slower (a 24-thread build pinned to 8 cores oversubscribes them 3x)."
+        ),
+    )
     reuse_index: bool = Field(
         default=True,
         description=(
