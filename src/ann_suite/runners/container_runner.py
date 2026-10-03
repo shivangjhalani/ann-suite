@@ -588,8 +588,10 @@ class ContainerRunner:
                 # Use shlex to quote each part to preserve arguments
                 cmd_str = " ".join(shlex.quote(s) for s in full_cmd)
                 # We use '; sync; sleep 1' to ensure flush AND allow kernel counters to update
-                # before the cgroup is destroyed.
-                wrapped = f"{cmd_str}; sync; sleep 1"
+                # before the cgroup is destroyed. The runner's exit code is kept: without
+                # 'exit $rc' the container would exit with sleep's 0 and every failed
+                # phase would be recorded as success.
+                wrapped = f"{cmd_str}; rc=$?; sync; sleep 1; exit $rc"
 
                 logger.debug(f"{log_prefix}Sync-wrapped command: {wrapped}")
 
