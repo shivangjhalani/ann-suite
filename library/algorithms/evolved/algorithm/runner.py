@@ -7,71 +7,48 @@ identical build code, searched with a newer candidate) and otherwise the copy.
 
 Integrity measures (the candidate is machine-generated and selected for score,
 so it is treated as untrusted):
+- Candidate code never runs in this process. The container runs as root with no
+  network (the evolve config sets container_user/network); this runner starts
+  algorithm/sandbox.py as `nobody` and hands it file descriptors, not paths, for
+  the base vectors and its index directory. /data is 0700 on the host, so the
+  candidate cannot read queries, ground truth or other programs, and the runner
+  holds the queries and sends them one at a time. Index files are handed back to
+  the owner of /data/index afterwards.
 - The evolution data dir holds base vectors and queries only; ground truth lives
   outside the container's mounts. This runner reports no recall: it writes the
   result ids to <index>/results/<run_tag>_point_<i>.npz and the host scores them.
-- Disk reads at query time go through harness.QueryIO (O_DIRECT, counted). The
-  host compares the harness page count with the kernel's io.stat for the query
-  window; a large excess means reads bypassed the harness.
+- Disk reads at query time go through harness.QueryIO (O_DIRECT, counted in the
+  sandbox, so untrusted). The host compares that count with the kernel's io.stat
+  for the query window and scores the larger of the two (less a small slack).
 - Before the first query every file page under the writable/mounted trees is
   synced and evicted (posix_fadvise DONTNEED), and after the run the process
   must not hold file-backed mappings of index/data files or shmem beyond a small
-  slack. Violations are reported in "integrity" and the host fails the point.
+  slack, and the container's page cache must not have grown (io.read() bypasses
+  it, so growth means file data cached outside the DRAM measurement). Violations are reported in "integrity" and the host fails the point.
 """
 
 from __future__ import annotations
 
+import argparse
+import ast
+import contextlib
+import hashlib
 import json
 import os
+import shutil
+import struct
+import subprocess
 import sys
+import time
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
+import numpy as np
 
-def _pin_search_threads() -> None:
-    """Size BLAS/OpenMP pools to search_args.threads before numpy/faiss load.
+from algorithm import wire
 
-    Left alone, OpenBLAS spins one thread per core on every small mat-vec, which
-    multiplies the CPU time per query by the core count without doing work.
-    """
-    if "--mode" not in sys.argv or sys.argv[sys.argv.index("--mode") + 1] != "search":
-        return
-    try:
-        cfg = json.loads(sys.argv[sys.argv.index("--config") + 1])
-        n = str(int(cfg.get("search_args", {}).get("threads", 1)))
-    except (ValueError, IndexError):
-        n = "1"
-    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMBA_NUM_THREADS"):
-        os.environ[var] = n
-
-
-_pin_search_threads()
-
-import argparse  # noqa: E402
-import ast  # noqa: E402
-import contextlib  # noqa: E402
-import hashlib  # noqa: E402
-import importlib.util  # noqa: E402
-import shutil  # noqa: E402
-import time  # noqa: E402
-from datetime import UTC, datetime  # noqa: E402
-from pathlib import Path  # noqa: E402
-from types import ModuleType  # noqa: E402
-from typing import Any  # noqa: E402
-
-import numpy as np  # noqa: E402
-
-from algorithm.harness import BuildContext, QueryIO, SearchContext  # noqa: E402
-
-# Imported up front in every search so the measured memory floor (a null
-# program) includes the libraries candidates are expected to use.
-try:  # noqa: SIM105
-    import faiss  # noqa: F401
-except ImportError:
-    pass
-try:  # noqa: SIM105
-    import numba  # noqa: F401
-except ImportError:
-    pass
-
+NOBODY = 65534
 SLACK_MB = 16.0
 EVICT_ROOTS = ("/data", "/tmp", "/var/tmp", "/app", "/root", "/home")
 LIB_PREFIXES = ("/usr/", "/lib", "/opt/", "/app/algorithm", "/etc/", "/sys/", "/proc/")
@@ -94,14 +71,111 @@ def _search_points(source: str) -> list[dict[str, Any]]:
     raise ValueError("program defines no SEARCH_POINTS literal")
 
 
-def _load_program(path: Path) -> ModuleType:
-    spec = importlib.util.spec_from_file_location("candidate", path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load {path}")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["candidate"] = mod
-    spec.loader.exec_module(mod)
-    return mod
+class CandidateError(Exception):
+    """The candidate program failed inside the sandbox (its traceback is on stderr)."""
+
+
+class Sandbox:
+    """The candidate's process: `nobody`, no inherited fds except the ones given."""
+
+    def __init__(self, pass_fds: tuple[int, ...], threads: int | None) -> None:
+        if os.geteuid() != 0:
+            raise RuntimeError(
+                "the evolved runner must start as root to sandbox candidate code "
+                "(set container_user: root on the algorithm)"
+            )
+        to_child_r, self._w = os.pipe()
+        self._r, from_child_w = os.pipe()
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+            "PYTHONPATH": "/app",
+            "PYTHONUNBUFFERED": "1",
+            "HOME": "/tmp",
+            "NUMBA_CACHE_DIR": "/tmp/numba_cache_sandbox",
+        }
+        if threads is not None:
+            # Left alone, OpenBLAS spins one thread per core on every small
+            # mat-vec, multiplying CPU time per query without doing work.
+            for var in (
+                "OMP_NUM_THREADS",
+                "OPENBLAS_NUM_THREADS",
+                "MKL_NUM_THREADS",
+                "NUMBA_NUM_THREADS",
+            ):
+                env[var] = str(threads)
+        self.proc = subprocess.Popen(
+            [sys.executable, "-m", "algorithm.sandbox", str(to_child_r), str(from_child_w)],
+            pass_fds=(to_child_r, from_child_w, *pass_fds),
+            user=NOBODY,
+            group=NOBODY,
+            extra_groups=[],
+            umask=0o022,
+            env=env,
+            cwd="/tmp",
+            stdin=subprocess.DEVNULL,
+            stdout=sys.stderr.fileno(),
+        )
+        os.close(to_child_r)
+        os.close(from_child_w)
+
+    def send_json(self, obj: Any) -> None:
+        wire.send_json(self._w, obj)
+
+    def reply(self) -> None:
+        """Wait for the sandbox's acknowledgement; raise its error if it failed."""
+        try:
+            msg = wire.recv_json(self._r)
+        except EOFError:
+            self.proc.wait()
+            msg = f"candidate process died (exit code {self.proc.returncode})"
+            raise CandidateError(msg) from None
+        if not msg.get("ok"):
+            raise CandidateError(str(msg.get("error", "unknown error")))
+
+    def query(self, q: np.ndarray, k: int) -> tuple[np.ndarray, int, int]:
+        wire.send(self._w, b"Q", q.tobytes())
+        try:
+            kind, payload = wire.recv(self._r, max(wire.MAX_CONTROL, 8 * k + 8))
+        except EOFError:
+            self.proc.wait()
+            msg = f"candidate process died (exit code {self.proc.returncode})"
+            raise CandidateError(msg) from None
+        if kind == b"J":
+            raise CandidateError(str(json.loads(payload).get("error", "unknown error")))
+        if kind != b"Q" or len(payload) != 8 * k + 8:
+            raise CandidateError("malformed reply from the candidate process")
+        pages, rounds = struct.unpack("<ii", payload[8 * k :])
+        return np.frombuffer(payload[: 8 * k], dtype=np.int64), pages, rounds
+
+    def cpu_seconds(self) -> float:
+        """utime + stime (+ waited-for children) of the candidate process."""
+        fields = Path(f"/proc/{self.proc.pid}/stat").read_text().rsplit(")", 1)[1].split()
+        ticks = sum(int(x) for x in fields[11:15])
+        return ticks / os.sysconf("SC_CLK_TCK")
+
+    def close(self) -> None:
+        with contextlib.suppress(OSError):
+            wire.send(self._w, b"X")
+        with contextlib.suppress(OSError):
+            os.close(self._w)
+        try:
+            self.proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait()
+        with contextlib.suppress(OSError):
+            os.close(self._r)
+
+
+def _host_owner() -> tuple[int, int]:
+    st = os.stat("/data/index")
+    return st.st_uid, st.st_gid
+
+
+def _chown_tree(path: Path, uid: int, gid: int) -> None:
+    for p in [path, *path.rglob("*")]:
+        with contextlib.suppress(OSError):
+            os.lchown(p, uid, gid)
 
 
 def _dir_bytes(path: Path) -> int:
@@ -120,10 +194,30 @@ def run_build(config: dict[str, Any]) -> dict[str, Any]:
         shutil.copy2(src, index_path / "program.py")
         data = np.load(config["dataset_path"], mmap_mode="r")
         threads = int(args.get("threads", os.cpu_count() or 8))
-        ctx = BuildContext(data, index_path, threads, str(config.get("metric", "L2")))
-        prog = _load_program(index_path / "program.py")
-        prog.build(ctx)
-        ctx.close()
+        uid, gid = _host_owner()
+        os.chown(index_path, NOBODY, NOBODY)
+        base_fd = os.open(config["dataset_path"], os.O_RDONLY)
+        index_fd = os.open(index_path, os.O_RDONLY | os.O_DIRECTORY)
+        sandbox = None
+        try:
+            sandbox = Sandbox((base_fd, index_fd), threads=None)
+            sandbox.send_json(
+                {
+                    "cmd": "build",
+                    "source": source,
+                    "base_fd": base_fd,
+                    "index_fd": index_fd,
+                    "threads": threads,
+                    "metric": str(config.get("metric", "L2")),
+                }
+            )
+            sandbox.reply()
+        finally:
+            if sandbox is not None:
+                sandbox.close()
+            os.close(base_fd)
+            os.close(index_fd)
+            _chown_tree(index_path, uid, gid)
         meta = {
             "num_points": int(data.shape[0]),
             "dim": int(data.shape[1]),
@@ -131,6 +225,7 @@ def run_build(config: dict[str, Any]) -> dict[str, Any]:
             "program_sha256": hashlib.sha256(source.encode()).hexdigest(),
         }
         (index_path / "evolved_meta.json").write_text(json.dumps(meta))
+        os.chown(index_path / "evolved_meta.json", uid, gid)
         index_bytes = _dir_bytes(index_path / "disk") + _dir_bytes(index_path / "mem")
         return {
             "status": "success",
@@ -141,7 +236,8 @@ def run_build(config: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         import traceback
 
-        traceback.print_exc(file=sys.stderr)
+        if not isinstance(exc, CandidateError):
+            traceback.print_exc(file=sys.stderr)
         return {
             "status": "error",
             "error_message": f"{type(exc).__name__}: {exc}",
@@ -173,27 +269,52 @@ def _evict_page_cache() -> int:
     return n
 
 
-def _suspicious_file_rss_mb() -> float:
+@contextlib.contextmanager
+def _as_sandbox_user():
+    """Take the sandbox's uid as effective uid (root stays the saved uid) while
+    reading its /proc files: without CAP_SYS_PTRACE, which Docker drops, root may
+    not read another user's /proc/<pid>/smaps."""
+    os.setegid(NOBODY)
+    os.seteuid(NOBODY)
+    try:
+        yield
+    finally:
+        os.seteuid(0)
+        os.setegid(0)
+
+
+def _suspicious_file_rss_mb(pid: int) -> float:
     """Rss of file-backed mappings that are not libraries (e.g. mmapped index data)."""
     total_kb = 0
     current = None
-    with open("/proc/self/smaps") as f:
-        for line in f:
-            parts = line.split()
-            if not parts:
-                continue
-            if "-" in parts[0] and len(parts) >= 5 and not parts[0].endswith(":"):
-                path = parts[5] if len(parts) >= 6 else ""
-                ok = (
-                    not path.startswith("/")
-                    or path.startswith(LIB_PREFIXES)
-                    or ".so" in path
-                    or path.endswith(".pyc")
-                )
-                current = None if ok else path
-            elif parts[0] == "Rss:" and current is not None:
-                total_kb += int(parts[1])
+    with _as_sandbox_user():
+        lines = Path(f"/proc/{pid}/smaps").read_text().splitlines()
+    for line in lines:
+        parts = line.split()
+        if not parts:
+            continue
+        if "-" in parts[0] and len(parts) >= 5 and not parts[0].endswith(":"):
+            path = parts[5] if len(parts) >= 6 else ""
+            # Only root-owned trees are exempt: the sandbox cannot write there, so
+            # a data file cannot pass as a library by its name (x.so, x.pyc).
+            ok = not path.startswith("/") or path.startswith(LIB_PREFIXES)
+            current = None if ok else path
+        elif parts[0] == "Rss:" and current is not None:
+            total_kb += int(parts[1])
     return total_kb / 1024.0
+
+
+def _cgroup_read_bytes() -> int:
+    """Bytes the container has read from block devices (cgroup v2 io.stat)."""
+    total = 0
+    try:
+        for line in Path("/sys/fs/cgroup/io.stat").read_text().splitlines():
+            for field in line.split()[1:]:
+                if field.startswith("rbytes="):
+                    total += int(field[7:])
+    except OSError:
+        return -1
+    return total
 
 
 def _cgroup_mem_stat(key: str) -> float:
@@ -208,6 +329,8 @@ def _cgroup_mem_stat(key: str) -> float:
 
 
 def run_search(config: dict[str, Any]) -> dict[str, Any]:
+    sandbox = None
+    index_fd = -1
     try:
         index_path = Path(config["index_path"])
         meta = json.loads((index_path / "evolved_meta.json").read_text())
@@ -226,14 +349,29 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
         threads = int(args.get("threads", 1))
         queries = np.load(config["queries_path"])
         nq = len(queries)
+        uid, gid = _host_owner()
 
         w_start = _now()
         t0 = time.perf_counter()
-        prog = _load_program(program_path)
-        ctx = SearchContext(index_path, threads, str(config.get("metric", "L2")))
-        searcher = prog.Searcher(ctx, dict(params))
+        index_fd = os.open(index_path, os.O_RDONLY | os.O_DIRECTORY)
+        sandbox = Sandbox((index_fd,), threads=threads)
+        sandbox.send_json(
+            {
+                "cmd": "search",
+                "source": source,
+                "index_fd": index_fd,
+                "threads": threads,
+                "metric": str(config.get("metric", "L2")),
+                "params": params,
+                "k": k,
+                "dim": int(queries.shape[1]),
+                "dtype": queries.dtype.str,
+            }
+        )
+        sandbox.reply()
         load_s = time.perf_counter() - t0
         evicted = _evict_page_cache()
+        file_mb_start = _cgroup_mem_stat("file")
         shm_used_mb = 0.0
         try:
             st = os.statvfs("/dev/shm")
@@ -247,27 +385,31 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
         rounds = np.zeros(nq, dtype=np.int32)
         lat = np.zeros(nq, dtype=np.float64)
         q_start = _now()
-        cpu0 = time.process_time()
+        cpu0 = sandbox.cpu_seconds()
+        rbytes0 = _cgroup_read_bytes()
         t1 = time.perf_counter()
         for i in range(nq):
-            io = QueryIO(ctx)
             ts = time.perf_counter()
-            res = np.asarray(searcher.search(queries[i], k, io), dtype=np.int64).ravel()[:k]
+            ids[i], pages[i], rounds[i] = sandbox.query(np.ascontiguousarray(queries[i]), k)
             lat[i] = time.perf_counter() - ts
-            ids[i, : res.size] = res
-            pages[i], rounds[i] = io.pages, io.rounds
         total_s = time.perf_counter() - t1
-        cpu_s = time.process_time() - cpu0
+        rbytes1 = _cgroup_read_bytes()
+        cpu_s = sandbox.cpu_seconds() - cpu0
         q_end = _now()
+        page_cache_growth_mb = _cgroup_mem_stat("file") - file_mb_start
 
         bad_ids = int(((ids < -1) | (ids >= meta["num_points"])).sum())
         integrity = {
+            "sandboxed": True,
             "evicted_files": evicted,
             "shm_used_mb": round(shm_used_mb, 2),
-            "file_mapped_rss_mb": round(_suspicious_file_rss_mb(), 2),
+            "file_mapped_rss_mb": round(_suspicious_file_rss_mb(sandbox.proc.pid), 2),
             "cgroup_shmem_mb": round(_cgroup_mem_stat("shmem"), 2),
+            "page_cache_growth_mb": round(page_cache_growth_mb, 2),
             "out_of_range_ids": bad_ids,
         }
+        sandbox.close()
+        sandbox = None
         violations = []
         if shm_used_mb > SLACK_MB:
             violations.append(f"/dev/shm holds {shm_used_mb:.0f} MB")
@@ -275,15 +417,24 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
             violations.append(f"file-backed mappings hold {integrity['file_mapped_rss_mb']} MB")
         if integrity["cgroup_shmem_mb"] > SLACK_MB:
             violations.append(f"cgroup shmem is {integrity['cgroup_shmem_mb']} MB")
+        if page_cache_growth_mb > SLACK_MB:
+            # io.read() is O_DIRECT; page cache filled during the queries means file
+            # data read with ordinary reads, i.e. DRAM that anon memory does not show.
+            violations.append(
+                f"page cache grew by {page_cache_growth_mb:.0f} MB during the queries: "
+                "data read outside io.read()"
+            )
         if bad_ids:
             violations.append(f"{bad_ids} result ids out of range")
+        if (pages < 0).any() or (rounds < 0).any():
+            violations.append("negative page or round counts")
         integrity["violations"] = violations
 
         out_dir = index_path / "results"
         out_dir.mkdir(exist_ok=True)
-        np.savez(
-            out_dir / f"{run_tag}_point_{point}.npz", ids=ids, pages=pages, rounds=rounds, lat=lat
-        )
+        out_file = out_dir / f"{run_tag}_point_{point}.npz"
+        np.savez(out_file, ids=ids, pages=pages, rounds=rounds, lat=lat)
+        _chown_tree(out_dir, uid, gid)
         lat_ms = lat * 1000.0
         return {
             "status": "success",
@@ -306,6 +457,11 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
                 "params": params,
                 "harness_pages_per_query": float(pages.mean()),
                 "rounds_per_query": float(rounds.mean()),
+                # Exactly the query loop (ann-suite's own figure comes from 100 ms
+                # monitor samples, which can catch the end of the index load).
+                "kernel_pages_per_query": (
+                    (rbytes1 - rbytes0) / 4096 / nq if rbytes0 >= 0 and rbytes1 >= 0 else None
+                ),
                 "cpu_ms_per_query": cpu_s * 1000.0 / nq,
                 "program_sha256": hashlib.sha256(source.encode()).hexdigest(),
                 "build_program_sha256": meta["program_sha256"],
@@ -315,7 +471,8 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         import traceback
 
-        traceback.print_exc(file=sys.stderr)
+        if not isinstance(exc, CandidateError):
+            traceback.print_exc(file=sys.stderr)
         return {
             "status": "error",
             "error_message": f"{type(exc).__name__}: {exc}",
@@ -323,6 +480,11 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
             "total_time_seconds": 0,
             "qps": 0,
         }
+    finally:
+        if sandbox is not None:
+            sandbox.close()
+        if index_fd >= 0:
+            os.close(index_fd)
 
 
 def main() -> None:
@@ -337,6 +499,7 @@ def main() -> None:
     if results_dir.exists():
         with contextlib.suppress(OSError):
             (results_dir / "metrics.json").write_text(json.dumps(result))
+            os.chown(results_dir / "metrics.json", *_host_owner())
     raise SystemExit(0 if result.get("status") == "success" else 1)
 
 

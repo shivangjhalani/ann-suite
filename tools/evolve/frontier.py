@@ -1,4 +1,4 @@
-"""Frontier-gain scoring for evolved disk-ANN programs.
+"""Budget-cell scoring for evolved disk-ANN programs.
 
 A benchmark point is a vector of costs, all minimized:
     miss      1 - recall@10 (recall recomputed from returned ids where possible)
@@ -6,19 +6,26 @@ A benchmark point is a vector of costs, all minimized:
     dram_mb   search-phase peak anonymous memory minus the image's runtime floor
     index_gb  index size on SSD + DRAM-resident index files
 
-Each axis is mapped to [0, 1] in log space over a fixed box (configs/evolve/*.yaml);
-points beyond the box's upper edge contribute no volume. The baseline frontier is
-the set of points of the published systems (PipeANN, DiskANN, SPANN, Starling,
-PageANN, LAANN) measured in ann-suite under the same DRAM cap and queries.
+Scoring follows big-ann-benchmarks practice: fixed budgets, fixed accuracy
+targets, and comparison with the best known method under the same budget. A cell
+is (DRAM budget T, recall target R). In each cell the opponent value is the fewest
+pages/query any baseline (published systems and textbook reference designs)
+needs to reach recall R with DRAM <= T, and the candidate value is the same for
+the candidate's points:
 
-Score of a candidate (its points C) against baselines B:
-    hv_gain  = (HV(B u C) - HV(B)) / HV(B)        if C adds any volume (> 0)
-    distance = min_c max_b min_i (c_i - b_i)^+    otherwise: the uniform log-space
-               improvement the best candidate point needs to escape domination
-    combined_score = hv_gain if hv_gain > 0 else -distance
-so the score is positive exactly when the candidate extends the frontier in any
-direction, and still has a gradient while it is dominated. HV is a fixed-seed
-Monte Carlo estimate (deterministic for a given box and sample count).
+    gain(T, R) = log2(opponent pages / candidate pages)     (> 0: fewer reads)
+    combined_score = max over covered cells of gain, floored at FLOOR
+
+A cell is covered only if some baseline reaches R within T. Cells without an
+opponent give no credit (they are reported so a reference can be added): an
+empty region of the trade-off space means nobody tried, not that it is hard.
+Both sides are measured with the same rule: pages at exactly R come from the 2-D
+Pareto front of (recall, pages), interpolated log-log in (miss, pages) between
+the two front points around R and never extrapolated, so a sweep point placed
+just above R gains nothing over a coarser sweep. DRAM jitter (a few MB of
+allocator noise) is absorbed by a margin charged against the candidate and
+credited to the baselines. If no candidate point reaches the lowest target
+within the largest budget, the score is FLOOR minus the recall shortfall.
 """
 
 from __future__ import annotations
@@ -32,6 +39,8 @@ from typing import Any
 import numpy as np
 
 AXES = ("miss", "pages", "dram_mb", "index_gb")
+FLOOR = -4.0  # 16x more pages than the opponent; worse is not distinguished
+MIN_MISS = 1e-4
 
 
 @dataclass
@@ -49,45 +58,105 @@ class Point:
 
 
 @dataclass
-class Box:
-    lo: dict[str, float]
-    hi: dict[str, float]
-    samples: int = 1_000_000
-    seed: int = 12345
+class Cells:
+    dram_tiers_mb: list[float]
+    recall_targets: list[float]
+    dram_margin_mb: float
 
     @classmethod
-    def from_config(cls, cfg: dict[str, Any]) -> Box:
+    def from_config(cls, cfg: dict[str, Any]) -> Cells:
         return cls(
-            lo={a: float(cfg[a][0]) for a in AXES},
-            hi={a: float(cfg[a][1]) for a in AXES},
-            samples=int(cfg.get("samples", 1_000_000)),
-            seed=int(cfg.get("seed", 12345)),
+            dram_tiers_mb=[float(t) for t in cfg["dram_tiers_mb"]],
+            recall_targets=[float(r) for r in cfg["recall_targets"]],
+            dram_margin_mb=float(cfg["dram_margin_mb"]),
         )
 
-    def normalize(self, points: list[Point], clip: bool = True) -> np.ndarray:
-        """Log-space position in the box; 0 = best edge, 1 = worst edge."""
-        out = np.empty((len(points), len(AXES)))
-        for j, a in enumerate(AXES):
-            lo, hi = math.log(self.lo[a]), math.log(self.hi[a])
-            vals = np.array([max(getattr(p, a), self.lo[a] * 1e-3) for p in points], dtype=float)
-            out[:, j] = (np.log(vals) - lo) / (hi - lo)
-        return np.clip(out, 0.0, None) if clip else out
 
-    def _samples(self) -> np.ndarray:
-        return np.random.default_rng(self.seed).random((self.samples, len(AXES)))
+def pages_at(points: list[Point], recall: float) -> tuple[float, Point] | None:
+    """Fewest pages/query to reach `recall` along the points' (recall, pages)
+    Pareto front, interpolated log-log between the neighbours of `recall`; None
+    if no point reaches it. Returns (pages, the front point at or above recall)."""
+    front: list[Point] = []  # recall descending, pages strictly descending
+    for p in sorted(points, key=lambda p: (p.miss, p.pages)):
+        if not front or p.pages < front[-1].pages:
+            front.append(p)
+    above = [p for p in front if 1.0 - p.miss >= recall]
+    if not above:
+        return None
+    hi = above[-1]
+    below = [p for p in front if 1.0 - p.miss < recall]
+    if not below or 1.0 - hi.miss == recall:
+        return hi.pages, hi
+    lo = below[0]
+    m_hi, m_lo, m = max(hi.miss, MIN_MISS), lo.miss, max(1.0 - recall, MIN_MISS)
+    if m_lo <= m_hi:
+        return hi.pages, hi
+    t = (math.log(m_lo) - math.log(m)) / (math.log(m_lo) - math.log(m_hi))
+    return math.exp(math.log(lo.pages) + t * (math.log(hi.pages) - math.log(lo.pages))), hi
 
 
-def dominated_mask(u: np.ndarray, samples: np.ndarray, chunk: int = 200_000) -> np.ndarray:
-    """Samples dominated by at least one point of u (all coordinates <=)."""
-    mask = np.zeros(samples.shape[0], dtype=bool)
-    if u.size == 0:
-        return mask
-    inside = u[(u <= 1.0).all(axis=1)]
-    for s in range(0, samples.shape[0], chunk):
-        block = samples[s : s + chunk]
-        for p in inside:
-            mask[s : s + chunk] |= (block >= p).all(axis=1)
-    return mask
+def score(candidates: list[Point], baselines: list[Point], cells: Cells) -> dict[str, Any]:
+    if not candidates:
+        return {"combined_score": -10.0, "cells": [], "best_cell": None, "uncovered": []}
+    margin = cells.dram_margin_mb
+    table = []
+    for tier in cells.dram_tiers_mb:
+        opp = [b for b in baselines if b.dram_mb - margin <= tier]
+        mine = [c for c in candidates if c.dram_mb + margin <= tier]
+        for target in cells.recall_targets:
+            o = pages_at(opp, target)
+            c = pages_at(mine, target)
+            table.append(
+                {
+                    "dram_mb": tier,
+                    "recall": target,
+                    "covered": o is not None,
+                    "opponent_pages": o[0] if o else None,
+                    "opponent": o[1].label if o else None,
+                    "opponent_point": _brief(o[1]) if o else None,
+                    "candidate_pages": c[0] if c else None,
+                    "candidate_point": _brief(c[1]) if c else None,
+                    "gain": math.log2(o[0] / c[0]) if o and c else None,
+                }
+            )
+    scored = [row for row in table if row["gain"] is not None]
+    uncovered = [
+        {"dram_mb": r["dram_mb"], "recall": r["recall"], "candidate_pages": r["candidate_pages"]}
+        for r in table
+        if not r["covered"] and r["candidate_pages"] is not None
+    ]
+    if scored:
+        best = max(scored, key=lambda r: r["gain"])
+        combined = max(best["gain"], FLOOR)
+        shortfall = 0.0
+    else:
+        best = None
+        eligible = [c for c in candidates if c.dram_mb + margin <= max(cells.dram_tiers_mb)]
+        top = max((1.0 - c.miss for c in eligible), default=0.0)
+        shortfall = max(0.0, min(cells.recall_targets) - top) if eligible else 0.9
+        combined = FLOOR - shortfall
+    return {
+        "combined_score": combined,
+        "best_cell": (
+            {"dram_mb": best["dram_mb"], "recall": best["recall"], "gain": best["gain"]}
+            if best
+            else None
+        ),
+        "recall_shortfall": shortfall,
+        "cells": table,
+        "uncovered": uncovered,
+    }
+
+
+def _brief(p: Point) -> dict[str, Any]:
+    return {
+        "label": p.label,
+        "recall": 1.0 - p.miss,
+        "pages": p.pages,
+        "dram_mb": p.dram_mb,
+        "index_gb": p.index_gb,
+        "rounds": p.extra.get("rounds"),
+    }
 
 
 def pareto(points: list[Point]) -> list[Point]:
@@ -98,56 +167,6 @@ def pareto(points: list[Point]) -> list[Point]:
         if not dom:
             keep.append(points[i])
     return keep
-
-
-def score(candidates: list[Point], baselines: list[Point], box: Box) -> dict[str, Any]:
-    if not candidates:
-        return {"combined_score": -10.0, "hv_gain": 0.0, "distance": None, "points": []}
-    samples = box._samples()
-    ub = box.normalize(baselines)
-    uc = box.normalize(candidates)
-    base_mask = dominated_mask(ub, samples)
-    both_mask = base_mask | dominated_mask(uc, samples)
-    hv_base = base_mask.mean()
-    hv_gain = float((both_mask.sum() - base_mask.sum()) / max(1, base_mask.sum()))
-
-    # Unclipped coordinates so moving toward the box from outside still counts.
-    ucu = box.normalize(candidates, clip=False)
-    ubu = box.normalize(baselines, clip=False)
-    per_point = []
-    for i, p in enumerate(candidates):
-        diff = ucu[i][None, :] - ubu  # >0 where the candidate is worse
-        need = np.clip(diff.min(axis=1), 0.0, None)  # escape baseline b: beat it on 1 axis
-        worst = int(need.argmax())
-        nearest = int(np.abs(diff).sum(axis=1).argmin())
-        # A point outside the box (e.g. recall < 0.8) adds no volume even when
-        # undominated; charge its distance to the box so it still has a gradient.
-        outside = float(np.clip(ucu[i] - 1.0, 0.0, None).max())
-        per_point.append(
-            {
-                "label": p.label,
-                **{a: getattr(p, a) for a in AXES},
-                "escape_distance": max(float(need.max()), outside),
-                "outside_box_by": outside,
-                "dominated_by": baselines[worst].label if need.max() > 0 else None,
-                "nearest_baseline": {
-                    "label": baselines[nearest].label,
-                    **{a: getattr(baselines[nearest], a) for a in AXES},
-                },
-                "in_box": bool((ucu[i] <= 1.0).all()),
-            }
-        )
-    distance = min(pp["escape_distance"] for pp in per_point)
-    # hv_gain > 0 needs an in-box, undominated point, whose distance is 0, so the
-    # two branches meet at 0 and the score is continuous across the frontier.
-    combined = hv_gain if hv_gain > 0 else -distance
-    return {
-        "combined_score": combined,
-        "hv_gain": hv_gain,
-        "distance": distance,
-        "hv_baseline": float(hv_base),
-        "points": per_point,
-    }
 
 
 def save_points(points: list[Point], path: Path) -> None:

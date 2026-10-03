@@ -26,12 +26,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import docker
-from docker.errors import ContainerError, ImageNotFound, NotFound
-
 from ann_suite.core.constants import MAX_LOG_FILES_PER_TYPE
-from ann_suite.core.schemas import AlgorithmConfig, ResourceSample, ResourceSummary
 from ann_suite.monitoring.base import CollectorResult, CollectorSample, get_system_block_size
 from ann_suite.monitoring.cgroups_collector import CgroupsV2Collector
+from docker.errors import ContainerError, ImageNotFound, NotFound
+
+from ann_suite.core.schemas import AlgorithmConfig, ResourceSample, ResourceSummary
 
 SUDO_PASSWORD_ENV = "ANN_SUITE_SUDO_PASSWORD"
 
@@ -892,8 +892,10 @@ class ContainerRunner:
             # invoking user rather than root. Otherwise leftover indices cannot be
             # removed without sudo/docker. Images that genuinely need root can opt out
             # in the future; the benchmark algorithm runners do not.
-            "user": f"{os.getuid()}:{os.getgid()}",
+            "user": algorithm.container_user or f"{os.getuid()}:{os.getgid()}",
         }
+        if algorithm.network == "none":
+            limits["network_mode"] = "none"
 
         cpu_affinity = algorithm.cpu_affinity
         if mode == "build" and algorithm.build.cpu_affinity is not None:

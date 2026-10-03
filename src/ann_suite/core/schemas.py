@@ -10,7 +10,7 @@ import logging
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -500,6 +500,22 @@ class AlgorithmConfig(BaseModel):
     memory_limit: str | None = Field(
         default=None,
         description="Hard container memory limit (e.g., '8g'); swap is capped to the same value",
+    )
+    container_user: str | None = Field(
+        default=None,
+        description=(
+            "Container user ('uid:gid' or 'root'). Default: the invoking host user, so "
+            "files written to the bind mounts stay removable. Only for runners that drop "
+            "privileges themselves, e.g. the evolved harness runs untrusted candidate "
+            "code as an unprivileged user and hands back file ownership afterwards."
+        ),
+    )
+    network: Literal["host", "none"] = Field(
+        default="host",
+        description=(
+            "Container network. 'none' cuts the container off from the network, so "
+            "untrusted code cannot fetch e.g. published ground truth."
+        ),
     )
     datasets: list[str] = Field(
         default_factory=list,

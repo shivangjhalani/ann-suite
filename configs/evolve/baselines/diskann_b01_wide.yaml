@@ -1,0 +1,39 @@
+# Frontier baseline: DiskANN B0.1 (10 B PQ in DRAM, ~100 MB) searched deeper than
+# diskann.yaml, so it reaches recall 0.95 inside the 128 MB budget cell. Reuses the
+# index built by diskann.yaml; same name, so its points replace the shorter sweep.
+# Run: uv run python tools/evolve/evolve_bench.py baselines configs/evolve/baselines/diskann_b01_wide.yaml
+name: "frontier-diskann-b01-wide-bigann10m"
+data_dir: "/home/isfcr/data"
+results_dir: "./results/evolve/baselines"
+index_dir: "/home/isfcr/evolve_indices/baselines"
+monitor_interval_ms: 100
+# Same search DRAM cap and pinned cores as the evolved candidates (configs/evolve/bigann10m.yaml).
+resources:
+  memory_limit: "785m"
+  cpu_affinity: "0-7"
+datasets:
+  - name: bigann10m-q2k
+    base_path: bigann10m-q2k/base.npy
+    query_path: bigann10m-q2k/queries.npy
+    ground_truth_path: bigann10m-q2k/ground_truth.npy
+    distance_metric: L2
+    dimension: 128
+    point_type: uint8
+    base_count: 10000000
+    query_count: 2000
+x-search: &search
+  timeout_seconds: 1800
+  k: 10
+  batch_mode: false
+  args: {num_threads: 8, index_prefix: ann, num_nodes_to_cache: 0, beam_width: 4, vector_dtype: uint8}
+  sweep: [{Ls: 15}, {Ls: 25}, {Ls: 40}, {Ls: 60}, {Ls: 100}, {Ls: 160}, {Ls: 250}, {Ls: 400}, {Ls: 600}, {Ls: 1000}]
+algorithms:
+  - name: DiskANN-B0.1
+    x-system: DiskANN
+    docker_image: ann-suite/diskann:latest
+    algorithm_type: disk
+    datasets: [bigann10m-q2k]
+    build:
+      prebuilt_path: "DiskANN-B0.1/bigann10m-q2k/L-128_R-64_build-memory-maximum-16_num-threads-2-a4b8984d"
+      required_files: ["ann_disk.index", "ann_pq_compressed.bin", "ann_pq_pivots.bin"]
+    search: *search

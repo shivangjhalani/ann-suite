@@ -25,6 +25,13 @@ Rules the harness enforces or measures:
   files.
 - Before the first query the runner evicts every file page from the page cache, so
   data cannot be smuggled into DRAM through the page cache.
+- The program runs sandboxed: an unprivileged process with no network that sees
+  only the base vectors (ctx.data) and its own index directory, never the query
+  set. Queries arrive one at a time; each answer is collected before the next
+  query is sent.
+- Scored pages/query are the larger of the harness count and the kernel's count
+  (less 1 page of slack); more than 64 I/O rounds per query or an index above
+  8x the raw vectors fails the point.
 """
 
 from __future__ import annotations
@@ -120,6 +127,12 @@ class SearchContext:
         return self._disk[name].num_pages
 
 
+def _page_buffer(size: int) -> mmap.mmap:
+    """Page-aligned buffer for O_DIRECT reads. Private, so it is anonymous memory
+    (counted as DRAM) rather than shmem, which the runner caps at 16 MB."""
+    return mmap.mmap(-1, size, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+
+
 class QueryIO:
     """Per-query I/O handle; the only way to touch disk-resident pages."""
 
@@ -127,7 +140,7 @@ class QueryIO:
         self._ctx = ctx
         self.pages = 0
         self.rounds = 0
-        self._buf = mmap.mmap(-1, PAGE * 64)  # page-aligned, grown on demand
+        self._buf = _page_buffer(PAGE * 64)  # grown on demand
 
     def read(self, name: str, page_ids: Any) -> np.ndarray:
         """Read pages of disk file `name` in one I/O round.
@@ -144,7 +157,7 @@ class QueryIO:
         need = ids.size * PAGE
         if len(self._buf) < need:
             self._buf.close()
-            self._buf = mmap.mmap(-1, need)
+            self._buf = _page_buffer(need)
         view = memoryview(self._buf)
         for j, pid in enumerate(ids.tolist()):
             n = os.preadv(f.fd, [view[j * PAGE : (j + 1) * PAGE]], pid * PAGE)

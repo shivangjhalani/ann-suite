@@ -13,10 +13,15 @@ results_dir: ./results/evolve
 programs_subdir: programs                  # <data_dir>/programs/<id>.py
 image: ann-suite/evolved:latest
 k: 10
-# Search-phase DRAM cap: 0.5x the raw dataset (640 MB) plus the harness runtime
-# floor (59 MB, results/evolve/floors.json), which is subtracted before scoring.
-# Builds are not capped.
-memory_limit: 700m
+# DRAM budget: 0.5x the raw dataset (640 MB) above the harness runtime floor
+# (~86 MB: runner + sandboxed candidate process, results/evolve/floors.json),
+# which is subtracted before scoring. The budget is enforced by the scoring (a
+# point above 640 MB + margin lands in no budget cell); the container limit
+# leaves headroom so library code pages are not evicted and re-read during the
+# queries, which would inflate the kernel I/O count. Page cache cannot be used as
+# hidden DRAM: the runner fails a point whose page cache grows during the
+# queries. Builds are not capped.
+memory_limit: 1g
 build_threads: 16
 search_threads: 1
 monitor_interval_ms: 100
@@ -39,6 +44,16 @@ stages:
     ground_truth: /home/isfcr/data/bigann10m-q2k/ground_truth.npy
     build_timeout_s: 3600
     search_timeout_s: 1800
+    scored: true
+  hidden:                                  # validation only: queries 2000-3999
+    dataset: bigann10m-hidden
+    base_count: 10000000
+    query_count: 2000
+    ground_truth: /home/isfcr/data/bigann10m-hidden/ground_truth.npy
+    build_from: full                       # same base vectors: reuse the full build
+    build_timeout_s: 3600
+    search_timeout_s: 1800
+    scored: true
   # Held-out re-checks for top programs (not used during evolution; unscored):
   #   evolve_bench.py candidate prog.py --id X --stages heldout_deep,heldout_t2i
   # Sets built by tools/evolve/make_heldout.py.
@@ -68,21 +83,30 @@ stages:
 frontier: results/evolve/frontier_bigann10m_q2k.json
 floors: results/evolve/floors.json
 
-# Scoring box (log scale; see tools/evolve/frontier.py). Upper edges: recall 0.8,
-# 2000 pages/query, 640 MB (0.5x raw), 40 GB index.
-box:
-  miss: [0.0005, 0.2]
-  pages: [1, 2000]
-  dram_mb: [4, 640]
-  index_gb: [0.1, 40]
-  samples: 1000000
-  seed: 12345
-
+# Scoring (tools/evolve/frontier.py): budget cells, big-ann-benchmarks style. In
+# each (DRAM budget, recall target) cell, gain = log2(best baseline pages/query /
+# candidate pages/query); score = best gain over cells that have a baseline.
+# Cells with no baseline give no credit and are reported as uncovered.
+score:
+  dram_tiers_mb: [32, 128, 640]
+  recall_targets: [0.90, 0.95]
+  # Peak-DRAM jitter of a repeated run was 3-6 MB: candidates are charged and
+  # baselines credited this much when placed into a budget.
+  dram_margin_mb: 6
+# A would-be record is re-measured on the same queries and on hidden ones; the
+# minimum of the three scores counts (see evolve_bench.py).
+validation:
+  stages: [full, hidden]
 guardrails:
   max_search_points: 8
   max_cpu_ms_per_query: 200          # Python, single thread; generous on purpose
   io_crosscheck_ratio: 1.25          # kernel pages/query may exceed harness pages/query
-  io_crosscheck_slack_pages: 2       #   by at most ratio * harness + slack
+  io_crosscheck_slack_pages: 1       #   by at most ratio * harness + slack; scored
+                                     #   pages = max(harness, kernel - slack). The kernel
+                                     #   count is read by the runner over exactly the
+                                     #   query loop and matched the harness within 0.05.
+  max_rounds_per_query: 64           # ~DiskANN's hops at recall 0.9; each round = one SSD wait
+  max_index_gb: 10.24                # 8x the raw vectors
 
 # Images whose runtime floor (Python + imports, idle) is subtracted from their
 # measured search peak anonymous memory.

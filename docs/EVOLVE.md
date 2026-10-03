@@ -10,7 +10,7 @@ measured Pareto frontier.
 |---|---|
 | Candidate harness (fixed) | `library/algorithms/evolved/` (`harness.py` = the API, `runner.py`) |
 | Evaluation + scoring tool | `tools/evolve/evolve_bench.py`, `tools/evolve/frontier.py` |
-| Settings (data, caps, box, guardrails) | `configs/evolve/bigann10m.yaml` |
+| Settings (data, budget cells, guardrails) | `configs/evolve/bigann10m.yaml` |
 | Baseline configs | `configs/evolve/baselines/*.yaml` |
 | New baselines | `library/algorithms/starling/`, `library/algorithms/pageann/` (PageANN + LAANN) |
 | Outputs | `results/evolve/` (`floors.json`, `frontier_bigann10m_q2k.json`, `candidates/<id>.json`) |
@@ -19,7 +19,10 @@ measured Pareto frontier.
 
 BIGANN (= ANN_SIFT1B) 10M prefix, uint8, L2; the first 2000 of the 10k public
 queries (`/home/isfcr/data/bigann10m-q2k`). The 1M sanity stage uses the 1M prefix
-with the first 1000 queries. `sift10m`/`sift1m` in `/home/isfcr/data` are the same
+with the first 1000 queries. Queries 2000-3999 (`bigann10m-hidden`, built by
+`make_heldout.py bigann10m-hidden` with the published big-ann-benchmarks ground
+truth, which equals our brute force on queries 0-1999) are used only to validate
+would-be records. `sift10m`/`sift1m` in `/home/isfcr/data` are the same
 vectors stored as float32 (checked byte-for-byte); evolution uses the true uint8
 bytes so page counts and DRAM are not inflated 4x.
 
@@ -36,21 +39,50 @@ numba and diskannpy.
 
 ## Measurement and integrity
 
+Candidate code is untrusted (machine-written and selected for score), so it runs
+sandboxed. The evolved container runs as root with no network
+(`container_user: root`, `network: none` on the algorithm); the runner
+(`algorithm/runner.py`) starts the candidate (`algorithm/sandbox.py`) as `nobody`
+and gives it file descriptors, not paths, for the base vectors and its own index
+directory. `/data` is 0700 on the host, so the candidate cannot open queries,
+other datasets or other programs, cannot read the runner's memory (different uid,
+ptrace scope 1), and cannot download published ground truth. The runner keeps
+the queries and sends them one at a time over a pipe, the next only after the
+previous answer. An adversarial probe program (reading queries, listing `/data`,
+`/proc/<parent>`, TCP and DNS, writing `/data`) was blocked on every attempt in
+both build and search.
+
 Per search point (fresh container, page cache dropped by ann-suite):
 
 - **recall@10**: recomputed on the host from the result ids the runner dumps
   (`<index>/results/<run_tag>_point_<i>.npz`).
-- **pages/query**: counted by `QueryIO.read()` (4 KB O_DIRECT reads). The host
-  rejects the point if the kernel's io.stat pages/query for the query window
-  exceed `1.25 x harness + 2`, i.e. reads that bypassed the harness.
+- **pages/query**: counted by `QueryIO.read()` (4 KB O_DIRECT reads) inside the
+  sandbox, so not trusted alone: the scored value is
+  `max(harness, kernel - 1)`, the kernel count being the container's io.stat read
+  bytes taken by the runner right before the first and after the last query (it
+  matches the harness within 0.05 pages/query for honest programs; ann-suite's
+  own figure, from 100 ms samples, caught the end of large index loads). The host
+  also rejects the point if the kernel count exceeds `1.25 x harness + 1`.
+- **rounds/query** (`io.read()` calls): more than 64 fails the point, so pages
+  cannot be cut by reading one page per SSD round trip.
 - **DRAM**: search-phase peak anonymous memory of the container minus the image
-  floor (`floors.json`: a null program for the evolved image, idle Python for the
-  C++ images). Cap: 640 MB + floor (0.5x the 1.28 GB raw data).
+  floor (`floors.json`: a null program for the evolved image, now ~86 MB for the
+  runner + sandbox processes; idle Python for the C++ images). Budget: 640 MB
+  (0.5x the 1.28 GB raw data), enforced by the score (a point above it is in no
+  budget cell). The container limit (1 GB) leaves headroom so library code pages
+  are not evicted and re-read during queries: at 730 MB, IVFADC+R-pq32 (455 MB
+  anon) showed ~7 extra kernel pages/query from such refaults, which the I/O
+  cross-check mistook for bypass reads.
+- **page cache**: `io.read()` is O_DIRECT, so the container's page cache must not
+  grow by more than 16 MB during the queries; growth means index data read with
+  ordinary reads and kept as uncounted DRAM.
 - Before the first query the runner fsyncs and evicts (`POSIX_FADV_DONTNEED`)
   every file under `/data`, `/tmp`, `/app`, ...; afterwards it rejects the point if
-  `/dev/shm`, cgroup shmem or file-backed non-library mappings exceed 16 MB, or if
-  result ids are out of range.
-- **index size**: bytes under the index's `disk/` and `mem/`.
+  `/dev/shm`, cgroup shmem or file-backed mappings outside root-owned library
+  trees exceed 16 MB, or if result ids are out of range.
+- **index size**: bytes under the index's `disk/` and `mem/`; above 10.24 GB (8x
+  the raw vectors) every point fails, so disk is not traded without limit for
+  fewer reads (a larger index usually lowers pages/query).
 - CPU time per query is a guardrail only (Python; 200 ms/query).
 
 Builds are not DRAM-capped (`build.memory_limit: none`, a per-phase override added
@@ -78,8 +110,13 @@ implemented as harness programs in `tools/evolve/reference/` and added with
 `evolve_bench.py add-reference <prog> --name N --system S`, measured exactly like
 candidates. Without them the evolver is credited for rediscovering textbook
 methods (the first OpenEvolve mutation reproduced IVFADC+R and scored +0.28 on
-index size alone). Current references: IVF-Flat on disk (= the seed, so evolution
-starts at 0) and IVFADC+R with 32 / 16 B PQ in DRAM (Jegou et al. 2011).
+index size alone). Current references: IVF-Flat on disk (= the seed, plus a deeper
+nprobe sweep, `ivf_flat_disk_wide.py`), IVFADC+R with 32 / 16 / 8 B PQ in DRAM
+(Jegou et al. 2011) and IVFADC+R with 16 B PQ codes on SSD
+(`ivfadc_rerank_ssd_pq16.py`, ~10 MB of DRAM: covers the 32 MB cells). DiskANN
+B0.1 is also swept deeper (`baselines/diskann_b01_wide.yaml`, Ls up to 1000) to
+reach 0.95 inside 128 MB. Add a reference whenever a run reports a cell as
+uncovered.
 
 Measured caveat: PipeANN's search-phase anonymous memory is ~490 MB with 10 B PQ
 (100 MB of codes), independent of thread count; DiskANN with the same PQ uses
@@ -87,17 +124,33 @@ Measured caveat: PipeANN's search-phase anonymous memory is ~490 MB with 10 B PQ
 
 ## Score
 
-`tools/evolve/frontier.py`. Axes (all minimized): miss = 1 - recall, pages/query,
-DRAM MB, index GB; each mapped to [0, 1] in log space over the box in
-`configs/evolve/bigann10m.yaml` (recall >= 0.8, <= 2000 pages, <= 640 MB,
-<= 40 GB).
+`tools/evolve/frontier.py`, budget cells in the style of big-ann-benchmarks:
+fixed budgets, fixed accuracy targets, comparison with the best known method
+under the same budget. Cells are (DRAM budget T in {32, 128, 640} MB) x (recall@10
+target R in {0.90, 0.95}).
 
-- If the candidate's points add hypervolume to the baseline set:
-  `combined_score = (HV(B u C) - HV(B)) / HV(B)` (> 0).
-- Otherwise: `combined_score = -min_c max_b min_i (c_i - b_i)^+`, the uniform
-  log-space improvement its best point still needs to escape domination (points
-  outside the box are charged their distance to it).
-- Failed sanity gate (best 1M recall < 0.5): `-5 - (1 - recall)`. Broken: `-10`.
+- In each cell, opponent pages = fewest pages/query any baseline (published
+  systems and reference designs) needs to reach R with DRAM <= T; candidate pages
+  likewise from the candidate's points. Pages at exactly R are interpolated
+  log-log in (miss, pages) along each side's (recall, pages) Pareto front, never
+  extrapolated, so a sweep point placed just above R gains nothing.
+- `gain = log2(opponent pages / candidate pages)`; `combined_score` = the best
+  gain over covered cells, floored at -4 (16x more pages).
+- A cell without any baseline is **uncovered**: it gives no credit and is listed
+  in the report (`uncovered`) so a reference can be added. An empty region means
+  nobody tried, not that it is hard; the pilot showed that open-ended frontier
+  hypervolume rewards exactly such regions (IVFADC+R with codes on SSD scored
+  +0.68 on DRAM alone).
+- DRAM jitter (3-6 MB between identical runs) is absorbed by a 6 MB margin,
+  charged to the candidate and credited to the baselines.
+- No candidate point reaches 0.90 within 640 MB: `-4 - recall shortfall`. Failed
+  sanity gate (best 1M recall < 0.5): `-5 - (1 - recall)`. Broken: `-10`.
+
+**Validation.** A candidate whose score would beat the record (best validated
+score so far, `results/evolve/record_<name>.json`, at least 0) is searched again
+on the same queries and on the hidden queries (same build); its score becomes
+the minimum of the three, so neither measurement luck nor fitting to the scored
+queries sets a record. Delete the record file when starting a new run.
 
 MAP-Elites features reported for OpenEvolve: `dram_mb`, `rounds`.
 
@@ -107,6 +160,7 @@ MAP-Elites features reported for OpenEvolve: `dram_mb`, `rounds`.
 uv run python tools/evolve/evolve_bench.py floors                 # once per image change
 tools/evolve/run_baselines.sh                                      # hours; once
 uv run python tools/evolve/evolve_bench.py candidate prog.py --id test1   # one candidate
+uv run python tools/evolve/make_heldout.py bigann10m-hidden        # hidden queries, once
 ```
 
 `ANN_SUITE_SUDO_PASSWORD` (for cache drops) is read from

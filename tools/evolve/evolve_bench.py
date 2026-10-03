@@ -13,6 +13,12 @@ Subcommands (run from the ann-suite root; see docs/EVOLVE.md):
 for the whole evaluation: every search point drops the OS page cache, so two
 evaluations at once would corrupt each other's I/O counts.
 
+Validation: a candidate whose score would beat the record (best validated score
+so far, results/evolve/record_<name>.json; at least 0) is measured again on the
+same queries and on hidden queries it never saw (stage `hidden`, same base and
+build); its score becomes the minimum of the three. Delete the record file to
+start a new run from scratch.
+
 Build caching: indices are cached under <index_dir>/cache/<stage>/<hash>, where
 the hash covers the program source minus `class Searcher` and SEARCH_POINTS (plus
 the stage dataset). A candidate that only changes search code reuses the index,
@@ -41,7 +47,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from frontier import (
-    Box,
+    Cells,
     Point,
     load_points,
     pareto,
@@ -264,6 +270,10 @@ def _stage_config(
                 "name": f"Evolved-{cand}",
                 "docker_image": cfg["image"],
                 "algorithm_type": "disk",
+                # Candidate code runs sandboxed: the runner starts as root, drops the
+                # candidate to `nobody`, and the container has no network.
+                "container_user": "root",
+                "network": "none",
                 "datasets": [ds],
                 "memory_limit": cfg["memory_limit"],
                 "build": build,
@@ -309,12 +319,15 @@ def _run_stage(
     if not 1 <= len(points) <= gr["max_search_points"]:
         raise ValueError(f"SEARCH_POINTS must have 1..{gr['max_search_points']} entries")
     index_root = Path(cfg["index_dir"])
-    bhash = _build_hash(source, stage, ds)
-    cache_dir = index_root / "cache" / stage / bhash
+    # A stage on the same base vectors (e.g. hidden queries) reuses another
+    # stage's build.
+    bstage = st.get("build_from", stage)
+    bhash = _build_hash(source, bstage, cfg["stages"][bstage]["dataset"])
+    cache_dir = index_root / "cache" / bstage / bhash
     cached = use_cache and (cache_dir / "evolved_meta.json").exists()
     run_tag = f"{cand}-{int(time.time())}"
     container_prog = f"/data/{cfg['programs_subdir']}/{prog_host.name}"
-    prebuilt = f"cache/{stage}/{bhash}" if cached else None
+    prebuilt = f"cache/{bstage}/{bhash}" if cached else None
     t0 = time.time()
     results = _run_suite(
         _stage_config(cfg, stage, cand, container_prog, len(points), prebuilt, run_tag)
@@ -333,6 +346,7 @@ def _run_stage(
                     f"{st['base_count']:,} vectors (make the build faster)"
                 )
             log = _tail(b.stderr_path if b else None)
+            shutil.rmtree(index_root / f"Evolved-{cand}", ignore_errors=True)
             return {
                 "ok": False,
                 "error": f"build failed: {msg}",
@@ -346,28 +360,43 @@ def _run_stage(
         sr = r.search_result
         params = (r.hyperparameters or {}).get("search", {})
         pi = int(params.get("point", -1))
-        if sr is None or not sr.success:
+        npz_path = idx / "results" / f"{run_tag}_point_{pi}.npz" if idx is not None else None
+        # ann-suite's sync wrapper masks the runner's exit code, so a failed search
+        # can arrive as success=True: also require no error and a results file.
+        if sr is None or not sr.success or sr.error_message or not npz_path.exists():
             out_points.append(
                 {
                     "point": pi,
                     "ok": False,
-                    "error": (sr.error_message if sr else "no search result"),
+                    "error": (sr.error_message if sr else None) or "no search result",
                     "stderr_tail": _tail(sr.stderr_path if sr else None),
                 }
             )
             continue
         ev = (sr.output or {}).get("evolved", {})
-        npz = np.load(idx / "results" / f"{run_tag}_point_{pi}.npz")
+        npz = np.load(npz_path)
         rec = recall_at_k(npz["ids"], np.asarray(gt), cfg["k"])
         harness_pages = float(npz["pages"].mean())
-        kernel_pages = r.disk_io.search_pages_per_query
+        kernel_pages = ev.get("kernel_pages_per_query", r.disk_io.search_pages_per_query)
+        # The harness count is kept inside the candidate's process, so it is not
+        # trusted on its own: score whichever of it and the kernel's count is larger
+        # (less a small slack for metadata reads).
+        pages = max(harness_pages, (kernel_pages or 0.0) - gr["io_crosscheck_slack_pages"])
+        rounds = float(ev.get("rounds_per_query") or 0.0)
         problems = list(ev.get("integrity", {}).get("violations", []))
+        if not ev.get("integrity", {}).get("sandboxed"):
+            problems.append("search did not run in the sandbox")
         if kernel_pages is not None and kernel_pages > (
             gr["io_crosscheck_ratio"] * harness_pages + gr["io_crosscheck_slack_pages"]
         ):
             problems.append(
                 f"kernel read {kernel_pages:.1f} pages/query but the harness "
                 f"counted {harness_pages:.1f}: reads bypassed io.read()"
+            )
+        if rounds > gr["max_rounds_per_query"]:
+            problems.append(
+                f"{rounds:.1f} I/O rounds/query exceeds {gr['max_rounds_per_query']} "
+                "(each round waits for the SSD; batch reads into fewer io.read() calls)"
             )
         if ev.get("cpu_ms_per_query", 0) > gr["max_cpu_ms_per_query"]:
             problems.append(
@@ -380,9 +409,10 @@ def _run_stage(
                 "problems": problems,
                 "params": ev.get("params"),
                 "recall": rec,
-                "pages": harness_pages,
+                "pages": pages,
+                "harness_pages": harness_pages,
                 "kernel_pages": kernel_pages,
-                "rounds": ev.get("rounds_per_query"),
+                "rounds": rounds,
                 "cpu_ms_per_query": ev.get("cpu_ms_per_query"),
                 "peak_anon_mb": r.memory.search_peak_anon_mb,
                 "qps_python": r.qps,
@@ -401,6 +431,15 @@ def _run_stage(
         else 0
     )
     shutil.rmtree(index_root / f"Evolved-{cand}", ignore_errors=True)
+    if index_bytes > gr["max_index_gb"] * 1e9:
+        for p in out_points:
+            if "recall" in p:
+                p["ok"] = False
+                p["problems"] = [
+                    *p.get("problems", []),
+                    f"index is {index_bytes / 1e9:.2f} GB, over the "
+                    f"{gr['max_index_gb']} GB limit (8x the raw vectors)",
+                ]
     if idx is not None and not use_cache:
         shutil.rmtree(idx, ignore_errors=True)
     elif idx is not None:
@@ -486,12 +525,16 @@ def _evaluate(
                     f"< {cfg['stages']['sanity']['min_recall']}"
                 )
                 return report
-        if stage == "full" and score_it:
+        if cfg["stages"][stage].get("scored") and score_it:
             cand_points = _harness_points(good, res["index_bytes"], floor, "candidate", "point")
             baselines = load_points(REPO / cfg["frontier"])
-            sc = score(cand_points, baselines, Box.from_config(cfg["box"]))
-            report.update({k: sc[k] for k in ("combined_score", "hv_gain", "distance")})
-            report["frontier_table"] = sc["points"]
+            sc = score(cand_points, baselines, Cells.from_config(cfg["score"]))
+            report["stages"][stage]["score"] = sc["combined_score"]
+            if stage != "full":
+                continue
+            report.update({k: sc[k] for k in ("combined_score", "best_cell", "recall_shortfall")})
+            report["cells"] = sc["cells"]
+            report["uncovered"] = sc["uncovered"]
             report["features"] = {
                 "dram_mb": min(cp.dram_mb for cp in cand_points),
                 "rounds": min(cp.extra["rounds"] or 0 for cp in cand_points),
@@ -510,6 +553,8 @@ def cmd_candidate(cfg: dict[str, Any], program: Path, cand: str, stages: list[st
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
             report = _evaluate(cfg, program, cand, stages)
+            if "full" in stages and report.get("combined_score", FAIL) > _record(cfg)["score"]:
+                _validate(cfg, program, cand, report)
         except Exception as exc:
             report = {
                 "candidate": cand,
@@ -523,6 +568,36 @@ def cmd_candidate(cfg: dict[str, Any], program: Path, cand: str, stages: list[st
     log_dir.mkdir(parents=True, exist_ok=True)
     (log_dir / f"{cand}.json").write_text(json.dumps(report, indent=1, default=str))
     print(json.dumps(report, default=str))
+
+
+def _record_path(cfg: dict[str, Any]) -> Path:
+    return REPO / cfg["results_dir"] / f"record_{cfg['name']}.json"
+
+
+def _record(cfg: dict[str, Any]) -> dict[str, Any]:
+    p = _record_path(cfg)
+    return json.loads(p.read_text()) if p.exists() else {"score": 0.0, "candidate": None}
+
+
+def _validate(cfg: dict[str, Any], program: Path, cand: str, report: dict[str, Any]) -> None:
+    """Re-measure a would-be record on the same and on hidden queries; keep the
+    minimum score, so neither measurement luck nor fitting to the scored queries
+    sets a record."""
+    raw = report["combined_score"]
+    scores = {"first": raw}
+    for stage in cfg["validation"]["stages"]:
+        rep = _evaluate(cfg, program, f"{cand}-v{stage}", [stage])
+        st = rep.get("stages", {}).get(stage, {})
+        scores[f"{stage}_rerun" if stage == "full" else stage] = (
+            st.get("score") if st.get("score") is not None else rep.get("combined_score", FAIL)
+        )
+    validated = min(scores.values())
+    report["validation"] = {"scores": scores, "validated_score": validated}
+    report["combined_score"] = validated
+    if validated > _record(cfg)["score"]:
+        _record_path(cfg).write_text(
+            json.dumps({"score": validated, "candidate": cand, "time": time.time()})
+        )
 
 
 def cmd_reference(cfg: dict[str, Any], program: Path, name: str, system: str) -> None:
