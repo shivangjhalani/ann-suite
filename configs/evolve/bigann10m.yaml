@@ -1,0 +1,94 @@
+# Evolution setup: OpenEvolve candidates (library/algorithms/evolved) scored in
+# ann-suite against the frontier of published disk-ANN systems on BIGANN-10M.
+# Used by tools/evolve/evolve_bench.py; see docs/EVOLVE.md.
+#
+# Data: BIGANN (SIFT1B) 10M prefix, uint8, first 2000 of the 10k public queries.
+# The candidate data dir holds base.npy + queries.npy only; ground truth stays in
+# /home/isfcr/data and is read only by the host-side scorer.
+
+name: evolve-bigann10m
+data_dir: /home/isfcr/evolve_data          # mounted into candidate containers
+index_dir: /home/isfcr/evolve_indices
+results_dir: ./results/evolve
+programs_subdir: programs                  # <data_dir>/programs/<id>.py
+image: ann-suite/evolved:latest
+k: 10
+# Search-phase DRAM cap: 0.5x the raw dataset (640 MB) plus the harness runtime
+# floor (59 MB, results/evolve/floors.json), which is subtracted before scoring.
+# Builds are not capped.
+memory_limit: 700m
+build_threads: 16
+search_threads: 1
+monitor_interval_ms: 100
+cache:
+  max_gb: 150                              # LRU budget for cached candidate indices
+
+stages:
+  sanity:                                  # unscored gate: does it work at all?
+    dataset: bigann1m-q1k
+    base_count: 1000000
+    query_count: 1000
+    ground_truth: /home/isfcr/data/bigann1m-q1k/ground_truth.npy
+    build_timeout_s: 1200
+    search_timeout_s: 900
+    min_recall: 0.5
+  full:                                    # scored
+    dataset: bigann10m-q2k
+    base_count: 10000000
+    query_count: 2000
+    ground_truth: /home/isfcr/data/bigann10m-q2k/ground_truth.npy
+    build_timeout_s: 3600
+    search_timeout_s: 1800
+  # Held-out re-checks for top programs (not used during evolution; unscored):
+  #   evolve_bench.py candidate prog.py --id X --stages heldout_deep,heldout_t2i
+  # Sets built by tools/evolve/make_heldout.py.
+  heldout_deep:
+    dataset: deep10m-q2k
+    base_count: 10000000
+    query_count: 2000
+    dimension: 96
+    point_type: float32
+    metric: L2
+    ground_truth: /home/isfcr/data/deep10m-q2k/ground_truth.npy
+    build_timeout_s: 5400
+    search_timeout_s: 1800
+  heldout_t2i:
+    dataset: t2i10m-q2k
+    base_count: 10000000
+    query_count: 2000
+    dimension: 200
+    point_type: float32
+    metric: IP
+    ground_truth: /home/isfcr/data/t2i10m-q2k/ground_truth.npy
+    build_timeout_s: 7200
+    search_timeout_s: 1800
+
+# Baseline frontier, produced by `evolve_bench.py baselines` from
+# configs/evolve/baselines_bigann10m.yaml.
+frontier: results/evolve/frontier_bigann10m_q2k.json
+floors: results/evolve/floors.json
+
+# Scoring box (log scale; see tools/evolve/frontier.py). Upper edges: recall 0.8,
+# 2000 pages/query, 640 MB (0.5x raw), 40 GB index.
+box:
+  miss: [0.0005, 0.2]
+  pages: [1, 2000]
+  dram_mb: [4, 640]
+  index_gb: [0.1, 40]
+  samples: 1000000
+  seed: 12345
+
+guardrails:
+  max_search_points: 8
+  max_cpu_ms_per_query: 200          # Python, single thread; generous on purpose
+  io_crosscheck_ratio: 1.25          # kernel pages/query may exceed harness pages/query
+  io_crosscheck_slack_pages: 2       #   by at most ratio * harness + slack
+
+# Images whose runtime floor (Python + imports, idle) is subtracted from their
+# measured search peak anonymous memory.
+floor_images:
+  ann-suite/diskann:latest: "import numpy, diskannpy"
+  ann-suite/pipeann:latest: "import numpy"
+  ann-suite/spann:latest: "import numpy"
+  ann-suite/starling:latest: "import numpy"
+  ann-suite/pageann:latest: "import numpy"

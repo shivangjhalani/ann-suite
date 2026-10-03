@@ -1,0 +1,4 @@
+numpy==1.25.0
+faiss-cpu==1.8.0
+numba==0.59.1
+diskannpy==0.7.0

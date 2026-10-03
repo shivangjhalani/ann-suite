@@ -1,0 +1,100 @@
+# Frontier baseline: PageANN and LAANN (one codebase, library/algorithms/pageann)
+# on BIGANN-10M, first 2000 queries. cache_ratio caches that fraction of pages in
+# DRAM (counted in the measured memory), so it traces extra frontier points.
+# Run: uv run python tools/evolve/evolve_bench.py baselines configs/evolve/baselines/pageann.yaml
+name: "frontier-pageann-laann-bigann10m"
+data_dir: "/home/isfcr/data"
+results_dir: "./results/evolve/baselines"
+index_dir: "/home/isfcr/evolve_indices/baselines"
+monitor_interval_ms: 100
+# Same search DRAM cap and pinned cores as the evolved candidates (configs/evolve/bigann10m.yaml).
+resources:
+  memory_limit: "785m"
+  cpu_affinity: "0-7"
+datasets:
+  - name: bigann10m-q2k
+    base_path: bigann10m-q2k/base.npy
+    query_path: bigann10m-q2k/queries.npy
+    ground_truth_path: bigann10m-q2k/ground_truth.npy
+    distance_metric: L2
+    dimension: 128
+    point_type: uint8
+    base_count: 10000000
+    query_count: 2000
+x-pageann-search: &pageann_search
+  timeout_seconds: 1800
+  k: 10
+  batch_mode: false
+  args: {num_threads: 8, beam_width: 5, nav_L: 10}
+  sweep:
+    - {Ls: 15, cache_ratio: 0.0}
+    - {Ls: 25, cache_ratio: 0.0}
+    - {Ls: 40, cache_ratio: 0.0}
+    - {Ls: 60, cache_ratio: 0.0}
+    - {Ls: 100, cache_ratio: 0.0}
+    - {Ls: 160, cache_ratio: 0.0}
+    - {Ls: 25, cache_ratio: 0.1}
+    - {Ls: 40, cache_ratio: 0.1}
+    - {Ls: 60, cache_ratio: 0.1}
+    - {Ls: 100, cache_ratio: 0.1}
+x-laann-search: &laann_search
+  timeout_seconds: 1800
+  k: 10
+  batch_mode: false
+  args: {num_threads: 8, beam_width: 5, nav_L: 100}
+  sweep:
+    - {Ls: 15, cache_ratio: 0.0}
+    - {Ls: 25, cache_ratio: 0.0}
+    - {Ls: 40, cache_ratio: 0.0}
+    - {Ls: 60, cache_ratio: 0.0}
+    - {Ls: 100, cache_ratio: 0.0}
+    - {Ls: 160, cache_ratio: 0.0}
+    - {Ls: 25, cache_ratio: 0.1}
+    - {Ls: 40, cache_ratio: 0.1}
+    - {Ls: 60, cache_ratio: 0.1}
+    - {Ls: 100, cache_ratio: 0.1}
+algorithms:
+  - name: PageANN-B0.1
+    x-system: PageANN
+    docker_image: ann-suite/pageann:latest
+    algorithm_type: disk
+    datasets: [bigann10m-q2k]
+    build:
+      timeout_seconds: 21600
+      memory_limit: none
+      cpu_affinity: none   # pin searches only; builds use all cores
+      args: {variant: pageann, R: 48, L: 128, B: 0.1, M: 16, num_threads: 12}
+    search: *pageann_search
+  - name: PageANN-B0.32
+    x-system: PageANN
+    docker_image: ann-suite/pageann:latest
+    algorithm_type: disk
+    datasets: [bigann10m-q2k]
+    build:
+      timeout_seconds: 21600
+      memory_limit: none
+      cpu_affinity: none   # pin searches only; builds use all cores
+      args: {variant: pageann, R: 48, L: 128, B: 0.32, M: 16, num_threads: 12}
+    search: *pageann_search
+  - name: LAANN-B0.1
+    x-system: LAANN
+    docker_image: ann-suite/pageann:latest
+    algorithm_type: disk
+    datasets: [bigann10m-q2k]
+    build:
+      timeout_seconds: 21600
+      memory_limit: none
+      cpu_affinity: none   # pin searches only; builds use all cores
+      args: {variant: laann, R: 48, L: 128, B: 0.1, M: 16, num_threads: 12}
+    search: *laann_search
+  - name: LAANN-B0.32
+    x-system: LAANN
+    docker_image: ann-suite/pageann:latest
+    algorithm_type: disk
+    datasets: [bigann10m-q2k]
+    build:
+      timeout_seconds: 21600
+      memory_limit: none
+      cpu_affinity: none   # pin searches only; builds use all cores
+      args: {variant: laann, R: 48, L: 128, B: 0.32, M: 16, num_threads: 12}
+    search: *laann_search

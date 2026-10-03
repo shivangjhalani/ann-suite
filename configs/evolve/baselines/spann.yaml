@@ -1,0 +1,66 @@
+# Frontier baseline: SPANN (SPTAG) on BIGANN-10M, first 2000 queries, searching the
+# native 10M indices built in /home/isfcr/spann (see vault: SPANN native builds).
+# Prepare once per index: uv run python tools/harness_compare/spann_harness_compare.py prep <root>
+# Run: uv run python tools/evolve/evolve_bench.py baselines configs/evolve/baselines/spann.yaml
+name: "frontier-spann-bigann10m"
+data_dir: "/home/isfcr/data"
+results_dir: "./results/evolve/baselines"
+index_dir: "/home/isfcr/evolve_indices/baselines"
+monitor_interval_ms: 100
+# Same search DRAM cap and pinned cores as the evolved candidates (configs/evolve/bigann10m.yaml).
+resources:
+  memory_limit: "785m"
+  cpu_affinity: "0-7"
+datasets:
+  - name: bigann10m-q2k
+    base_path: bigann10m-q2k/base.npy
+    query_path: bigann10m-q2k/queries.npy
+    ground_truth_path: bigann10m-q2k/ground_truth.npy
+    distance_metric: L2
+    dimension: 128
+    point_type: uint8
+    base_count: 10000000
+    query_count: 2000
+x-search: &search
+  timeout_seconds: 1800
+  k: 10
+  batch_mode: false
+  args: {num_threads: 8, posting_page_limit: 4, value_type: UInt8}
+  sweep: [{internal_result_num: 8}, {internal_result_num: 16}, {internal_result_num: 32}, {internal_result_num: 64}, {internal_result_num: 128}]
+algorithms:
+  - name: SPANN-ratio0.1_rep4_ppl4
+    x-system: SPANN
+    docker_image: ann-suite/spann:latest
+    algorithm_type: disk
+    datasets: [bigann10m-q2k]
+    build:
+      prebuilt_path: "/home/isfcr/spann/indexes/10m/ratio0.1_rep4_ppl4/index"
+      required_files: ["SPTAGFullList.bin", "indexloader.ini"]
+    search: *search
+  - name: SPANN-ratio0.1_rep8_ppl4
+    x-system: SPANN
+    docker_image: ann-suite/spann:latest
+    algorithm_type: disk
+    datasets: [bigann10m-q2k]
+    build:
+      prebuilt_path: "/home/isfcr/spann/indexes/10m/ratio0.1_rep8_ppl4/index"
+      required_files: ["SPTAGFullList.bin", "indexloader.ini"]
+    search: *search
+  - name: SPANN-ratio0.1_rep12_ppl4
+    x-system: SPANN
+    docker_image: ann-suite/spann:latest
+    algorithm_type: disk
+    datasets: [bigann10m-q2k]
+    build:
+      prebuilt_path: "/home/isfcr/spann/indexes/10m/ratio0.1_rep12_ppl4/index"
+      required_files: ["SPTAGFullList.bin", "indexloader.ini"]
+    search: *search
+  - name: SPANN-ratio0.15_rep8_ppl4
+    x-system: SPANN
+    docker_image: ann-suite/spann:latest
+    algorithm_type: disk
+    datasets: [bigann10m-q2k]
+    build:
+      prebuilt_path: "/home/isfcr/spann/indexes/10m/ratio0.15_rep8_ppl4/index"
+      required_files: ["SPTAGFullList.bin", "indexloader.ini"]
+    search: *search

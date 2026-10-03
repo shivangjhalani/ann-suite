@@ -1,0 +1,51 @@
+# Frontier baseline: Starling (page relayout + page search + in-memory navigation
+# graph) on BIGANN-10M, first 2000 queries. R/L follow upstream's BIGANN setting.
+# Run: uv run python tools/evolve/evolve_bench.py baselines configs/evolve/baselines/starling.yaml
+name: "frontier-starling-bigann10m"
+data_dir: "/home/isfcr/data"
+results_dir: "./results/evolve/baselines"
+index_dir: "/home/isfcr/evolve_indices/baselines"
+monitor_interval_ms: 100
+# Same search DRAM cap and pinned cores as the evolved candidates (configs/evolve/bigann10m.yaml).
+resources:
+  memory_limit: "785m"
+  cpu_affinity: "0-7"
+datasets:
+  - name: bigann10m-q2k
+    base_path: bigann10m-q2k/base.npy
+    query_path: bigann10m-q2k/queries.npy
+    ground_truth_path: bigann10m-q2k/ground_truth.npy
+    distance_metric: L2
+    dimension: 128
+    point_type: uint8
+    base_count: 10000000
+    query_count: 2000
+x-search: &search
+  timeout_seconds: 1800
+  k: 10
+  batch_mode: false
+  args: {num_threads: 8, beam_width: 4, mem_L: 10, use_ratio: 1.0, num_nodes_to_cache: 0}
+  sweep: [{Ls: 15}, {Ls: 25}, {Ls: 40}, {Ls: 60}, {Ls: 100}, {Ls: 160}, {Ls: 250}]
+algorithms:
+  - name: Starling-B0.1
+    x-system: Starling
+    docker_image: ann-suite/starling:latest
+    algorithm_type: disk
+    datasets: [bigann10m-q2k]
+    build:
+      timeout_seconds: 21600
+      memory_limit: none
+      cpu_affinity: none   # pin searches only; builds use all cores
+      args: {R: 48, L: 128, B: 0.1, M: 16, num_threads: 24, build_mem_index: true}
+    search: *search
+  - name: Starling-B0.32
+    x-system: Starling
+    docker_image: ann-suite/starling:latest
+    algorithm_type: disk
+    datasets: [bigann10m-q2k]
+    build:
+      timeout_seconds: 21600
+      memory_limit: none
+      cpu_affinity: none   # pin searches only; builds use all cores
+      args: {R: 48, L: 128, B: 0.32, M: 16, num_threads: 24, build_mem_index: true}
+    search: *search
