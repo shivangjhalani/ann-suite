@@ -4,12 +4,15 @@ one billion vectors: re-rank with source coding", ICASSP 2011), with the inverte
 lists of codes kept on SSD instead of in DRAM.
 
 Coarse k-means (n/512 lists) is the only large DRAM structure (~10 MB at 10M), so
-the design fits the 32 MB budget cell. A query reads the PQ codes of its nprobe
-nearest lists (packed contiguously in list order; round 1), scores them by
-asymmetric distance, then reads the pages holding the `rerank` best candidates
-(round 2) and ranks them exactly. The first OpenEvolve pilot (2026-10-03) found
-this design (plus adaptive re-ranking) and scored it on DRAM alone, hence this
-reference: evolved programs earn no credit for rediscovering it.
+the design fits the 32 MB budget cell. Codes encode each vector's residual from its
+list centroid, as in IVFADC. A query reads the PQ codes of its nprobe nearest lists
+(packed contiguously in list order; round 1), scores them by asymmetric distance
+with a per-list table ||(q - c)_m - y_mj||^2, then reads the pages holding the
+`rerank` best candidates (round 2) and ranks them exactly. The first OpenEvolve
+pilot (2026-10-03) found this design (plus adaptive re-ranking) and scored it on
+DRAM alone, hence this reference: evolved programs earn no credit for
+rediscovering it. (Residual encoding added 2026-10-03; the earlier version coded
+raw vectors, weaker than the published design.)
 """
 
 import faiss
@@ -40,9 +43,8 @@ def build(ctx):
     faiss.omp_set_num_threads(ctx.threads)
 
     rng = np.random.default_rng(0)
-    sample = np.asarray(
-        data[np.sort(rng.choice(n, size=min(n, 20 * nlist), replace=False))], dtype=np.float32
-    )
+    sample_ids = np.sort(rng.choice(n, size=min(n, 20 * nlist), replace=False))
+    sample = np.asarray(data[sample_ids], dtype=np.float32)
     km = faiss.Kmeans(dim, nlist, niter=8, seed=1, verbose=False, spherical=ctx.metric == "IP")
     km.train(sample)
     centroids = km.centroids.astype(np.float32)
@@ -68,11 +70,15 @@ def build(ctx):
     # [list_start[c] * M, list_start[c + 1] * M) of the "codes" file.
     M = PQ_M if dim % PQ_M == 0 else max(m for m in range(1, PQ_M + 1) if dim % m == 0)
     pq = faiss.ProductQuantizer(dim, M, 8)
-    pq.train(sample if sample.shape[0] >= 256 * 40 else np.asarray(data, dtype=np.float32))
+    train = sample if sample.shape[0] >= 256 * 40 else np.asarray(data, dtype=np.float32)
+    train_assign = assign[sample_ids] if train is sample else assign
+    pq.train(np.ascontiguousarray(train - centroids[train_assign]))
     codes = np.empty((n, M), dtype=np.uint8)
     for s in range(0, n, step):
         o = order[s : s + step]
-        codes[s : s + o.size] = pq.compute_codes(np.asarray(data[np.sort(o)], dtype=np.float32))[
+        so = np.sort(o)
+        resid = np.asarray(data[so], dtype=np.float32) - centroids[assign[so]]
+        codes[s : s + o.size] = pq.compute_codes(np.ascontiguousarray(resid))[
             np.argsort(np.argsort(o))
         ]
     flat = codes.ravel()
@@ -144,15 +150,27 @@ class Searcher:
             [buf[s : s + (e - b)] for s, b, e in zip(start, b0, b1, strict=True)]
         )
         pos = np.concatenate([np.arange(ls[c], ls[c + 1]) for c in probe])
+        lid = np.repeat(np.arange(probe.size, dtype=np.int32), ls[probe + 1] - ls[probe])
 
-        # ADC over the codes just read, one subquantizer at a time so per-query
-        # temporaries stay small (this design targets the 32 MB budget).
-        qs = q.reshape(M, 1, self.dsub)
-        lut = -(self.pq_cent * qs).sum(2) if self.ip else ((self.pq_cent - qs) ** 2).sum(2)
+        # IVFADC over the codes just read, one subquantizer at a time so per-query
+        # temporaries stay small (this design targets the 32 MB budget): table
+        # (P, 256) per subquantizer for the residual query q - c of each list.
+        dsub = self.dsub
         codes = codes.reshape(-1, M)
         approx = np.zeros(codes.shape[0], dtype=np.float32)
+        if self.ip:
+            approx -= (self.centroids[probe] @ q)[lid]
+            qr = np.broadcast_to(q, (probe.size, q.size))
+        else:
+            qr = q - self.centroids[probe]
         for m in range(M):
-            approx += lut[m, codes[:, m]]
+            y = self.pq_cent[m]  # (256, dsub)
+            qm = qr[:, m * dsub : (m + 1) * dsub]
+            if self.ip:
+                lut = -(qm @ y.T)
+            else:
+                lut = (qm**2).sum(1)[:, None] - 2.0 * (qm @ y.T) + (y**2).sum(1)[None]
+            approx += lut.ravel()[lid * 256 + codes[:, m]]
 
         r = min(self.rerank, pos.size)
         cand = pos[np.argpartition(approx, r - 1)[:r]] if r < pos.size else pos

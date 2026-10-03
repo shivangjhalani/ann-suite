@@ -116,7 +116,11 @@ nprobe sweep, `ivf_flat_disk_wide.py`), IVFADC+R with 32 / 16 / 8 B PQ in DRAM
 (`ivfadc_rerank_ssd_pq16.py`, ~10 MB of DRAM: covers the 32 MB cells). DiskANN
 B0.1 is also swept deeper (`baselines/diskann_b01_wide.yaml`, Ls up to 1000) to
 reach 0.95 inside 128 MB. Add a reference whenever a run reports a cell as
-uncovered.
+uncovered. References must be the published design, not a simplification: the
+IVFADC+R references first coded raw vectors instead of residuals from the list
+centroid, and the first evolution run scored +1.46 largely on that gap (+0.45
+against the residual references; pq8 went from recall 0.89 at 278 pages/query to
+0.945 at 212).
 
 Measured caveat: PipeANN's search-phase anonymous memory is ~490 MB with 10 B PQ
 (100 MB of codes), independent of thread count; DiskANN with the same PQ uses

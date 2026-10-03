@@ -2,14 +2,17 @@
 "Searching in one billion vectors: re-rank with source coding", ICASSP 2011 --
 the paper that introduced the BIGANN/SIFT1B set).
 
-Coarse k-means (n/512 lists); PQ codes (PQ_M bytes/vector) of every vector held
-in DRAM in list order; full vectors packed on SSD in list order. A query scans
-the PQ codes of its nprobe nearest lists in memory (asymmetric distance), then
-reads only the pages holding the `rerank` best candidates (one I/O round) and
-ranks them exactly. Run on the evolved-program harness and added to the frontier
-with `evolve_bench.py add-reference`, so evolved programs earn no credit for
-rediscovering it. (This implementation is the first mutation of the 2026-10-03
-OpenEvolve wiring test, which reproduced the design; PQ_M parameterized.)
+Coarse k-means (n/512 lists); PQ codes (PQ_M bytes/vector) of every vector's
+residual from its list centroid held in DRAM in list order, as in IVFADC (Jegou
+et al., TPAMI 2011, Sec. IV); full vectors packed on SSD in list order. A query
+scans the codes of its nprobe nearest lists in memory with a per-list distance
+table ||(q - c)_m - y_mj||^2, then reads only the pages holding the `rerank` best
+candidates (one I/O round) and ranks them exactly. Run on the evolved-program
+harness and added to the frontier with `evolve_bench.py add-reference`, so
+evolved programs earn no credit for rediscovering it. (Started from the first
+mutation of the 2026-10-03 OpenEvolve wiring test; PQ_M parameterized. Residual
+encoding added 2026-10-03: the earlier version coded raw vectors, weaker than
+the published design, and an evolved program scored on that gap.)
 """
 
 import faiss
@@ -40,9 +43,8 @@ def build(ctx):
     faiss.omp_set_num_threads(ctx.threads)
 
     rng = np.random.default_rng(0)
-    sample = np.asarray(
-        data[np.sort(rng.choice(n, size=min(n, 20 * nlist), replace=False))], dtype=np.float32
-    )
+    sample_ids = np.sort(rng.choice(n, size=min(n, 20 * nlist), replace=False))
+    sample = np.asarray(data[sample_ids], dtype=np.float32)
     km = faiss.Kmeans(dim, nlist, niter=8, seed=1, verbose=False, spherical=ctx.metric == "IP")
     km.train(sample)
     centroids = km.centroids.astype(np.float32)
@@ -64,15 +66,18 @@ def build(ctx):
     list_start = np.zeros(nlist + 1, dtype=np.int64)
     np.cumsum(sizes, out=list_start[1:])
 
-    # PQ codes (DRAM-resident shortlist filter), stored in cluster order.
+    # PQ codes of residuals x - c(x) (DRAM-resident shortlist filter), in cluster order.
     M = PQ_M if dim % PQ_M == 0 else max(m for m in range(1, PQ_M + 1) if dim % m == 0)
     pq = faiss.ProductQuantizer(dim, M, 8)
-    pq.train(sample if sample.shape[0] >= 256 * 40 else np.asarray(data, dtype=np.float32))
+    train = sample if sample.shape[0] >= 256 * 40 else np.asarray(data, dtype=np.float32)
+    train_assign = assign[sample_ids] if train is sample else assign
+    pq.train(np.ascontiguousarray(train - centroids[train_assign]))
     codes = np.empty((n, M), dtype=np.uint8)
-    step = 1_000_000
     for s in range(0, n, step):
         o = order[s : s + step]
-        codes[s : s + o.size] = pq.compute_codes(np.asarray(data[np.sort(o)], dtype=np.float32))[
+        so = np.sort(o)
+        resid = np.asarray(data[so], dtype=np.float32) - centroids[assign[so]]
+        codes[s : s + o.size] = pq.compute_codes(np.ascontiguousarray(resid))[
             np.argsort(np.argsort(o))
         ]
     pq_cent = faiss.vector_to_array(pq.centroids).reshape(M, 256, dim // M).astype(np.float32)
@@ -113,6 +118,7 @@ class Searcher:
         self.M = lay["M"]
         self.dsub = self.dim // self.M
         self.lut_off = (np.arange(self.M) * 256).astype(np.int32)
+        self.pq_norm = (self.pq_cent**2).sum(2)  # (M, 256)
         self.dtype = np.dtype(lay["dtype"])
         self.ip = ctx.metric == "IP"
         self.nprobe = int(params["nprobe"])
@@ -127,11 +133,24 @@ class Searcher:
         pos = np.concatenate([np.arange(ls[c], ls[c + 1]) for c in probe])
         if pos.size == 0:
             return np.zeros(0, dtype=np.int64)
+        lid = np.repeat(np.arange(probe.size, dtype=np.int32), ls[probe + 1] - ls[probe])
 
-        # ADC over DRAM-resident PQ codes: no I/O.
-        qs = q.reshape(self.M, 1, self.dsub)
-        lut = -(self.pq_cent * qs).sum(2) if self.ip else ((self.pq_cent - qs) ** 2).sum(2)
-        approx = lut.ravel()[self.codes[pos].astype(np.int32) + self.lut_off].sum(1)
+        # IVFADC over DRAM-resident residual codes: no I/O. One table per probed
+        # list, (P, M, 256); for IP the residual term is shared and <q, c> is added.
+        M, dsub = self.M, self.dsub
+        if self.ip:
+            lut = -np.einsum("md,mjd->mj", q.reshape(M, dsub), self.pq_cent)
+            approx = lut.ravel()[self.codes[pos].astype(np.int32) + self.lut_off].sum(1)
+            approx -= (self.centroids[probe] @ q)[lid]
+        else:
+            qr = (q - self.centroids[probe]).reshape(-1, M, dsub)
+            luts = (
+                (qr**2).sum(2)[:, :, None]
+                - 2.0 * np.einsum("pmd,mjd->pmj", qr, self.pq_cent)
+                + self.pq_norm[None]
+            )
+            flat = self.codes[pos].astype(np.int32) + self.lut_off + (lid * (M * 256))[:, None]
+            approx = luts.ravel()[flat].sum(1)
 
         r = min(self.rerank, pos.size)
         cand = pos[np.argpartition(approx, r - 1)[:r]] if r < pos.size else pos
