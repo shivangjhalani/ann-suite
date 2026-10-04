@@ -167,12 +167,24 @@ def _merge_frontier(out: Path, points: list[Point], names: set[str]) -> list[Poi
     return allp
 
 
+def _built_index(bcfg: dict[str, Any], algo: dict[str, Any]) -> Path:
+    """The index ann-suite built earlier for this algorithm (index_dir/name/dataset/*)."""
+    (dataset,) = algo["datasets"]
+    dirs = [d for d in (Path(bcfg["index_dir"]) / algo["name"] / dataset).glob("*") if d.is_dir()]
+    if len(dirs) != 1 or not any(dirs[0].iterdir()):
+        raise SystemExit(f"{algo['name']}: expected one built index, found {dirs}")
+    return dirs[0]
+
+
 def cmd_baselines(
     cfg: dict[str, Any], baseline_config: Path, search_threads: int | None = None
 ) -> None:
     """Run a baseline config and merge its points into the frontier. With
     --search-threads 1 (what score v2 needs), every search runs on one thread and
-    the points carry measured latency and CPU per query."""
+    the points carry measured latency and CPU per query. That re-measures search
+    only: each algorithm uses its existing index (prebuilt_path), and a missing index
+    is an error rather than a build, because a build writes the SSD that the
+    following searches time (ann-suite reuses an index only within one run)."""
     _ensure_sudo_env()
     floors = _floors(cfg)
     bcfg = yaml.safe_load(baseline_config.read_text())
@@ -180,6 +192,8 @@ def cmd_baselines(
         for a in bcfg["algorithms"]:
             a["search"] = {**a["search"], "args": {**a["search"].get("args", {})}}
             a["search"]["args"]["num_threads"] = search_threads
+            if not a.get("build", {}).get("prebuilt_path"):
+                a["build"] = {**a.get("build", {}), "prebuilt_path": str(_built_index(bcfg, a))}
     systems = {a["name"]: a.pop("x-system", a["name"]) for a in bcfg["algorithms"]}
     images = {a["name"]: a["docker_image"] for a in bcfg["algorithms"]}
     for k in [k for k in bcfg if k.startswith("x-")]:
