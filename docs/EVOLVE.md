@@ -113,14 +113,20 @@ methods (the first OpenEvolve mutation reproduced IVFADC+R and scored +0.28 on
 index size alone). Current references: IVF-Flat on disk (= the seed, plus a deeper
 nprobe sweep, `ivf_flat_disk_wide.py`), IVFADC+R with 32 / 16 / 8 B PQ in DRAM
 (Jegou et al. 2011) and IVFADC+R with 16 B PQ codes on SSD
-(`ivfadc_rerank_ssd_pq16.py`, ~10 MB of DRAM: covers the 32 MB cells). DiskANN
+(`ivfadc_rerank_ssd_pq16.py`, ~10 MB of DRAM: covers the 32 MB cells), and
+IVFADC with a 32 B + 16 B refinement code (Jegou et al., ICASSP 2011;
+`ivfadc_refine_32_16.py`, ~500 MB: the 640 MB cells). DiskANN
 B0.1 is also swept deeper (`baselines/diskann_b01_wide.yaml`, Ls up to 1000) to
 reach 0.95 inside 128 MB. Add a reference whenever a run reports a cell as
 uncovered. References must be the published design, not a simplification: the
 IVFADC+R references first coded raw vectors instead of residuals from the list
 centroid, and the first evolution run scored +1.46 largely on that gap (+0.45
 against the residual references; pq8 went from recall 0.89 at 278 pages/query to
-0.945 at 212).
+0.945 at 212). The same happened with the refinement code: run "main2" reached
++1.11 in the 640 MB cells with 32 + 16 B two-level residual codes and a page
+micro-cluster layout; against the refinement reference (recall 0.948 at 15.1
+pages/query vs Starling-B0.32's 27.9 at 0.95) that is +0.23. Rule: each cell's
+references must include the strongest textbook design that fits its budget.
 
 Measured caveat: PipeANN's search-phase anonymous memory is ~490 MB with 10 B PQ
 (100 MB of codes), independent of thread count; DiskANN with the same PQ uses
