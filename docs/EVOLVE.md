@@ -118,7 +118,9 @@ reaches recall 0.919 at 292 pages/query and dominates pq8), and IVFADC with a
 refinement code (Jegou et al., ICASSP 2011): 32 B + 16 B (`ivfadc_refine_32_16.py`,
 ~550 MB: the 640 MB cells, 0.907 at 11.5 pages, 0.963 at 15.2) and 8 B + 2 B
 (`ivfadc_refine_8_2.py`, ~115-120 MB: the 128 MB cells, 0.906 at 94 pages, 0.942
-at 132). Sweeps tune nprobe and rerank depth separately: for in-DRAM codes the
+at 132), each also with an OPQ rotation (Ge et al. 2013; `ivfadc_opq_refine_*.py`,
+added when evolved programs used OPQ: about 2% fewer pages on BIGANN at the same
+recall). Sweeps tune nprobe and rerank depth separately: for in-DRAM codes the
 pages depend on rerank depth, not nprobe, so a fixed ratio between them
 understates the reference (audit of 2026-10-04). DiskANN
 B0.1 is also swept deeper (`baselines/diskann_b01_wide.yaml`, Ls up to 1000) to
