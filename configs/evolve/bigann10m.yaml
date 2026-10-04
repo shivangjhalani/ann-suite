@@ -93,6 +93,15 @@ score:
   # Peak-DRAM jitter of a repeated run was 3-6 MB: candidates are charged and
   # baselines credited this much when placed into a budget.
   dram_margin_mb: 6
+  # Score v2 (docs/EVOLVE_SCORE.md): throughput and latency instead of pages.
+  # Needs the host model from tools/evolve/calibrate_ssd.py and a baseline frontier
+  # measured with --search-threads 1.
+  version: 1
+  host_model: results/evolve/ssd_model.json
+  cores: 8                             # performance cores 0-7, where searches are pinned
+  # CPU of reports from before the runner served the reads included the candidate's
+  # own read calls; this much per page is taken off (fit from re-measured references).
+  legacy_read_cpu_ms_per_page: 0.0
 # A would-be record is re-measured on the same queries and on hidden ones; the
 # minimum of the three scores counts (see evolve_bench.py).
 validation:

@@ -25,7 +25,7 @@ from typing import Any
 import numpy as np
 
 from algorithm import wire
-from algorithm.harness import BuildContext, QueryIO, SearchContext
+from algorithm.harness import PAGE, BuildContext, QueryIO, SearchContext
 
 # Imported up front so the measured memory floor (a null program) includes the
 # libraries candidates are expected to use.
@@ -59,7 +59,17 @@ def _build(msg: dict[str, Any]) -> None:
 
 
 def _serve(rfd: int, wfd: int, msg: dict[str, Any]) -> None:
-    ctx = SearchContext(_fd_path(msg["index_fd"]), int(msg["threads"]), msg["metric"])
+    ctx = SearchContext(
+        _fd_path(msg["index_fd"]), int(msg["threads"]), msg["metric"], msg["disk_pages"]
+    )
+
+    def fetch(name: str, ids: np.ndarray) -> np.ndarray:
+        wire.send(wfd, b"R", wire.pack_read(name, ids.astype("<i8").tobytes()))
+        kind, payload = wire.recv(rfd, ids.size * PAGE)
+        if kind != b"P" or len(payload) != ids.size * PAGE:
+            raise OSError(f"page read of {name} failed")
+        return np.frombuffer(payload, dtype=np.uint8).reshape(-1, PAGE)
+
     searcher = _load_program(msg["source"]).Searcher(ctx, dict(msg["params"]))
     wire.send_json(wfd, {"ok": True})
     k, dim, dtype = int(msg["k"]), int(msg["dim"]), np.dtype(msg["dtype"])
@@ -68,7 +78,7 @@ def _serve(rfd: int, wfd: int, msg: dict[str, Any]) -> None:
         if kind == b"X":
             return
         query = np.frombuffer(payload, dtype=dtype).copy()
-        io = QueryIO(ctx)
+        io = QueryIO(ctx, fetch)
         res = np.asarray(searcher.search(query, k, io), dtype=np.int64).ravel()[:k]
         out = np.full(k, -1, dtype=np.int64)
         out[: res.size] = res

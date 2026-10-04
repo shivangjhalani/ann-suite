@@ -16,7 +16,9 @@ Rules the harness enforces or measures:
 - Disk-resident data is written with ``ctx.disk_writer(name)`` (whole 4 KB pages)
   and read at query time only through ``io.read(name, page_ids)``. Each call is one
   I/O round; every distinct page it returns is one 4 KB O_DIRECT device read. The
-  host cross-checks these counts against the kernel's per-container io.stat.
+  reads are done by the trusted runner, not by the candidate's process (which
+  cannot open the disk files), so the runner counts rounds and pages per round
+  itself; the host also cross-checks pages against the kernel's io.stat.
 - Everything kept in DRAM is whatever the Searcher holds after __init__ plus what it
   allocates while searching; the suite measures the container's peak anonymous
   memory, so there is no separate DRAM declaration to fill in.
@@ -39,6 +41,7 @@ from __future__ import annotations
 import json
 import mmap
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -100,22 +103,17 @@ class BuildContext:
                 w.close()
 
 
-class _DiskFile:
-    def __init__(self, path: Path) -> None:
-        self.fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
-        self.num_pages = os.fstat(self.fd).st_size // PAGE
-
-
 class SearchContext:
-    """What Searcher.__init__ gets: memory-resident arrays and disk files."""
+    """What Searcher.__init__ gets: memory-resident arrays and the sizes of the
+    disk files (their pages are read through QueryIO)."""
 
-    def __init__(self, index_dir: Path, threads: int, metric: str) -> None:
+    def __init__(
+        self, index_dir: Path, threads: int, metric: str, disk_pages: dict[str, int]
+    ) -> None:
         self.threads = threads
         self.metric = metric
         self._dir = index_dir
-        self._disk: dict[str, _DiskFile] = {}
-        for p in sorted((index_dir / "disk").glob("*.pages")):
-            self._disk[p.stem] = _DiskFile(p)
+        self._disk_pages = dict(disk_pages)
 
     def mem(self, name: str) -> np.ndarray:
         return np.load(self._dir / "mem" / f"{name}.npy")  # fully in RAM, no mmap
@@ -124,23 +122,27 @@ class SearchContext:
         return json.loads((self._dir / "mem" / f"{name}.json").read_text())
 
     def num_pages(self, name: str) -> int:
-        return self._disk[name].num_pages
+        return self._disk_pages[name]
 
 
-def _page_buffer(size: int) -> mmap.mmap:
+def page_buffer(size: int) -> mmap.mmap:
     """Page-aligned buffer for O_DIRECT reads. Private, so it is anonymous memory
     (counted as DRAM) rather than shmem, which the runner caps at 16 MB."""
     return mmap.mmap(-1, size, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
 
 
 class QueryIO:
-    """Per-query I/O handle; the only way to touch disk-resident pages."""
+    """Per-query I/O handle; the only way to touch disk-resident pages.
 
-    def __init__(self, ctx: SearchContext) -> None:
+    `fetch(name, sorted_unique_ids)` performs one round: it asks the runner for the
+    pages and returns them as a writable uint8 array of shape (n, 4096).
+    """
+
+    def __init__(self, ctx: SearchContext, fetch: Callable[[str, np.ndarray], np.ndarray]) -> None:
         self._ctx = ctx
+        self._fetch = fetch
         self.pages = 0
         self.rounds = 0
-        self._buf = _page_buffer(PAGE * 64)  # grown on demand
 
     def read(self, name: str, page_ids: Any) -> np.ndarray:
         """Read pages of disk file `name` in one I/O round.
@@ -148,21 +150,15 @@ class QueryIO:
         Returns a uint8 array of shape (len(unique ids), 4096) in the order of
         np.unique(page_ids) (sorted ascending). Duplicate ids are read once.
         """
-        f = self._ctx._disk[name]
+        if name not in self._ctx._disk_pages:
+            raise KeyError(f"no disk file {name!r}")
+        n = self._ctx._disk_pages[name]
         ids = np.unique(np.asarray(page_ids, dtype=np.int64).ravel())
         if ids.size == 0:
             return np.empty((0, PAGE), dtype=np.uint8)
-        if ids[0] < 0 or ids[-1] >= f.num_pages:
-            raise IndexError(f"page id out of range for {name} ({f.num_pages} pages)")
-        need = ids.size * PAGE
-        if len(self._buf) < need:
-            self._buf.close()
-            self._buf = _page_buffer(need)
-        view = memoryview(self._buf)
-        for j, pid in enumerate(ids.tolist()):
-            n = os.preadv(f.fd, [view[j * PAGE : (j + 1) * PAGE]], pid * PAGE)
-            if n != PAGE:
-                raise OSError(f"short read on {name} page {pid}")
+        if ids[0] < 0 or ids[-1] >= n:
+            raise IndexError(f"page id out of range for {name} ({n} pages)")
+        pages = self._fetch(name, ids)
         self.pages += int(ids.size)
         self.rounds += 1
-        return np.frombuffer(self._buf, dtype=np.uint8, count=need).reshape(-1, PAGE).copy()
+        return pages

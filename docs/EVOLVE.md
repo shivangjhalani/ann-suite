@@ -56,15 +56,20 @@ Per search point (fresh container, page cache dropped by ann-suite):
 
 - **recall@10**: recomputed on the host from the result ids the runner dumps
   (`<index>/results/<run_tag>_point_<i>.npz`).
-- **pages/query**: counted by `QueryIO.read()` (4 KB O_DIRECT reads) inside the
-  sandbox, so not trusted alone: the scored value is
+- **pages/query**: counted by the runner, which performs every read: the sandboxed
+  candidate cannot open its disk files (directory mode 0700) and `io.read()` sends
+  the page ids of one round over the pipe (since 2026-10-05; before, the count was
+  kept inside the sandbox). The scored value is still
   `max(harness, kernel - 1)`, the kernel count being the container's io.stat read
   bytes taken by the runner right before the first and after the last query (it
   matches the harness within 0.05 pages/query for honest programs; ann-suite's
   own figure, from 100 ms samples, caught the end of large index loads). The host
   also rejects the point if the kernel count exceeds `1.25 x harness + 1`.
-- **rounds/query** (`io.read()` calls): more than 64 fails the point, so pages
+- **rounds/query** (`io.read()` calls, counted by the runner, with the pages of each
+  round for score v2's latency model): more than 64 fails the point, so pages
   cannot be cut by reading one page per SSD round trip.
+- **CPU/query**: the sandbox process's CPU time over the query loop; it excludes the
+  reads, which the runner does.
 - **DRAM**: search-phase peak anonymous memory of the container minus the image
   floor (`floors.json`: a null program for the evolved image, now ~86 MB for the
   runner + sandbox processes; idle Python for the C++ images). Budget: 640 MB
@@ -183,7 +188,8 @@ was never validated (one more benchmark run per leader). The OpenEvolve side
 scores to a checkpoint, so a run resumes instead of restarting. Reports written
 before 2026-10-04 lack validation points and re-score as unvalidated.
 
-MAP-Elites features reported for OpenEvolve: `dram_mb`, `rounds`.
+MAP-Elites features reported for OpenEvolve: `dram_mb`, `rounds`, and with score v2
+`latency_ms` (modelled latency of the best cell's operating point).
 
 ## Running
 

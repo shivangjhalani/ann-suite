@@ -1,6 +1,7 @@
 # Evolve score v2: throughput and latency (proposal, 2026-10-05)
 
-Status: proposed, not implemented. The current score is described in
+Status: implemented behind `score.version` (default 1) on 2026-10-05; switched on
+once the SSD is calibrated, the baselines re-measured and the model validated. The current score is described in
 [EVOLVE.md](EVOLVE.md#score); this document says why it is replaced, what replaces
 it, and how it will be measured and validated.
 
@@ -63,7 +64,9 @@ today, plus two costs.
     Q(x) = min( IOPS_max / P(x),  N_cores / c(x) )
 
 - `IOPS_max`: the SSD's saturated random 4 KB read rate (fio, many jobs, deep queue).
-- `N_cores`: CPU threads of the benchmark host (24 on isfcr).
+- `N_cores` = 8: the performance cores (0-7 on isfcr) every search is pinned to,
+  so c is measured on the cores it is scaled by. The 16 slower efficiency cores are
+  left out (the user's choice, 2026-10-05).
 - Whichever resource runs out first limits the server.
 
 **Known methods.** For the C++ baselines (DiskANN, PipeANN, SPANN, Starling,
@@ -133,11 +136,17 @@ depend on units.
 1. `tools/evolve/calibrate_ssd.py`: fio `randread`, 4 KB, O_DIRECT on the index
    device; batch latency for p = 1, 2, 4, ..., 1024 (submit p, wait for all p) and
    saturated IOPS. Writes `results/evolve/ssd_model.json`.
-2. Harness (`library/algorithms/evolved`): per query, record pages per round and
-   thread CPU excluding `io.read`; per point, report T (via `d`), c and Q.
-3. Baselines: re-run each frontier search setting with one search thread on a cold
-   cache, recording measured mean latency and cgroup CPU per query. The indexes are
-   reused, so this is search time only (a few hours, exclusive use of the host).
+2. Harness (`library/algorithms/evolved`): the runner performs the reads. The
+   candidate cannot open its disk files and `io.read()` sends one round's page ids
+   over the pipe, so rounds and pages per round are counted by trusted code (once
+   rounds cost latency, a self-reported count would be worth faking), and the
+   candidate's CPU time excludes the reads. Per point the runner reports a
+   histogram {pages in a round: rounds}; evolve_bench turns it into T with `d`.
+3. Baselines: `evolve_bench.py baselines <config> --search-threads 1` re-runs each
+   frontier search setting with one search thread on a cold cache, recording
+   measured mean latency and cgroup CPU per query. The indexes are reused, so this
+   is search time only (a few hours, exclusive use of the host). The harness
+   reference designs are re-measured with `add-reference` (cached builds).
 4. `tools/evolve/frontier.py`: v2 cells and gain; tests for interpolation, the
    two-objective gain, and the gaming cases above.
 5. OpenEvolve evaluator: new features; the budget_cells artifact shows Q, T and c

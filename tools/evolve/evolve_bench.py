@@ -55,6 +55,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from frontier import (
     Cells,
+    Host,
     Point,
     load_points,
     pareto,
@@ -62,6 +63,7 @@ from frontier import (
     recall_at_k,
     save_points,
     score,
+    score_v2,
 )  # noqa: E402,I001
 
 from ann_suite.core.schemas import BenchmarkConfig  # noqa: E402
@@ -165,10 +167,19 @@ def _merge_frontier(out: Path, points: list[Point], names: set[str]) -> list[Poi
     return allp
 
 
-def cmd_baselines(cfg: dict[str, Any], baseline_config: Path) -> None:
+def cmd_baselines(
+    cfg: dict[str, Any], baseline_config: Path, search_threads: int | None = None
+) -> None:
+    """Run a baseline config and merge its points into the frontier. With
+    --search-threads 1 (what score v2 needs), every search runs on one thread and
+    the points carry measured latency and CPU per query."""
     _ensure_sudo_env()
     floors = _floors(cfg)
     bcfg = yaml.safe_load(baseline_config.read_text())
+    if search_threads is not None:
+        for a in bcfg["algorithms"]:
+            a["search"] = {**a["search"], "args": {**a["search"].get("args", {})}}
+            a["search"]["args"]["num_threads"] = search_threads
     systems = {a["name"]: a.pop("x-system", a["name"]) for a in bcfg["algorithms"]}
     images = {a["name"]: a["docker_image"] for a in bcfg["algorithms"]}
     for k in [k for k in bcfg if k.startswith("x-")]:
@@ -178,7 +189,8 @@ def cmd_baselines(cfg: dict[str, Any], baseline_config: Path) -> None:
         for a in bcfg["algorithms"]
         if a.get("build", {}).get("prebuilt_path")
     }
-    results = _run_suite(bcfg)
+    with _evaluation_lock(cfg):
+        results = _run_suite(bcfg)
     points = []
     for r in results:
         if not (r.search_result and r.search_result.success) or r.recall is None:
@@ -189,7 +201,9 @@ def cmd_baselines(cfg: dict[str, Any], baseline_config: Path) -> None:
             d = d if d.is_absolute() else Path(bcfg["index_dir"]) / d
             r.index_size_bytes = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
         floor = floors.get(images.get(base, ""), 0.0)
-        points.append(point_from_result(r, systems.get(base, base), floor))
+        points.append(
+            point_from_result(r, systems.get(base, base), floor, search_threads=search_threads)
+        )
     out = REPO / cfg["frontier"]
     out.parent.mkdir(parents=True, exist_ok=True)
     allp = _merge_frontier(out, points, {r.algorithm.split("@")[0] for r in results})
@@ -385,8 +399,8 @@ def _run_stage(
         rec = recall_at_k(npz["ids"], np.asarray(gt), cfg["k"])
         harness_pages = float(npz["pages"].mean())
         kernel_pages = ev.get("kernel_pages_per_query", r.disk_io.search_pages_per_query)
-        # The harness count is kept inside the candidate's process, so it is not
-        # trusted on its own: score whichever of it and the kernel's count is larger
+        # The runner counts pages and rounds (the candidate cannot open the disk
+        # files); the kernel's count is a second check: score whichever is larger
         # (less a small slack for metadata reads).
         pages = max(harness_pages, (kernel_pages or 0.0) - gr["io_crosscheck_slack_pages"])
         rounds = float(ev.get("rounds_per_query") or 0.0)
@@ -420,6 +434,8 @@ def _run_stage(
                 "harness_pages": harness_pages,
                 "kernel_pages": kernel_pages,
                 "rounds": rounds,
+                "round_pages_hist": ev.get("round_pages_hist"),
+                "queries": int(len(npz["pages"])),
                 "cpu_ms_per_query": ev.get("cpu_ms_per_query"),
                 "peak_anon_mb": r.memory.search_peak_anon_mb,
                 "qps_python": r.qps,
@@ -468,9 +484,38 @@ def _tail(path: Any, n: int = 3000) -> str:
         return ""
 
 
+def _host(cfg: dict[str, Any]) -> Host | None:
+    """Score v2's host model, once the SSD has been calibrated."""
+    sc = cfg["score"]
+    path = REPO / sc.get("host_model", "")
+    return Host.load(path, int(sc["cores"])) if sc.get("host_model") and path.is_file() else None
+
+
+def _v2_costs(cfg: dict[str, Any], p: dict[str, Any], host: Host | None) -> dict[str, Any]:
+    """latency_ms and cpu_ms of a harness point (docs/EVOLVE_SCORE.md). Reports from
+    before the runner served the reads have no per-round histogram and counted the
+    candidate's own read calls as CPU: their rounds are taken as equal-sized and
+    `legacy_read_cpu_ms_per_page` per page is taken off their CPU."""
+    cpu = p.get("cpu_ms_per_query")
+    if host is None or cpu is None:
+        return {}
+    hist = p.get("round_pages_hist")
+    if hist is None:
+        legacy = float(cfg["score"].get("legacy_read_cpu_ms_per_page", 0.0))
+        cpu = max(0.0, cpu - legacy * p["pages"])
+    io = host.io_ms(hist, int(p.get("queries") or 0), float(p["rounds"]), float(p["pages"]))
+    return {"cpu_ms": cpu, "latency_ms": io + cpu, "io_ms": io}
+
+
 def _harness_points(
-    good: list[dict[str, Any]], index_bytes: int, floor: float, system: str, prefix: str
+    cfg: dict[str, Any],
+    good: list[dict[str, Any]],
+    index_bytes: int,
+    floor: float,
+    system: str,
+    prefix: str,
 ) -> list[Point]:
+    host = _host(cfg)
     return [
         Point(
             system=system,
@@ -483,6 +528,7 @@ def _harness_points(
                 "rounds": p["rounds"],
                 "cpu_ms_per_query": p["cpu_ms_per_query"],
                 "recall": p["recall"],
+                **_v2_costs(cfg, p, host),
             },
         )
         for p in good
@@ -496,9 +542,16 @@ def _score_points(
     floor: float,
     baselines: list[Point],
 ) -> tuple[dict[str, Any], list[Point]]:
-    """Budget-cell score of a stage's accepted points against `baselines`."""
-    pts = _harness_points(good, index_bytes, floor, "candidate", "point")
-    return score(pts, baselines, Cells.from_config(cfg["score"])), pts
+    """Budget-cell score of a stage's accepted points against `baselines` (score
+    v1 or v2 by config `score.version`)."""
+    pts = _harness_points(cfg, good, index_bytes, floor, "candidate", "point")
+    cells = Cells.from_config(cfg["score"])
+    if int(cfg["score"].get("version", 1)) == 2:
+        host = _host(cfg)
+        if host is None:
+            raise RuntimeError("score v2 needs the calibrated host model (calibrate_ssd.py)")
+        return score_v2(pts, baselines, cells, host), pts
+    return score(pts, baselines, cells), pts
 
 
 def _evaluate(
@@ -548,6 +601,11 @@ def _evaluate(
             baselines = load_points(REPO / cfg["frontier"])
             sc, cand_points = _score_points(cfg, good, res["index_bytes"], floor, baselines)
             report["stages"][stage]["score"] = sc["combined_score"]
+            v2 = {g["point"]: cp.extra for g, cp in zip(good, cand_points, strict=True)}
+            for rp in report["stages"][stage]["points"]:
+                for key in ("latency_ms", "io_ms", "cpu_ms"):
+                    if key in v2.get(rp["point"], {}):
+                        rp[key] = v2[rp["point"]][key]
             if stage != "full":
                 continue
             report.update({k: sc[k] for k in ("combined_score", "best_cell", "recall_shortfall")})
@@ -559,6 +617,10 @@ def _evaluate(
                 "best_recall": max(1 - cp.miss for cp in cand_points),
                 "min_pages": min(cp.pages for cp in cand_points),
             }
+            best_lat = (sc.get("best_cell") or {}).get("latency_ms")
+            lats = [cp.extra["latency_ms"] for cp in cand_points if "latency_ms" in cp.extra]
+            if best_lat is not None or lats:
+                report["features"]["latency_ms"] = best_lat if best_lat is not None else min(lats)
     return report
 
 
@@ -730,7 +792,7 @@ def cmd_reference(cfg: dict[str, Any], program: Path, name: str, system: str) ->
     good = [p for p in st["points"] if p["ok"]]
     floor = _floors(cfg).get(cfg["image"], 0.0)
     # Labels "<name>:p<i>:<params>": the name part keys merge replacement.
-    points = _harness_points(good, st["index_bytes"], floor, system, f"{name}:p")
+    points = _harness_points(cfg, good, st["index_bytes"], floor, system, f"{name}:p")
     allp = _merge_frontier(REPO / cfg["frontier"], points, {name})
     print(json.dumps({"added": len(points), "points": len(allp), "pareto": len(pareto(allp))}))
 
@@ -742,6 +804,7 @@ def main() -> None:
     sub.add_parser("floors")
     b = sub.add_parser("baselines")
     b.add_argument("baseline_config", type=Path)
+    b.add_argument("--search-threads", type=int, help="override every search's num_threads")
     c = sub.add_parser("candidate")
     c.add_argument("program", type=Path)
     c.add_argument("--id", required=True)
@@ -761,7 +824,7 @@ def main() -> None:
     if ns.cmd == "floors":
         cmd_floors(cfg)
     elif ns.cmd == "baselines":
-        cmd_baselines(cfg, ns.baseline_config)
+        cmd_baselines(cfg, ns.baseline_config, ns.search_threads)
     elif ns.cmd == "add-reference":
         cmd_reference(cfg, ns.program, ns.name, ns.system)
     elif ns.cmd == "rescore":
