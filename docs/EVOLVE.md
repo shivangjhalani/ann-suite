@@ -141,6 +141,10 @@ Measured caveat: PipeANN's search-phase anonymous memory is ~490 MB with 10 B PQ
 
 ## Score
 
+Being replaced (2026-10-05): this score counts only SSD pages per query and ignores
+latency and CPU. The replacement, scoring throughput and latency in the same cells,
+is specified in [EVOLVE_SCORE.md](EVOLVE_SCORE.md).
+
 `tools/evolve/frontier.py`, budget cells in the style of big-ann-benchmarks:
 fixed budgets, fixed accuracy targets, comparison with the best known method
 under the same budget. Cells are (DRAM budget T in {32, 128, 640} MB) x (recall@10
