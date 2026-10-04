@@ -15,20 +15,23 @@ encoding added 2026-10-03: the earlier version coded raw vectors, weaker than
 the published design, and an evolved program scored on that gap.)
 The 8-byte variant (80 MB of codes) covers the 128 MB budget cell; 8-byte codes
 are coarse on SIFT, so the sweep re-ranks more candidates.
+Sweep (2026-10-04): points sit around the scored recall targets (0.90, 0.95) and
+vary nprobe and the re-rank depth separately, so the reference is measured near
+its own best pages/query at each target rather than along one fixed ratio.
 """
 
 import faiss
 import numpy as np
 
 SEARCH_POINTS = [
-    {"nprobe": 32, "rerank": 48},
-    {"nprobe": 48, "rerank": 64},
-    {"nprobe": 64, "rerank": 96},
-    {"nprobe": 96, "rerank": 128},
-    {"nprobe": 128, "rerank": 192},
-    {"nprobe": 192, "rerank": 256},
-    {"nprobe": 256, "rerank": 384},
-    {"nprobe": 384, "rerank": 512},
+    {"nprobe": 256, "rerank": 160},
+    {"nprobe": 256, "rerank": 224},
+    {"nprobe": 384, "rerank": 224},
+    {"nprobe": 384, "rerank": 288},
+    {"nprobe": 512, "rerank": 288},
+    {"nprobe": 512, "rerank": 352},
+    {"nprobe": 512, "rerank": 416},
+    {"nprobe": 768, "rerank": 480},
 ]
 
 PQ_M = 8  # PQ subquantizers x 8 bits = bytes per vector held in DRAM

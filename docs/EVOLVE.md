@@ -112,10 +112,15 @@ candidates. Without them the evolver is credited for rediscovering textbook
 methods (the first OpenEvolve mutation reproduced IVFADC+R and scored +0.28 on
 index size alone). Current references: IVF-Flat on disk (= the seed, plus a deeper
 nprobe sweep, `ivf_flat_disk_wide.py`), IVFADC+R with 32 / 16 / 8 B PQ in DRAM
-(Jegou et al. 2011) and IVFADC+R with 16 B PQ codes on SSD
-(`ivfadc_rerank_ssd_pq16.py`, ~10 MB of DRAM: covers the 32 MB cells), and
-IVFADC with a 32 B + 16 B refinement code (Jegou et al., ICASSP 2011;
-`ivfadc_refine_32_16.py`, ~500 MB: the 640 MB cells). DiskANN
+(Jegou et al. 2011), IVFADC+R with 16 B or 8 B PQ codes on SSD
+(`ivfadc_rerank_ssd_pq16.py` / `_pq8.py`, ~10-20 MB of DRAM: the 32 MB cells; pq16
+reaches recall 0.919 at 292 pages/query and dominates pq8), and IVFADC with a
+refinement code (Jegou et al., ICASSP 2011): 32 B + 16 B (`ivfadc_refine_32_16.py`,
+~550 MB: the 640 MB cells, 0.907 at 11.5 pages, 0.963 at 15.2) and 8 B + 2 B
+(`ivfadc_refine_8_2.py`, ~115-120 MB: the 128 MB cells, 0.906 at 94 pages, 0.942
+at 132). Sweeps tune nprobe and rerank depth separately: for in-DRAM codes the
+pages depend on rerank depth, not nprobe, so a fixed ratio between them
+understates the reference (audit of 2026-10-04). DiskANN
 B0.1 is also swept deeper (`baselines/diskann_b01_wide.yaml`, Ls up to 1000) to
 reach 0.95 inside 128 MB. Add a reference whenever a run reports a cell as
 uncovered. References must be the published design, not a simplification: the
@@ -162,6 +167,16 @@ on the same queries and on the hidden queries (same build); its score becomes
 the minimum of the three, so neither measurement luck nor fitting to the scored
 queries sets a record. Delete the record file when starting a new run.
 
+**Re-scoring after the frontier changes.** A report keeps every measured point,
+including the validation stages, and the score is a pure function of those points
+and the frontier. So when a reference is added mid-run, `evolve_bench.py rescore
+<ids> --write-record --validate` re-scores stored candidates exactly, resets the
+record to the best validated score among them, and validates a new leader that
+was never validated (one more benchmark run per leader). The OpenEvolve side
+(`/home/isfcr/shivang/evolve`, `disk_ann/rescore_checkpoint.py`) applies the new
+scores to a checkpoint, so a run resumes instead of restarting. Reports written
+before 2026-10-04 lack validation points and re-score as unvalidated.
+
 MAP-Elites features reported for OpenEvolve: `dram_mb`, `rounds`.
 
 ## Running
@@ -171,7 +186,10 @@ uv run python tools/evolve/evolve_bench.py floors                 # once per ima
 tools/evolve/run_baselines.sh                                      # hours; once
 uv run python tools/evolve/evolve_bench.py candidate prog.py --id test1   # one candidate
 uv run python tools/evolve/make_heldout.py bigann10m-hidden        # hidden queries, once
+uv run python tools/evolve/evolve_bench.py rescore <ids> --write-record --validate
 ```
+
+OpenEvolve runs from `/home/isfcr/shivang/evolve` on this host (README there).
 
 `ANN_SUITE_SUDO_PASSWORD` (for cache drops) is read from
 `~/.config/ann-suite/sudo_password` when unset.

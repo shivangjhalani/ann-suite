@@ -8,6 +8,9 @@ Subcommands (run from the ann-suite root; see docs/EVOLVE.md):
   candidate   build + search one candidate program, score it, print one JSON line
   add-reference  measure a reference program (a known design on the harness) and
               add its points to the frontier as a named baseline
+  rescore     re-score stored candidate reports against the current frontier
+              (after adding a reference), optionally validating new leaders and
+              resetting the record; prints one JSON object
 
 `candidate` is what OpenEvolve's evaluator calls (over SSH). It holds a file lock
 for the whole evaluation: every search point drops the OS page cache, so two
@@ -17,7 +20,9 @@ Validation: a candidate whose score would beat the record (best validated score
 so far, results/evolve/record_<name>.json; at least 0) is measured again on the
 same queries and on hidden queries it never saw (stage `hidden`, same base and
 build); its score becomes the minimum of the three. Delete the record file to
-start a new run from scratch.
+start a new run from scratch. A report keeps every measured point, validation
+stages included, so `rescore` can re-score it exactly against a changed frontier
+without re-running anything.
 
 Build caching: indices are cached under <index_dir>/cache/<stage>/<hash>, where
 the hash covers the program source minus `class Searcher` and SEARCH_POINTS (plus
@@ -29,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -39,6 +45,7 @@ import subprocess
 import sys
 import time
 import traceback
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -482,6 +489,18 @@ def _harness_points(
     ]
 
 
+def _score_points(
+    cfg: dict[str, Any],
+    good: list[dict[str, Any]],
+    index_bytes: int,
+    floor: float,
+    baselines: list[Point],
+) -> tuple[dict[str, Any], list[Point]]:
+    """Budget-cell score of a stage's accepted points against `baselines`."""
+    pts = _harness_points(good, index_bytes, floor, "candidate", "point")
+    return score(pts, baselines, Cells.from_config(cfg["score"])), pts
+
+
 def _evaluate(
     cfg: dict[str, Any],
     program: Path,
@@ -526,9 +545,8 @@ def _evaluate(
                 )
                 return report
         if cfg["stages"][stage].get("scored") and score_it:
-            cand_points = _harness_points(good, res["index_bytes"], floor, "candidate", "point")
             baselines = load_points(REPO / cfg["frontier"])
-            sc = score(cand_points, baselines, Cells.from_config(cfg["score"]))
+            sc, cand_points = _score_points(cfg, good, res["index_bytes"], floor, baselines)
             report["stages"][stage]["score"] = sc["combined_score"]
             if stage != "full":
                 continue
@@ -544,13 +562,21 @@ def _evaluate(
     return report
 
 
-def cmd_candidate(cfg: dict[str, Any], program: Path, cand: str, stages: list[str]) -> None:
-    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", cand):
-        raise SystemExit("candidate id must match [A-Za-z0-9_.-]{1,64}")
+@contextlib.contextmanager
+def _evaluation_lock(cfg: dict[str, Any]) -> Iterator[None]:
+    """One evaluation at a time on this host: every search point drops the page
+    cache, and builds and searches must not share the SSD."""
     lock_path = Path(cfg["index_dir"]) / ".evolve.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def cmd_candidate(cfg: dict[str, Any], program: Path, cand: str, stages: list[str]) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", cand):
+        raise SystemExit("candidate id must match [A-Za-z0-9_.-]{1,64}")
+    with _evaluation_lock(cfg):
         try:
             report = _evaluate(cfg, program, cand, stages)
             if "full" in stages and report.get("combined_score", FAIL) > _record(cfg)["score"]:
@@ -585,19 +611,108 @@ def _validate(cfg: dict[str, Any], program: Path, cand: str, report: dict[str, A
     sets a record."""
     raw = report["combined_score"]
     scores = {"first": raw}
+    stages = {}
     for stage in cfg["validation"]["stages"]:
         rep = _evaluate(cfg, program, f"{cand}-v{stage}", [stage])
         st = rep.get("stages", {}).get(stage, {})
-        scores[f"{stage}_rerun" if stage == "full" else stage] = (
+        stages[stage] = st
+        scores[_validation_key(stage)] = (
             st.get("score") if st.get("score") is not None else rep.get("combined_score", FAIL)
         )
     validated = min(scores.values())
-    report["validation"] = {"scores": scores, "validated_score": validated}
+    report["validation"] = {"scores": scores, "validated_score": validated, "stages": stages}
     report["combined_score"] = validated
     if validated > _record(cfg)["score"]:
-        _record_path(cfg).write_text(
-            json.dumps({"score": validated, "candidate": cand, "time": time.time()})
-        )
+        _write_record(cfg, validated, cand)
+
+
+def _validation_key(stage: str) -> str:
+    return f"{stage}_rerun" if stage == "full" else stage
+
+
+def _rescore_report(
+    cfg: dict[str, Any], r: dict[str, Any], floor: float, baselines: list[Point]
+) -> dict[str, Any]:
+    """Score a stored report's measured points against `baselines`, as _evaluate and
+    _validate would have. Reports that never reached the scored stage keep their score."""
+
+    def stage_score(st: dict[str, Any] | None) -> dict[str, Any] | None:
+        good = [p for p in (st or {}).get("points", []) if p.get("ok")]
+        if not (st or {}).get("ok") or not good:
+            return None
+        return _score_points(cfg, good, st["index_bytes"], floor, baselines)[0]
+
+    sc = stage_score((r.get("stages") or {}).get("full"))
+    if sc is None:
+        return {"combined_score": r.get("combined_score", FAIL), "validated": False}
+    out = {
+        k: sc[k] for k in ("combined_score", "best_cell", "recall_shortfall", "cells", "uncovered")
+    }
+    out["validated"] = False
+    stages = (r.get("validation") or {}).get("stages")
+    if stages:
+        scores = {"first": sc["combined_score"]}
+        for stage, st in stages.items():
+            s2 = stage_score(st)
+            scores[_validation_key(stage)] = s2["combined_score"] if s2 else FAIL
+        out["validation"] = {"scores": scores, "validated_score": min(scores.values())}
+        out["combined_score"] = min(scores.values())
+        out["validated"] = True
+    return out
+
+
+def _write_record(cfg: dict[str, Any], score_: float, cand: str | None) -> None:
+    _record_path(cfg).write_text(
+        json.dumps({"score": score_, "candidate": cand, "time": time.time()})
+    )
+
+
+def cmd_rescore(cfg: dict[str, Any], ids: list[str], write_record: bool, validate: bool) -> None:
+    """Re-score candidates (e.g. an OpenEvolve checkpoint's programs) against the
+    current frontier. --write-record resets the record to the best validated score
+    among them; --validate then measures the leader whenever it is unvalidated (old
+    reports, or programs that were not records under the old frontier), until the
+    leader is validated. Prints {candidate id: rescored fields}."""
+    cdir = REPO / cfg["results_dir"] / "candidates"
+    baselines = load_points(REPO / cfg["frontier"])
+    floor = _floors(cfg).get(cfg["image"], 0.0)
+
+    def load(c: str) -> dict[str, Any] | None:
+        f = cdir / f"{c}.json"
+        return json.loads(f.read_text()) if f.exists() else None
+
+    out: dict[str, dict[str, Any]] = {}
+    for c in ids:
+        r = load(c)
+        out[c] = _rescore_report(cfg, r, floor, baselines) if r else {"error": "no report"}
+
+    def best_validated() -> tuple[float, str | None]:
+        v = [(o["combined_score"], c) for c, o in out.items() if o.get("validated")]
+        return max(v) if v else (0.0, None)
+
+    if write_record:
+        _write_record(cfg, *best_validated())
+    if validate:
+        progs = Path(cfg["data_dir"]) / cfg["programs_subdir"]
+        with _evaluation_lock(cfg):
+            while True:
+                rec = max(best_validated()[0], _record(cfg)["score"])
+                todo = [
+                    c
+                    for c, o in out.items()
+                    if not o.get("validated")
+                    and o.get("combined_score", FAIL) > rec
+                    and (progs / f"{c}.py").exists()
+                ]
+                if not todo:
+                    break
+                c = max(todo, key=lambda x: out[x]["combined_score"])
+                r = load(c)
+                r.update({k: v for k, v in out[c].items() if k != "validated"})
+                _validate(cfg, progs / f"{c}.py", c, r)
+                (cdir / f"{c}.json").write_text(json.dumps(r, indent=1, default=str))
+                out[c] = _rescore_report(cfg, r, floor, baselines)
+    print(json.dumps(out, default=str))
 
 
 def cmd_reference(cfg: dict[str, Any], program: Path, name: str, system: str) -> None:
@@ -607,9 +722,7 @@ def cmd_reference(cfg: dict[str, Any], program: Path, name: str, system: str) ->
     credit for rediscovering them."""
     if not re.fullmatch(r"[A-Za-z0-9_.+-]{1,64}", name):
         raise SystemExit("reference name must match [A-Za-z0-9_.+-]{1,64}")
-    lock_path = Path(cfg["index_dir"]) / ".evolve.lock"
-    with lock_path.open("w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with _evaluation_lock(cfg):
         report = _evaluate(cfg, program, f"ref-{name}", ["full"], score_it=False)
     st = report["stages"].get("full", {})
     if not st.get("ok"):
@@ -637,6 +750,10 @@ def main() -> None:
     r.add_argument("program", type=Path)
     r.add_argument("--name", required=True)
     r.add_argument("--system", required=True)
+    rs = sub.add_parser("rescore")
+    rs.add_argument("ids", nargs="+", help="candidate ids (report file names without .json)")
+    rs.add_argument("--write-record", action="store_true")
+    rs.add_argument("--validate", action="store_true")
     ns = ap.parse_args()
     _quiet_logs()
     os.chdir(REPO)
@@ -647,6 +764,8 @@ def main() -> None:
         cmd_baselines(cfg, ns.baseline_config)
     elif ns.cmd == "add-reference":
         cmd_reference(cfg, ns.program, ns.name, ns.system)
+    elif ns.cmd == "rescore":
+        cmd_rescore(cfg, ns.ids, ns.write_record, ns.validate)
     else:
         cmd_candidate(cfg, ns.program, ns.id, ns.stages.split(","))
 

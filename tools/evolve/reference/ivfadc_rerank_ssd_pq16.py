@@ -13,20 +13,23 @@ pilot (2026-10-03) found this design (plus adaptive re-ranking) and scored it on
 DRAM alone, hence this reference: evolved programs earn no credit for
 rediscovering it. (Residual encoding added 2026-10-03; the earlier version coded
 raw vectors, weaker than the published design.)
+Sweep (2026-10-04): points sit around the scored recall targets (0.90, 0.95) and
+vary nprobe and the re-rank depth separately, so the reference is measured near
+its own best pages/query at each target rather than along one fixed ratio.
 """
 
 import faiss
 import numpy as np
 
 SEARCH_POINTS = [
-    {"nprobe": 16, "rerank": 16},
-    {"nprobe": 32, "rerank": 24},
-    {"nprobe": 48, "rerank": 32},
-    {"nprobe": 64, "rerank": 48},
-    {"nprobe": 96, "rerank": 64},
-    {"nprobe": 128, "rerank": 96},
-    {"nprobe": 192, "rerank": 160},
-    {"nprobe": 256, "rerank": 256},
+    {"nprobe": 64, "rerank": 96},
+    {"nprobe": 80, "rerank": 80},
+    {"nprobe": 80, "rerank": 128},
+    {"nprobe": 96, "rerank": 96},
+    {"nprobe": 112, "rerank": 128},
+    {"nprobe": 128, "rerank": 128},
+    {"nprobe": 144, "rerank": 112},
+    {"nprobe": 160, "rerank": 160},
 ]
 
 PQ_M = 16  # PQ subquantizers x 8 bits = bytes per vector, stored on SSD

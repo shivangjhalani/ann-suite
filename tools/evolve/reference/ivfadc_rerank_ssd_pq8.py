@@ -1,38 +1,40 @@
-"""Reference baseline: IVFADC with a refinement code, then exact re-ranking from SSD
-(Jegou, Tavenard, Douze, Amsaleg, "Searching in one billion vectors: re-rank with
-source coding", ICASSP 2011 -- the paper that introduced BIGANN/SIFT1B).
+"""Reference baseline: IVFADC with exact re-ranking, 8 B PQ codes on SSD (Jegou et al.,
+"Product quantization for nearest neighbor search", TPAMI 2011, and "Searching in
+one billion vectors: re-rank with source coding", ICASSP 2011), with the inverted
+lists of codes kept on SSD instead of in DRAM.
 
-Coarse k-means (n/512 lists). Every vector's residual from its list centroid is
-coded with PQ_M bytes (first level), and the residual left by that code with
-PQ2_M more bytes (the refinement code); both are held in DRAM in list order (48 B
-per vector, ~480 MB at 10M: the 640 MB budget cells). Full vectors are packed on
-SSD in list order. A query scans the first-level codes of its nprobe nearest lists
-with a per-list ADC table, re-estimates the `shortlist` best by the two-level
-reconstruction (centroid + level-1 + level-2 decoded residuals), then reads only
-the pages holding the `rerank` best re-estimated candidates (one I/O round) and
-ranks them exactly. Added 2026-10-04: evolved programs reproduced the refinement
-code, which the single-level references lack.
+Coarse k-means (n/512 lists) is the only large DRAM structure (~10 MB at 10M), so
+the design fits the 32 MB budget cell. Codes encode each vector's residual from its
+list centroid, as in IVFADC. A query reads the PQ codes of its nprobe nearest lists
+(packed contiguously in list order; round 1), scores them by asymmetric distance
+with a per-list table ||(q - c)_m - y_mj||^2, then reads the pages holding the
+`rerank` best candidates (round 2) and ranks them exactly. The first OpenEvolve
+pilot (2026-10-03) found this design (plus adaptive re-ranking) and scored it on
+DRAM alone, hence this reference: evolved programs earn no credit for
+rediscovering it. (Residual encoding added 2026-10-03; the earlier version coded
+raw vectors, weaker than the published design.)
 Sweep (2026-10-04): points sit around the scored recall targets (0.90, 0.95) and
 vary nprobe and the re-rank depth separately, so the reference is measured near
 its own best pages/query at each target rather than along one fixed ratio.
+8 B codes halve the code pages per probed list against the 16 B variant but
+shortlist worse, so the sweep re-ranks deeper.
 """
 
 import faiss
 import numpy as np
 
 SEARCH_POINTS = [
-    {"nprobe": 256, "shortlist": 1024, "rerank": 11},
-    {"nprobe": 256, "shortlist": 1024, "rerank": 12},
-    {"nprobe": 256, "shortlist": 1024, "rerank": 13},
-    {"nprobe": 256, "shortlist": 1024, "rerank": 14},
-    {"nprobe": 256, "shortlist": 1024, "rerank": 16},
-    {"nprobe": 256, "shortlist": 1024, "rerank": 18},
-    {"nprobe": 384, "shortlist": 1536, "rerank": 12},
-    {"nprobe": 384, "shortlist": 1536, "rerank": 15},
+    {"nprobe": 96, "rerank": 128},
+    {"nprobe": 128, "rerank": 160},
+    {"nprobe": 160, "rerank": 192},
+    {"nprobe": 192, "rerank": 192},
+    {"nprobe": 192, "rerank": 256},
+    {"nprobe": 256, "rerank": 256},
+    {"nprobe": 256, "rerank": 384},
+    {"nprobe": 320, "rerank": 384},
 ]
 
-PQ_M = 32  # first-level PQ bytes per vector (DRAM)
-PQ2_M = 16  # refinement-code bytes per vector (DRAM)
+PQ_M = 8  # PQ subquantizers x 8 bits = bytes per vector, stored on SSD
 
 PAGE = 4096
 
@@ -69,32 +71,27 @@ def build(ctx):
     list_start = np.zeros(nlist + 1, dtype=np.int64)
     np.cumsum(sizes, out=list_start[1:])
 
-    # PQ codes of residuals x - c(x) (DRAM-resident shortlist filter), in cluster order.
+    # PQ codes in cluster order, packed contiguously on SSD: list c occupies bytes
+    # [list_start[c] * M, list_start[c + 1] * M) of the "codes" file.
     M = PQ_M if dim % PQ_M == 0 else max(m for m in range(1, PQ_M + 1) if dim % m == 0)
     pq = faiss.ProductQuantizer(dim, M, 8)
     train = sample if sample.shape[0] >= 256 * 40 else np.asarray(data, dtype=np.float32)
     train_assign = assign[sample_ids] if train is sample else assign
     pq.train(np.ascontiguousarray(train - centroids[train_assign]))
-    # Refinement quantizer, trained on the residuals the first level leaves.
-    M2 = PQ2_M if dim % PQ2_M == 0 else max(m for m in range(1, PQ2_M + 1) if dim % m == 0)
-    pq2 = faiss.ProductQuantizer(dim, M2, 8)
-    tres = np.ascontiguousarray(train - centroids[train_assign])
-    pq2.train(np.ascontiguousarray(tres - pq.decode(pq.compute_codes(tres))))
-    del tres
     codes = np.empty((n, M), dtype=np.uint8)
-    codes2 = np.empty((n, M2), dtype=np.uint8)
     for s in range(0, n, step):
         o = order[s : s + step]
         so = np.sort(o)
-        back = np.argsort(np.argsort(o))
-        resid = np.ascontiguousarray(np.asarray(data[so], dtype=np.float32) - centroids[assign[so]])
-        c1 = pq.compute_codes(resid)
-        codes[s : s + o.size] = c1[back]
-        codes2[s : s + o.size] = pq2.compute_codes(np.ascontiguousarray(resid - pq.decode(c1)))[
-            back
+        resid = np.asarray(data[so], dtype=np.float32) - centroids[assign[so]]
+        codes[s : s + o.size] = pq.compute_codes(np.ascontiguousarray(resid))[
+            np.argsort(np.argsort(o))
         ]
+    flat = codes.ravel()
+    npg = (flat.size + PAGE - 1) // PAGE
+    code_pages = np.zeros(npg * PAGE, dtype=np.uint8)
+    code_pages[: flat.size] = flat
+    ctx.disk_writer("codes").write_pages(code_pages.reshape(npg, PAGE))
     pq_cent = faiss.vector_to_array(pq.centroids).reshape(M, 256, dim // M).astype(np.float32)
-    pq2_cent = faiss.vector_to_array(pq2.centroids).reshape(M2, 256, dim // M2)
 
     # Full vectors packed contiguously in cluster order: position p -> page p // per_page.
     w = ctx.disk_writer("lists")
@@ -113,10 +110,7 @@ def build(ctx):
 
     ctx.save_mem("centroids", centroids)
     ctx.save_mem("list_start", list_start)
-    ctx.save_mem("codes", codes)
     ctx.save_mem("pq_cent", pq_cent)
-    ctx.save_mem("codes2", codes2)
-    ctx.save_mem("pq2_cent", pq2_cent.astype(np.float32))
     ctx.save_json(
         "layout", {"dim": dim, "dtype": data.dtype.str, "rec": rec, "per_page": per_page, "M": M}
     )
@@ -127,64 +121,66 @@ class Searcher:
         self.centroids = ctx.mem("centroids")
         self.cnorm = (self.centroids**2).sum(1)
         self.list_start = ctx.mem("list_start")
-        self.codes = ctx.mem("codes")
         self.pq_cent = ctx.mem("pq_cent")
         lay = ctx.json("layout")
         self.dim, self.rec, self.per_page = lay["dim"], lay["rec"], lay["per_page"]
         self.M = lay["M"]
         self.dsub = self.dim // self.M
-        self.lut_off = (np.arange(self.M) * 256).astype(np.int32)
-        self.pq_norm = (self.pq_cent**2).sum(2)  # (M, 256)
         self.dtype = np.dtype(lay["dtype"])
         self.ip = ctx.metric == "IP"
         self.nprobe = int(params["nprobe"])
         self.rerank = int(params["rerank"])
-        self.shortlist = int(params["shortlist"])
-        self.codes2 = ctx.mem("codes2")
-        self.pq2_cent = ctx.mem("pq2_cent")
-        self.m1 = np.arange(self.M)
-        self.m2 = np.arange(self.pq2_cent.shape[0])
 
     def search(self, query, k, io):
         q = query.astype(np.float32)
         d = -(self.centroids @ q) if self.ip else self.cnorm - 2.0 * (self.centroids @ q)
         npb = min(self.nprobe, d.size - 1)
-        probe = np.argpartition(d, npb)[:npb]
+        probe = np.sort(np.argpartition(d, npb)[:npb])
         ls = self.list_start
-        pos = np.concatenate([np.arange(ls[c], ls[c + 1]) for c in probe])
-        if pos.size == 0:
+        probe = probe[ls[probe + 1] > ls[probe]]
+        if probe.size == 0:
             return np.zeros(0, dtype=np.int64)
+
+        # Round 1: the code pages of the probed lists.
+        M = self.M
+        b0, b1 = ls[probe] * M, ls[probe + 1] * M
+        p0, p1 = b0 // 4096, (b1 - 1) // 4096
+        cpages = np.unique(
+            np.concatenate([np.arange(a, b + 1) for a, b in zip(p0, p1, strict=True)])
+        )
+        buf = io.read("codes", cpages).ravel()
+        row = np.searchsorted(cpages, p0)  # a list's pages are consecutive rows of buf
+        start = row * 4096 + (b0 - p0 * 4096)
+        codes = np.concatenate(
+            [buf[s : s + (e - b)] for s, b, e in zip(start, b0, b1, strict=True)]
+        )
+        pos = np.concatenate([np.arange(ls[c], ls[c + 1]) for c in probe])
         lid = np.repeat(np.arange(probe.size, dtype=np.int32), ls[probe + 1] - ls[probe])
 
-        # IVFADC over DRAM-resident residual codes: no I/O. One table per probed
-        # list, (P, M, 256); for IP the residual term is shared and <q, c> is added.
-        M, dsub = self.M, self.dsub
+        # IVFADC over the codes just read, one subquantizer at a time so per-query
+        # temporaries stay small (this design targets the 32 MB budget): table
+        # (P, 256) per subquantizer for the residual query q - c of each list.
+        dsub = self.dsub
+        codes = codes.reshape(-1, M)
+        approx = np.zeros(codes.shape[0], dtype=np.float32)
         if self.ip:
-            lut = -np.einsum("md,mjd->mj", q.reshape(M, dsub), self.pq_cent)
-            approx = lut.ravel()[self.codes[pos].astype(np.int32) + self.lut_off].sum(1)
             approx -= (self.centroids[probe] @ q)[lid]
+            qr = np.broadcast_to(q, (probe.size, q.size))
         else:
-            qr = (q - self.centroids[probe]).reshape(-1, M, dsub)
-            luts = (
-                (qr**2).sum(2)[:, :, None]
-                - 2.0 * np.einsum("pmd,mjd->pmj", qr, self.pq_cent)
-                + self.pq_norm[None]
-            )
-            flat = self.codes[pos].astype(np.int32) + self.lut_off + (lid * (M * 256))[:, None]
-            approx = luts.ravel()[flat].sum(1)
+            qr = q - self.centroids[probe]
+        for m in range(M):
+            y = self.pq_cent[m]  # (256, dsub)
+            qm = qr[:, m * dsub : (m + 1) * dsub]
+            if self.ip:
+                lut = -(qm @ y.T)
+            else:
+                lut = (qm**2).sum(1)[:, None] - 2.0 * (qm @ y.T) + (y**2).sum(1)[None]
+            approx += lut.ravel()[lid * 256 + codes[:, m]]
 
-        # Refinement: re-estimate the shortlist from the two-level reconstruction.
-        s = min(self.shortlist, pos.size)
-        sel = np.argpartition(approx, s - 1)[:s] if s < pos.size else np.arange(pos.size)
-        p = pos[sel]
-        xh = self.centroids[probe[lid[sel]]]
-        xh = xh + self.pq_cent[self.m1, self.codes[p]].reshape(s, -1)
-        xh += self.pq2_cent[self.m2, self.codes2[p]].reshape(s, -1)
-        est = -(xh @ q) if self.ip else ((xh - q) ** 2).sum(1)
-        r = min(self.rerank, s)
-        cand = p[np.argpartition(est, r - 1)[:r]] if r < s else p
+        r = min(self.rerank, pos.size)
+        cand = pos[np.argpartition(approx, r - 1)[:r]] if r < pos.size else pos
 
-        # One I/O round: fetch only the pages holding the shortlisted vectors.
+        # Round 2: only the pages holding the shortlisted vectors.
         upages, inv = np.unique(cand // self.per_page, return_inverse=True)
         pages = io.read("lists", upages)
         off = (cand % self.per_page) * self.rec

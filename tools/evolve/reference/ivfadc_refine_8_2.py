@@ -4,8 +4,9 @@ source coding", ICASSP 2011 -- the paper that introduced BIGANN/SIFT1B).
 
 Coarse k-means (n/512 lists). Every vector's residual from its list centroid is
 coded with PQ_M bytes (first level), and the residual left by that code with
-PQ2_M more bytes (the refinement code); both are held in DRAM in list order (48 B
-per vector, ~480 MB at 10M: the 640 MB budget cells). Full vectors are packed on
+PQ2_M more bytes (the refinement code); both are held in DRAM in list order (10 B
+per vector, ~100 MB at 10M: the 128 MB budget cells; 32 + 16 B is
+ivfadc_refine_32_16.py). Full vectors are packed on
 SSD in list order. A query scans the first-level codes of its nprobe nearest lists
 with a per-list ADC table, re-estimates the `shortlist` best by the two-level
 reconstruction (centroid + level-1 + level-2 decoded residuals), then reads only
@@ -15,24 +16,26 @@ code, which the single-level references lack.
 Sweep (2026-10-04): points sit around the scored recall targets (0.90, 0.95) and
 vary nprobe and the re-rank depth separately, so the reference is measured near
 its own best pages/query at each target rather than along one fixed ratio.
+Per-query buffers grow with nprobe (~17 MB per 256 lists), so the sweep stays at
+nprobe <= 256 to fit the 128 MB cell (codes + centroids are ~110 MB).
 """
 
 import faiss
 import numpy as np
 
 SEARCH_POINTS = [
-    {"nprobe": 256, "shortlist": 1024, "rerank": 11},
-    {"nprobe": 256, "shortlist": 1024, "rerank": 12},
-    {"nprobe": 256, "shortlist": 1024, "rerank": 13},
-    {"nprobe": 256, "shortlist": 1024, "rerank": 14},
-    {"nprobe": 256, "shortlist": 1024, "rerank": 16},
-    {"nprobe": 256, "shortlist": 1024, "rerank": 18},
-    {"nprobe": 384, "shortlist": 1536, "rerank": 12},
-    {"nprobe": 384, "shortlist": 1536, "rerank": 15},
+    {"nprobe": 128, "shortlist": 384, "rerank": 96},
+    {"nprobe": 128, "shortlist": 512, "rerank": 128},
+    {"nprobe": 160, "shortlist": 640, "rerank": 128},
+    {"nprobe": 160, "shortlist": 640, "rerank": 160},
+    {"nprobe": 192, "shortlist": 768, "rerank": 160},
+    {"nprobe": 192, "shortlist": 768, "rerank": 192},
+    {"nprobe": 256, "shortlist": 1024, "rerank": 160},
+    {"nprobe": 256, "shortlist": 1024, "rerank": 224},
 ]
 
-PQ_M = 32  # first-level PQ bytes per vector (DRAM)
-PQ2_M = 16  # refinement-code bytes per vector (DRAM)
+PQ_M = 8  # first-level PQ bytes per vector (DRAM)
+PQ2_M = 2  # refinement-code bytes per vector (DRAM)
 
 PAGE = 4096
 
