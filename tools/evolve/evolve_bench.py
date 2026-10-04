@@ -625,17 +625,24 @@ def _evaluate(
             report.update({k: sc[k] for k in ("combined_score", "best_cell", "recall_shortfall")})
             report["cells"] = sc["cells"]
             report["uncovered"] = sc["uncovered"]
-            report["features"] = {
-                "dram_mb": min(cp.dram_mb for cp in cand_points),
-                "rounds": min(cp.extra["rounds"] or 0 for cp in cand_points),
-                "best_recall": max(1 - cp.miss for cp in cand_points),
-                "min_pages": min(cp.pages for cp in cand_points),
-            }
-            best_lat = (sc.get("best_cell") or {}).get("latency_ms")
-            lats = [cp.extra["latency_ms"] for cp in cand_points if "latency_ms" in cp.extra]
-            if best_lat is not None or lats:
-                report["features"]["latency_ms"] = best_lat if best_lat is not None else min(lats)
+            report["features"] = _features(sc, cand_points)
     return report
+
+
+def _features(sc: dict[str, Any], cand_points: list[Point]) -> dict[str, float]:
+    """MAP-Elites features and diagnostics of a scored candidate. latency_ms is that
+    of the best cell's operating point, else the lowest of any point (score v2)."""
+    feats = {
+        "dram_mb": min(cp.dram_mb for cp in cand_points),
+        "rounds": min(cp.extra["rounds"] or 0 for cp in cand_points),
+        "best_recall": max(1 - cp.miss for cp in cand_points),
+        "min_pages": min(cp.pages for cp in cand_points),
+    }
+    best_lat = (sc.get("best_cell") or {}).get("latency_ms")
+    lats = [cp.extra["latency_ms"] for cp in cand_points if "latency_ms" in cp.extra]
+    if best_lat is not None or lats:
+        feats["latency_ms"] = best_lat if best_lat is not None else min(lats)
+    return feats
 
 
 @contextlib.contextmanager
@@ -712,18 +719,24 @@ def _rescore_report(
     """Score a stored report's measured points against `baselines`, as _evaluate and
     _validate would have. Reports that never reached the scored stage keep their score."""
 
-    def stage_score(st: dict[str, Any] | None) -> dict[str, Any] | None:
+    def scored(st: dict[str, Any] | None) -> tuple[dict[str, Any], list[Point]] | None:
         good = [p for p in (st or {}).get("points", []) if p.get("ok")]
         if not (st or {}).get("ok") or not good:
             return None
-        return _score_points(cfg, good, st["index_bytes"], floor, baselines)[0]
+        return _score_points(cfg, good, st["index_bytes"], floor, baselines)
 
-    sc = stage_score((r.get("stages") or {}).get("full"))
-    if sc is None:
+    def stage_score(st: dict[str, Any] | None) -> dict[str, Any] | None:
+        res = scored(st)
+        return res[0] if res else None
+
+    full = scored((r.get("stages") or {}).get("full"))
+    if full is None:
         return {"combined_score": r.get("combined_score", FAIL), "validated": False}
+    sc, cand_points = full
     out = {
         k: sc[k] for k in ("combined_score", "best_cell", "recall_shortfall", "cells", "uncovered")
     }
+    out["features"] = _features(sc, cand_points)
     out["validated"] = False
     stages = (r.get("validation") or {}).get("stages")
     if stages:

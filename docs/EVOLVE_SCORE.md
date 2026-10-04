@@ -1,9 +1,9 @@
 # Evolve score v2: throughput and latency (proposal, 2026-10-05)
 
-Status: implemented behind `score.version` (default 1) on 2026-10-05; switched on
-once the SSD is calibrated, the baselines re-measured and the model validated. The current score is described in
-[EVOLVE.md](EVOLVE.md#score); this document says why it is replaced, what replaces
-it, and how it will be measured and validated.
+Status: in use since 2026-10-05 (`score.version: 2` in configs/evolve/bigann10m.yaml),
+after the SSD calibration, the one-thread baseline re-measurement and the model check
+below. Score v1 is described in [EVOLVE.md](EVOLVE.md#score); this document says why
+it was replaced, what replaces it, and how it was measured and validated.
 
 ## Why the current score is not enough
 
@@ -108,6 +108,9 @@ depend on units.
 
 **MAP-Elites features:** `dram_mb` and log10 T of the best cell's operating point
 (replacing raw `rounds`), so low-latency and low-memory designs keep their own niches.
+The report carries T as `features.latency_ms`; the OpenEvolve evaluator takes its log10
+(`log_latency`), because OpenEvolve bins a feature linearly between the smallest and
+largest value seen.
 
 ## Known biases
 
@@ -130,6 +133,29 @@ depend on units.
 3. **Spot checks.** Re-scoring the stored programs of run "main2" must rank them
    plausibly: a design that saves pages by scanning far more codes in DRAM must not
    rise.
+
+## Measurements and validation results (2026-10-05)
+
+- **SSD model** (`results/evolve/ssd_model.json`, fio on an existing 20 GB index
+  file, median of 3): one round of p pages takes 93 us (p = 1), 116 us (4), 188 us
+  (16), 396 us (64), 1.08 ms (256), 3.67 ms (1024); saturated rate 284k reads/s
+  (8 jobs x queue depth 128). Monotonic, and the three runs agree within 1%. A first
+  calibration on a freshly written file was erratic (the QLC drive folding its SLC
+  cache) and was discarded.
+- **Baselines at one search thread** on their existing indexes, after the SSD had
+  been idle 10 minutes: all 15 baseline indexes (DiskANN, PageANN, LAANN,
+  PipeANN, SPANN, Starling) and the 11 harness references. Points that exceeded the
+  785 MB search cap (PageANN-B0.32, and the 10% page-cache settings) were killed
+  as in the 8-thread campaign, so v1 and v2 cover the same methods. A first attempt
+  rebuilt the indexes before searching (ann-suite reuses an index only within one
+  run); `baselines --search-threads` now uses the existing index and refuses to build.
+- **Model vs measured latency** (`check_latency_model.py`): modelled / measured
+  median ratio 1.14 for DiskANN (17 points), 1.14 for PageANN (20), 1.15 for LAANN
+  (16); worst point 1.44. Within the 25% tolerance. The model overestimates the
+  real systems' latency, which favours the known methods over candidates.
+- **Old reports' CPU:** the 85 reference points re-measured with runner-served reads
+  spend 0.8-1.4 us less CPU per page than before (the read syscall), so
+  `legacy_read_cpu_ms_per_page: 0.001`. Negligible next to candidates' CPU.
 
 ## Implementation plan
 
