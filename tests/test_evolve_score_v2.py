@@ -90,3 +90,14 @@ def test_points_without_v2_costs_are_ignored_as_opponents() -> None:
     res = score_v2([pt(0.92, 100, 2.0, 1.0)], [old], CELLS, HOST)
     assert res["cells"][0]["covered"] is False
     assert res["combined_score"] < 0
+
+
+def test_floor_keeps_slow_designs_apart() -> None:
+    base = [pt(0.92, 10, 0.5, 0.2, "known:a")]
+    slow, slower = pt(0.92, 10, 20.0, 20.0), pt(0.92, 10, 50.0, 50.0)
+    s1 = score_v2([slow], base, CELLS, HOST, floor=-8.0)["combined_score"]
+    s2 = score_v2([slower], base, CELLS, HOST, floor=-8.0)["combined_score"]
+    assert -8.0 < s2 < s1 < -4.0
+    assert score_v2([slower], base, CELLS, HOST)["combined_score"] == pytest.approx(-4.0)
+    miss = score_v2([pt(0.85, 10, 1.0, 1.0)], base, CELLS, HOST, floor=-8.0)
+    assert miss["combined_score"] == pytest.approx(-8.0 - 0.05)

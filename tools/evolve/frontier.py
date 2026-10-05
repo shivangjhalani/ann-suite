@@ -248,7 +248,11 @@ def operating_points(points: list[Point], recall: float, host: Host) -> list[dic
 
 
 def score_v2(
-    candidates: list[Point], baselines: list[Point], cells: Cells, host: Host
+    candidates: list[Point],
+    baselines: list[Point],
+    cells: Cells,
+    host: Host,
+    floor: float = FLOOR,
 ) -> dict[str, Any]:
     if not candidates:
         return {"combined_score": -10.0, "cells": [], "best_cell": None, "uncovered": []}
@@ -305,7 +309,7 @@ def score_v2(
     ]
     if scored:
         best_row = max(scored, key=lambda r: r["gain"])
-        combined, shortfall = max(best_row["gain"], FLOOR), 0.0
+        combined, shortfall = max(best_row["gain"], floor), 0.0
         best_cell = {k: best_row[k] for k in ("dram_mb", "recall", "gain")}
         best_cell["latency_ms"] = best_row["candidate_latency_ms"]
     else:
@@ -313,7 +317,7 @@ def score_v2(
         eligible = [c for c in candidates if c.dram_mb + margin <= max(cells.dram_tiers_mb)]
         top = max((1.0 - c.miss for c in eligible), default=0.0)
         shortfall = max(0.0, min(cells.recall_targets) - top) if eligible else 0.9
-        combined = FLOOR - shortfall
+        combined = floor - shortfall
     return {
         "combined_score": combined,
         "best_cell": best_cell,

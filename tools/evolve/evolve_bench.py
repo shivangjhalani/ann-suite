@@ -54,6 +54,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from frontier import (
+    FLOOR,
     Cells,
     Host,
     Point,
@@ -564,8 +565,19 @@ def _score_points(
         host = _host(cfg)
         if host is None:
             raise RuntimeError("score v2 needs the calibrated host model (calibrate_ssd.py)")
-        return score_v2(pts, baselines, cells, host), pts
+        return score_v2(pts, baselines, cells, host, _floor_score(cfg)), pts
     return score(pts, baselines, cells), pts
+
+
+def _floor_score(cfg: dict[str, Any]) -> float:
+    """Lowest score of a candidate that reaches a cell (config score.floor). Below
+    it: floor - recall shortfall (reaches no target), then floor - 1 - (1 - recall)
+    (fails the 1M sanity gate), then FAIL (broken)."""
+    return float(cfg["score"].get("floor", FLOOR))
+
+
+def _sanity_score(cfg: dict[str, Any], best_recall: float) -> float:
+    return _floor_score(cfg) - 1.0 - (1.0 - best_recall)
 
 
 def _evaluate(
@@ -605,7 +617,7 @@ def _evaluate(
             best = max(p["recall"] for p in good)
             report["sanity_best_recall"] = best
             if best < cfg["stages"]["sanity"]["min_recall"] and "full" in stages:
-                report["combined_score"] = -5.0 - (1.0 - best)
+                report["combined_score"] = _sanity_score(cfg, best)
                 report["error"] = (
                     f"sanity gate: best recall@10 at 1M is {best:.3f} "
                     f"< {cfg['stages']['sanity']['min_recall']}"
@@ -731,6 +743,9 @@ def _rescore_report(
 
     full = scored((r.get("stages") or {}).get("full"))
     if full is None:
+        sanity = r.get("sanity_best_recall")
+        if sanity is not None and "sanity gate" in (r.get("error") or ""):
+            return {"combined_score": _sanity_score(cfg, sanity), "validated": False}
         return {"combined_score": r.get("combined_score", FAIL), "validated": False}
     sc, cand_points = full
     out = {
@@ -751,6 +766,10 @@ def _rescore_report(
 
 
 def _write_record(cfg: dict[str, Any], score_: float, cand: str | None) -> None:
+    """The record is at least 0: only a design beyond the best known method is
+    validated (two more full measurements), not every improvement below it."""
+    if score_ <= 0:
+        score_, cand = 0.0, None
     _record_path(cfg).write_text(
         json.dumps({"score": score_, "candidate": cand, "time": time.time()})
     )

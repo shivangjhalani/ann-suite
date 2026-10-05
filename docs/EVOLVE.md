@@ -69,7 +69,8 @@ Per search point (fresh container, page cache dropped by ann-suite):
   round for score v2's latency model): more than 64 fails the point, so pages
   cannot be cut by reading one page per SSD round trip.
 - **CPU/query**: the sandbox process's CPU time over the query loop; it excludes the
-  reads, which the runner does.
+  reads, which the runner does, and one untimed warm-up query run before it (the
+  mean of the first 16 queries), so numba's compile on first call is not charged.
 - **DRAM**: search-phase peak anonymous memory of the container minus the image
   floor (`floors.json`: a null program for the evolved image, now ~86 MB for the
   runner + sandbox processes; idle Python for the C++ images). Budget: 640 MB
@@ -125,7 +126,13 @@ refinement code (Jegou et al., ICASSP 2011): 32 B + 16 B (`ivfadc_refine_32_16.p
 (`ivfadc_refine_8_2.py`, ~115-120 MB: the 128 MB cells, 0.906 at 94 pages, 0.942
 at 132), each also with an OPQ rotation (Ge et al. 2013; `ivfadc_opq_refine_*.py`,
 added when evolved programs used OPQ: about 2% fewer pages on BIGANN at the same
-recall). Sweeps tune nprobe and rerank depth separately: for in-DRAM codes the
+recall). Every IVFADC reference also has a numba port (`*_nb.py`, written by
+`reference/numba_port.py`, 2026-10-05): the same algorithm, sweep and reads, with
+the ADC tables, the list scan (a bounded heap, as in faiss) and the refinement
+compiled, since score v2 charges CPU and a numpy implementation would make the
+textbook design look several times slower than it is. A port reuses its original's
+index (only Searcher differs) and returns the same neighbours on the same pages.
+Sweeps tune nprobe and rerank depth separately: for in-DRAM codes the
 pages depend on rerank depth, not nprobe, so a fixed ratio between them
 understates the reference (audit of 2026-10-04). DiskANN
 B0.1 is also swept deeper (`baselines/diskann_b01_wide.yaml`, Ls up to 1000) to
@@ -169,8 +176,10 @@ target R in {0.90, 0.95}).
   +0.68 on DRAM alone).
 - DRAM jitter (3-6 MB between identical runs) is absorbed by a 6 MB margin,
   charged to the candidate and credited to the baselines.
-- No candidate point reaches 0.90 within 640 MB: `-4 - recall shortfall`. Failed
-  sanity gate (best 1M recall < 0.5): `-5 - (1 - recall)`. Broken: `-10`.
+- With F = config `score.floor` (v1: -4; v2: -8): a candidate that reaches a cell
+  scores at least F. No candidate point reaches 0.90 within 640 MB:
+  `F - recall shortfall`. Failed sanity gate (best 1M recall < 0.5):
+  `F - 1 - (1 - recall)`. Broken: `-10`.
 
 **Validation.** A candidate whose score would beat the record (best validated
 score so far, `results/evolve/record_<name>.json`, at least 0) is searched again

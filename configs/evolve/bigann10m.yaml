@@ -104,6 +104,11 @@ score:
   # own read calls; this much per page is taken off (fit from 85 re-measured reference
   # points: 0.8-1.4 us per page, the cost of the read syscall).
   legacy_read_cpu_ms_per_page: 0.001
+  # Lowest score of a design that reaches a cell (v1 used -4: 16x the pages). v2
+  # gains of slow Python designs reach -6.4 (48 ms of CPU against 0.5 ms), so -8
+  # keeps them apart. Below it: -8 - recall shortfall (no target reached),
+  # -9 - (1 - recall) (fails the 1M sanity gate), -10 (broken).
+  floor: -8.0
 # A would-be record is re-measured on the same queries and on hidden ones; the
 # minimum of the three scores counts (see evolve_bench.py).
 validation:

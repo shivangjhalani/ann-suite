@@ -56,7 +56,8 @@ today, plus two costs.
 - `c(x)`: CPU time per query on one thread, excluding the time spent inside
   `io.read` (the device time is charged through `d`). numba is available to
   candidates, so loop-heavy code (graph traversal) runs at native speed rather than
-  being penalised by the interpreter.
+  being penalised by the interpreter. One untimed warm-up query runs first, so a
+  kernel's compile on first call is not charged (from 2026-10-05).
 - Averaged over queries (mean latency). p99 is a later option.
 
 **Throughput** (queries per second on the benchmark host):
@@ -91,7 +92,10 @@ maximised over the candidate's operating points in the cell, and
     combined_score = max over cells that have a known method of gain(cell)
 
 As in v1, cells without a known method give no credit, and a would-be record is
-re-measured on the same and on hidden queries; the minimum counts.
+re-measured on the same and on hidden queries; the minimum counts. The score is
+floored at -8 (v1: -4), because slow designs reach gains of -6 and the search needs
+to tell them apart; reaching no target and failing the sanity gate score below it
+(EVOLVE.md#score).
 
 **Reading the score.** +1 means that one design is, on the geometric average, 2x
 beyond the best known throughput and the best known latency at the same DRAM budget
@@ -156,6 +160,15 @@ largest value seen.
 - **Old reports' CPU:** the 85 reference points re-measured with runner-served reads
   spend 0.8-1.4 us less CPU per page than before (the read syscall), so
   `legacy_read_cpu_ms_per_page: 0.001`. Negligible next to candidates' CPU.
+
+- **numba reference ports** (2026-10-05): the 9 IVFADC references re-implemented with
+  numba kernels return the same neighbours on the same pages (recall within 0.0002)
+  at 2-8x less CPU (e.g. refine 8+2: 5.0-9.8 -> 1.3-2.2 ms; refine 32+16: 25-41 ->
+  3.0-4.2 ms). The 128 MB bars rose from 1,565 to 3,292 qps and from 3.83 to 1.84 ms;
+  the 640 MB bars stay with Starling (throughput) and SPANN (latency). numba costs
+  DRAM: the compiled code and LLVM state add ~20-25 MB (ssd-pq16: 13-21 -> 36-45 MB),
+  which moves the SSD-code ports out of the 32 MB cells, so the numpy originals
+  still set the 32 MB bars.
 
 ## Implementation plan
 

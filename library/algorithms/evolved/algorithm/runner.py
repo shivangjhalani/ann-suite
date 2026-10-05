@@ -414,6 +414,14 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
             }
         )
         sandbox.reply()
+        # One untimed warm-up query, as a server would run before taking traffic:
+        # numba compiles a kernel on its first call, and that must not be charged
+        # as search CPU. It is the mean of the first queries, so no scored query
+        # is seen early; its reads are served but not counted.
+        warm = queries[: min(16, nq)].astype(np.float64).mean(axis=0)
+        if np.issubdtype(queries.dtype, np.integer):
+            warm = warm.round()
+        sandbox.query(np.ascontiguousarray(warm.astype(queries.dtype)), k, disk_fds)
         load_s = time.perf_counter() - t0
         evicted = _evict_page_cache()
         file_mb_start = _cgroup_mem_stat("file")
