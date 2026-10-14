@@ -46,6 +46,7 @@ import sys
 import time
 import traceback
 from collections.abc import Iterator
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -843,6 +844,27 @@ def cmd_reference(cfg: dict[str, Any], program: Path, name: str, system: str) ->
     print(json.dumps({"added": len(points), "points": len(allp), "pareto": len(pareto(allp))}))
 
 
+def cmd_measure(cfg: dict[str, Any], program: Path, name: str, stage: str) -> None:
+    """Measure `program` on a stage (default full) like a reference, but leave the frontier
+    and the record alone: write its points (recall, pages, rounds, CPU, DRAM and the
+    v2 throughput / latency costs) to results/evolve/ablation/<name>.json. For
+    ablations and held-out comparisons."""
+    if not re.fullmatch(r"[A-Za-z0-9_.+-]{1,64}", name):
+        raise SystemExit("name must match [A-Za-z0-9_.+-]{1,64}")
+    with _evaluation_lock(cfg):
+        report = _evaluate(cfg, program, f"abl-{name}", [stage], score_it=False)
+    st = report["stages"].get(stage, {})
+    if not st.get("ok"):
+        raise SystemExit(f"measurement failed: {report.get('error')}")
+    good = [p for p in st["points"] if p["ok"]]
+    floor = _floors(cfg).get(cfg["image"], 0.0)
+    pts = _harness_points(cfg, good, st["index_bytes"], floor, name, "p")
+    out = REPO / cfg["results_dir"] / "ablation"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / f"{name}.json").write_text(json.dumps([asdict(p) for p in pts], indent=1, default=str))
+    print(json.dumps({"measured": len(pts), "name": name}))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--config", type=Path, default=REPO / "configs/evolve/bigann10m.yaml")
@@ -859,6 +881,10 @@ def main() -> None:
     r.add_argument("program", type=Path)
     r.add_argument("--name", required=True)
     r.add_argument("--system", required=True)
+    m = sub.add_parser("measure")
+    m.add_argument("program", type=Path)
+    m.add_argument("--name", required=True)
+    m.add_argument("--stage", default="full")
     rs = sub.add_parser("rescore")
     rs.add_argument("ids", nargs="+", help="candidate ids (report file names without .json)")
     rs.add_argument("--write-record", action="store_true")
@@ -873,6 +899,8 @@ def main() -> None:
         cmd_baselines(cfg, ns.baseline_config, ns.search_threads)
     elif ns.cmd == "add-reference":
         cmd_reference(cfg, ns.program, ns.name, ns.system)
+    elif ns.cmd == "measure":
+        cmd_measure(cfg, ns.program, ns.name, ns.stage)
     elif ns.cmd == "rescore":
         cmd_rescore(cfg, ns.ids, ns.write_record, ns.validate)
     else:
