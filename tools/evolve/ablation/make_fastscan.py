@@ -110,3 +110,265 @@ class Searcher:
 '''
 (d / "abl_fastscan_local.py").write_text(DOC + HEAD + local_order + "\n\n" + build_head + TAIL)
 print("wrote abl_fastscan_local.py")
+
+# Page voting (same index: only SEARCH_POINTS and Searcher differ). A page's score is
+# the sum over its shortlist hits of exp(-(d - d0) / (tau * (d_k - d0))), d0 the best
+# and d_k the k-th best shortlist distance; tau=0 counts hits instead.
+BEST = """        _, first = np.unique(pg, return_index=True)  # pages in order of their best hit
+        page_ids = pg[np.sort(first)[: self.budget]]
+"""
+VOTE = """        dist_s = dist_s[hits[0] >= 0]
+        upg, inv = np.unique(pg, return_inverse=True)
+        if self.tau > 0:
+            d0 = dist_s[0]
+            span = max(float(dist_s[min(k, dist_s.size) - 1] - d0), 1e-6)
+            w = np.exp(-(dist_s - d0) / (self.tau * span))
+        else:
+            w = np.ones(dist_s.size)
+        score = np.bincount(inv.ravel(), weights=w, minlength=upg.size)
+        b = min(self.budget, upg.size)
+        page_ids = upg[np.argpartition(-score, b - 1)[:b]] if b < upg.size else upg
+"""
+vtail = TAIL.replace(BEST, VOTE)
+assert vtail != TAIL
+vtail = vtail.replace("_, hits = self.fs.search(", "dist_s, hits = self.fs.search(")
+vtail = vtail.replace("        pos = hits[0]\n", "        pos = hits[0]\n        dist_s = dist_s[0]\n")
+vtail = vtail.replace(
+    'self.budget = int(params["pages"])\n',
+    'self.budget = int(params["pages"])\n        self.tau = float(params["tau"])\n',
+)
+for name, tau in (("vote_soft1", 1.0), ("vote_soft03", 0.3), ("vote_count", 0.0)):
+    pts = [(128, 512, 12), (128, 512, 16), (128, 512, 20), (128, 512, 24),
+           (96, 384, 16), (96, 384, 20), (192, 768, 20), (192, 768, 28)]
+    body = ",\n".join(
+        f'    {{"nprobe": {a}, "shortlist": {b}, "pages": {c}, "tau": {tau}}}' for a, b, c in pts
+    )
+    head = HEAD.split("SEARCH_POINTS = [")[0] + f"SEARCH_POINTS = [\n{body},\n]\n" + HEAD.split("]\n", 1)[1]
+    text = DOC + f"# page selection: votes, tau={tau}\n" + head + local_order + "\n\n" + build_head + vtail
+    (d / f"abl_fastscan_{name}.py").write_text(text)
+    print(f"wrote abl_fastscan_{name}.py")
+
+# Fast-scan 16 B + 16 B residual-of-residual refinement (same 32 B/vector as above).
+# Refined distance ||q - c - x1 - e2||^2 = d_fs - 2<q - c, e2> + kappa with the
+# per-vector constant kappa = 2<x1, e2> + ||e2||^2 precomputed at build time.
+RDOC = DOC.replace(
+    "In DRAM: faiss IndexIVFPQFastScan\n(4-bit PQ of the residuals, dim/2 sub-quantizers = dim/2 bytes per vector, ids = disk\npositions).",
+    "In DRAM: faiss IndexIVFPQFastScan\n(4-bit PQ of the residuals, dim/4 sub-quantizers = dim/8 bytes per vector, ids = disk\npositions) plus a dim/8-byte 8-bit PQ of what it leaves (residual of the residual),\nwhich re-estimates the shortlist before pages are chosen.",
+)
+assert RDOC != DOC
+RPTS = [(96, 384, 12), (128, 512, 12), (128, 512, 16), (128, 512, 20),
+        (192, 768, 16), (192, 768, 24), (256, 1024, 24), (256, 1024, 32)]
+rbody = ",\n".join(f'    {{"nprobe": {a}, "shortlist": {b}, "pages": {c}}}' for a, b, c in RPTS)
+RHEAD = HEAD.split("SEARCH_POINTS = [")[0] + f"SEARCH_POINTS = [\n{rbody},\n]\n" + HEAD.split("]\n", 1)[1]
+RTAIL = '''
+    # Level 1: 4-bit fast-scan PQ (dim/4 sub-quantizers); level 2: 8-bit PQ (dim/8) of
+    # the level-1 error. Vector ids are disk positions; codes2 / kappa rows likewise.
+    cstart = np.zeros(nlist + 1, dtype=np.int64)
+    np.cumsum(sizes, out=cstart[1:])
+    fs = faiss.IndexIVFPQFastScan(quant, dim, nlist, dim // 4, 4, metric)
+    fs.by_residual = True
+    tr_idx = np.sort(rng.choice(n, size=min(n, 400_000), replace=False))
+    trx = np.ascontiguousarray(np.asarray(data[tr_idx], dtype=np.float32))
+    fs.train(trx)
+    _, tra = quant.search(trx, 1)
+    tr1 = np.ascontiguousarray(trx - centroids[tra[:, 0]])
+    tr2 = np.ascontiguousarray(tr1 - fs.pq.decode(fs.pq.compute_codes(tr1)))
+    pq2 = faiss.ProductQuantizer(dim, dim // 8, 8)
+    pq2.train(tr2)
+    codes2 = np.empty((n, pq2.code_size), dtype=np.uint8)
+    kappa = np.empty(n, dtype=np.float32)
+    for s in range(0, n, step):
+        ids = order[s : s + step]
+        xs = np.ascontiguousarray(raw[ids].view(data.dtype).astype(np.float32))
+        fs.add_with_ids(xs, np.arange(s, s + ids.size, dtype=np.int64))
+        r1 = np.ascontiguousarray(xs - centroids[assign[ids]])
+        x1 = fs.pq.decode(fs.pq.compute_codes(r1))
+        c2 = pq2.compute_codes(np.ascontiguousarray(r1 - x1))
+        e2 = pq2.decode(c2)
+        codes2[s : s + ids.size] = c2
+        kappa[s : s + ids.size] = 2.0 * (x1 * e2).sum(1) + (e2 * e2).sum(1)
+    got = np.array([fs.invlists.list_size(c) for c in range(nlist)])
+    assert np.array_equal(got, sizes), "faiss list assignment differs from the page layout"
+    # written straight to the index directory: serialize_index + deserialize_index would
+    # hold three copies of the index at once (the search container is capped at 1 GB)
+    faiss.write_index(fs, str(ctx._dir / "mem" / "fs.faiss"))
+    ctx.save_mem("codes2", codes2)
+    ctx.save_mem("pq2", faiss.vector_to_array(pq2.centroids).reshape(pq2.M, 256, pq2.dsub))
+    ctx.save_mem("kappa", kappa)
+    ctx.save_mem("centroids", centroids)
+    ctx.save_mem("page_start", page_start)
+    ctx.save_mem("cstart", cstart)
+    ctx.save_json("layout", {"dim": dim, "dtype": data.dtype.str, "rec": rec, "per_page": per_page})
+
+
+class Searcher:
+    def __init__(self, ctx, params):
+        try:  # CPU time counts every thread: keep BLAS single-threaded
+            from threadpoolctl import threadpool_limits
+
+            self._tp = threadpool_limits(1)
+        except Exception:
+            pass
+        faiss.omp_set_num_threads(1)
+        self.fs = faiss.read_index(str(ctx._dir / "mem" / "fs.faiss"))
+        self.codes2 = ctx.mem("codes2")
+        self.pq2 = np.ascontiguousarray(ctx.mem("pq2"), dtype=np.float32)
+        self.kappa = ctx.mem("kappa")
+        self.centroids = ctx.mem("centroids")
+        self.page_start = ctx.mem("page_start").astype(np.int64)
+        self.cstart = ctx.mem("cstart").astype(np.int64)
+        lay = ctx.json("layout")
+        self.dim, self.rec, self.per_page = lay["dim"], lay["rec"], lay["per_page"]
+        self.dtype = np.dtype(lay["dtype"])
+        self.ip = ctx.metric == "IP"
+        nprobe = min(int(params["nprobe"]), self.fs.nlist - 1)
+        self.fs.nprobe = nprobe
+        faiss.downcast_index(self.fs.quantizer).hnsw.efSearch = max(64, int(1.5 * nprobe))
+        self.shortlist = int(params["shortlist"])
+        self.budget = int(params["pages"])
+        self.mr = np.arange(self.pq2.shape[0])
+
+    def search(self, query, k, io):
+        q = np.ascontiguousarray(query, dtype=np.float32)
+        d1, hits = self.fs.search(q[None, :], self.shortlist)
+        ok = hits[0] >= 0
+        pos, d1 = hits[0][ok], d1[0][ok]
+        if pos.size == 0:
+            return np.zeros(k, dtype=np.int64)
+        lst = np.searchsorted(self.cstart, pos, side="right") - 1
+        e2 = self.pq2[self.mr, self.codes2[pos]].reshape(pos.size, -1)
+        if self.ip:  # faiss returns <q, c + x1> for IP (larger is better)
+            est = -(d1 + e2 @ q)
+        else:
+            est = d1 - 2.0 * ((q - self.centroids[lst]) * e2).sum(1) + self.kappa[pos]
+        o = np.argsort(est)
+        pg = (self.page_start[lst] + (pos - self.cstart[lst]) // self.per_page)[o]
+        _, first = np.unique(pg, return_index=True)  # pages in order of their best hit
+        page_ids = pg[np.sort(first)[: self.budget]]
+        pages = io.read("lists", np.sort(page_ids))
+        recs = pages[:, : self.per_page * self.rec].reshape(-1, self.rec)
+        vbytes = self.rec - 4
+        ids = np.ascontiguousarray(recs[:, vbytes:]).view(np.uint32).ravel()
+        vecs = np.ascontiguousarray(recs[:, :vbytes]).view(self.dtype).astype(np.float32)
+        dist = -(vecs @ q) if self.ip else ((vecs - q) ** 2).sum(1)
+        dist[ids == 0xFFFFFFFF] = np.inf
+        kk = min(k, dist.size)
+        top = np.argpartition(dist, kk - 1)[:kk] if kk < dist.size else np.arange(dist.size)
+        return ids[top[np.argsort(dist[top])]].astype(np.int64)
+'''
+(d / "abl_fastscan_refine.py").write_text(RDOC + RHEAD + local_order + "\n\n" + build_head + RTAIL)
+print("wrote abl_fastscan_refine.py")
+
+# Same index; refinement, page choice and exact scoring fused into numba kernels
+# (created inside Searcher so the build hash, and so the index, is shared).
+NB_KERNELS = '''
+    _K = None
+
+    @staticmethod
+    def _kernels():
+        """(refine, pick, score), compiled on first call (the harness's untimed warm-up)."""
+        import numba as nb
+
+        @nb.njit(fastmath=True, nogil=True)
+        def refine(d1, pos, lst, q, cent, pq2, codes2, kappa, ip):
+            M, _, ds = pq2.shape
+            est = np.empty(pos.size, np.float32)
+            for i in range(pos.size):
+                r = pos[i]
+                c = lst[i]
+                acc = np.float32(0.0)
+                for m in range(M):
+                    y = pq2[m, codes2[r, m]]
+                    for t in range(ds):
+                        d = m * ds + t
+                        if ip:
+                            acc += q[d] * y[t]
+                        else:
+                            acc += (q[d] - cent[c, d]) * y[t]
+                est[i] = -(d1[i] + acc) if ip else d1[i] - 2.0 * acc + kappa[r]
+            return est
+
+        @nb.njit(nogil=True)
+        def pick(order, pg, budget):
+            out = np.empty(budget, np.int64)
+            n = 0
+            for i in range(order.size):
+                p = pg[order[i]]
+                dup = False
+                for j in range(n):
+                    if out[j] == p:
+                        dup = True
+                        break
+                if not dup:
+                    out[n] = p
+                    n += 1
+                    if n == budget:
+                        break
+            return np.sort(out[:n])
+
+        @nb.njit(fastmath=True, nogil=True)
+        def score(recs, dim, isz, q, ip, k):
+            # exact distances of uint8 / float32 records; padding (id 0xFFFFFFFF) skipped
+            rec = recs.shape[1]
+            n = recs.shape[0]
+            dist = np.full(n, np.inf, np.float32)
+            for i in range(n):
+                if (recs[i, rec - 1] == 255 and recs[i, rec - 2] == 255
+                        and recs[i, rec - 3] == 255 and recs[i, rec - 4] == 255):
+                    continue
+                acc = np.float32(0.0)
+                if isz == 1:
+                    for d in range(dim):
+                        v = np.float32(recs[i, d])
+                        acc += -v * q[d] if ip else (v - q[d]) * (v - q[d])
+                else:
+                    f = recs[i, : dim * 4].view(np.float32)
+                    for d in range(dim):
+                        acc += -f[d] * q[d] if ip else (f[d] - q[d]) * (f[d] - q[d])
+                dist[i] = acc
+            kk = min(k, n)
+            top = np.argsort(dist)[:kk]
+            ids = np.empty(kk, np.int64)
+            for j in range(kk):
+                i = top[j]
+                ids[j] = (np.int64(recs[i, rec - 4]) | (np.int64(recs[i, rec - 3]) << 8)
+                          | (np.int64(recs[i, rec - 2]) << 16) | (np.int64(recs[i, rec - 1]) << 24))
+            return ids
+
+        return refine, pick, score
+'''
+NB_SEARCH = '''    def search(self, query, k, io):
+        q = np.ascontiguousarray(query, dtype=np.float32)
+        d1, hits = self.fs.search(q[None, :], self.shortlist)
+        ok = hits[0] >= 0
+        pos, d1 = hits[0][ok], d1[0][ok]
+        if pos.size == 0:
+            return np.zeros(k, dtype=np.int64)
+        lst = np.searchsorted(self.cstart, pos, side="right") - 1
+        est = self.k_refine(
+            d1, pos, lst, q, self.centroids, self.pq2, self.codes2, self.kappa, self.ip
+        )
+        pg = self.page_start[lst] + (pos - self.cstart[lst]) // self.per_page
+        page_ids = self.k_pick(np.argsort(est), pg, self.budget)
+        pages = io.read("lists", page_ids)
+        recs = np.ascontiguousarray(pages[:, : self.per_page * self.rec]).reshape(-1, self.rec)
+        return self.k_score(recs, self.dim, self.dtype.itemsize, q, self.ip, k)
+'''
+i0 = RTAIL.index("    def search(self, query, k, io):")
+nb_tail = RTAIL[:i0] + NB_SEARCH
+nb_tail = nb_tail.replace("class Searcher:\n", "class Searcher:" + NB_KERNELS + "\n", 1)
+nb_tail = nb_tail.replace(
+    "        self.mr = np.arange(self.pq2.shape[0])\n",
+    "        self.centroids = np.ascontiguousarray(self.centroids, dtype=np.float32)\n"
+    "        if Searcher._K is None:\n"
+    "            Searcher._K = Searcher._kernels()\n"
+    "        self.k_refine, self.k_pick, self.k_score = Searcher._K\n",
+)
+NPTS = [(48, 256, 16), (64, 384, 16), (64, 384, 20), (96, 384, 20),
+        (96, 512, 24), (128, 512, 24), (192, 768, 24), (192, 768, 32)]
+nbody = ",\n".join(f'    {{"nprobe": {a}, "shortlist": {b}, "pages": {c}}}' for a, b, c in NPTS)
+NHEAD = HEAD.split("SEARCH_POINTS = [")[0] + f"SEARCH_POINTS = [\n{nbody},\n]\n" + HEAD.split("]\n", 1)[1]
+(d / "abl_fastscan_refine_nb.py").write_text(
+    RDOC + "# search: numba-fused refinement, page choice and scoring\n" + NHEAD + local_order + "\n\n" + build_head + nb_tail
+)
+print("wrote abl_fastscan_refine_nb.py")
