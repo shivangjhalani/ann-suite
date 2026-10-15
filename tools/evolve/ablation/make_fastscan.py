@@ -372,3 +372,61 @@ NHEAD = HEAD.split("SEARCH_POINTS = [")[0] + f"SEARCH_POINTS = [\n{nbody},\n]\n"
     RDOC + "# search: numba-fused refinement, page choice and scoring\n" + NHEAD + local_order + "\n\n" + build_head + nb_tail
 )
 print("wrote abl_fastscan_refine_nb.py")
+
+# 8 B fast-scan + 32 B refinement (40 B/vector), kappa as scaled float16 (memory).
+h_tail = nb_tail.replace(
+    "fs = faiss.IndexIVFPQFastScan(quant, dim, nlist, dim // 4, 4, metric)",
+    "fs = faiss.IndexIVFPQFastScan(quant, dim, nlist, dim // 8, 4, metric)",
+).replace(
+    "pq2 = faiss.ProductQuantizer(dim, dim // 8, 8)",
+    "pq2 = faiss.ProductQuantizer(dim, dim // 4, 8)",
+).replace(
+    '    ctx.save_mem("kappa", kappa)\n',
+    "    kscale = max(1.0, float(np.abs(kappa).max()) / 60000.0)  # float16 range\n"
+    '    ctx.save_mem("kappa", (kappa / kscale).astype(np.float16))\n'
+    '    ctx.save_json("kscale", kscale)\n',
+).replace(
+    "        def refine(d1, pos, lst, q, cent, pq2, codes2, kappa, ip):",
+    "        def refine(d1, pos, lst, q, cent, pq2, codes2, kappa, ks, ip):",
+).replace(
+    "d1[i] - 2.0 * acc + kappa[r]",
+    "d1[i] - 2.0 * acc + _h2f(kappa[r]) * ks",
+).replace(
+    "        @nb.njit(fastmath=True, nogil=True)\n        def refine(",
+    "        @nb.njit(nogil=True)\n"
+    "        def _h2f(h):  # IEEE half (as uint16 bits) -> float32; numba has no float16\n"
+    "            e = (h >> 10) & 0x1F\n"
+    "            m = np.float32(h & 0x3FF)\n"
+    "            v = m * np.float32(2.0**-24) if e == 0 else (np.float32(1.0) + m / np.float32(1024.0)) * np.float32(2.0) ** (np.int32(e) - 15)\n"
+    "            return -v if h >> 15 else v\n\n"
+    "        @nb.njit(fastmath=True, nogil=True)\n        def refine(",
+    1,
+).replace(
+    '        self.ks = np.float32(ctx.json("kscale"))\n',
+    '        self.ks = np.float32(ctx.json("kscale"))\n        self.kappa = self.kappa.view(np.uint16)\n',
+).replace(
+    "d1, pos, lst, q, self.centroids, self.pq2, self.codes2, self.kappa, self.ip",
+    "d1, pos, lst, q, self.centroids, self.pq2, self.codes2, self.kappa, self.ks, self.ip",
+).replace(
+    '        self.kappa = ctx.mem("kappa")\n',
+    '        self.kappa = ctx.mem("kappa")\n        self.ks = np.float32(ctx.json("kscale"))\n',
+)
+h_tail = h_tail.replace(
+    '        self.ks = np.float32(ctx.json("kscale"))\n',
+    '        self.ks = np.float32(ctx.json("kscale"))\n        self.kappa = self.kappa.view(np.uint16)\n',
+)
+assert "view(np.uint16)" in h_tail
+for a, b in (("dim // 8, 4, metric", "fs"), ("dim // 4, 8)", "pq2"), ("ctx.json(\"kscale\")", "ks"),
+             ("_h2f(kappa[r]) * ks", "kern"), ("def _h2f", "h2f")):
+    assert a in h_tail, b
+HDOC = RDOC.replace("dim/4 sub-quantizers = dim/8 bytes per vector", "dim/8 sub-quantizers = dim/16 bytes per vector").replace(
+    "plus a dim/8-byte 8-bit PQ", "plus a dim/4-byte 8-bit PQ")
+assert HDOC != RDOC
+HPTS = [(64, 768, 16), (96, 1024, 16), (96, 1024, 20), (128, 1024, 20),
+        (128, 1536, 24), (160, 1536, 20), (192, 1536, 24), (256, 2048, 28)]
+hbody = ",\n".join(f'    {{"nprobe": {a}, "shortlist": {b}, "pages": {c}}}' for a, b, c in HPTS)
+HHEAD = HEAD.split("SEARCH_POINTS = [")[0] + f"SEARCH_POINTS = [\n{hbody},\n]\n" + HEAD.split("]\n", 1)[1]
+(d / "abl_fastscan_h40.py").write_text(
+    HDOC + "# search: numba-fused refinement, page choice and scoring\n" + HHEAD + local_order + "\n\n" + build_head + h_tail
+)
+print("wrote abl_fastscan_h40.py")
