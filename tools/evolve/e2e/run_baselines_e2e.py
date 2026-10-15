@@ -1,7 +1,8 @@
-"""Measure packaged baselines end to end on their prebuilt indexes, at any thread
-count, without touching the scoring frontier (evolve_bench.py baselines merges into
-it). Writes one row per search point to results/evolve/e2e/<out>.json: recall, QPS,
-latency mean/p50/p99, search CPU per query, pages per query and peak anonymous DRAM.
+"""Measure packaged baselines end to end on their prebuilt indexes (or build them
+with --build), at any thread count, without touching the scoring frontier
+(evolve_bench.py baselines merges into it). Writes one row per search point to
+results/evolve/e2e/<out>.json: recall, QPS, latency mean/p50/p99, search CPU per
+query, pages per query and peak anonymous DRAM.
 
   uv run python tools/evolve/e2e/run_baselines_e2e.py configs/evolve/baselines/starling_b040.yaml \
       --threads 8 --out starling040-t8 [--only Starling-B0.40] [--sweep '[{"Ls": 25}]']
@@ -27,6 +28,9 @@ def main() -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--only", nargs="*", help="algorithm names to keep")
     ap.add_argument("--sweep", help="JSON list replacing every algorithm's search sweep")
+    ap.add_argument(
+        "--build", action="store_true", help="build missing indexes (its timings are biased: SSD)"
+    )
     ap.add_argument("--config", type=Path, default=eb.REPO / "configs/evolve/bigann10m.yaml")
     a = ap.parse_args()
 
@@ -41,7 +45,7 @@ def main() -> None:
         x["search"]["args"]["num_threads"] = a.threads
         if a.sweep:
             x["search"]["sweep"] = json.loads(a.sweep)
-        if not x.get("build", {}).get("prebuilt_path"):
+        if not a.build and not x.get("build", {}).get("prebuilt_path"):
             x["build"] = {**x.get("build", {}), "prebuilt_path": str(eb._built_index(bcfg, x))}
     images = {x["name"]: x["docker_image"] for x in bcfg["algorithms"]}
     for x in bcfg["algorithms"]:

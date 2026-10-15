@@ -430,3 +430,31 @@ HHEAD = HEAD.split("SEARCH_POINTS = [")[0] + f"SEARCH_POINTS = [\n{hbody},\n]\n"
     HDOC + "# search: numba-fused refinement, page choice and scoring\n" + HHEAD + local_order + "\n\n" + build_head + h_tail
 )
 print("wrote abl_fastscan_h40.py")
+
+# Any dimension (held-out DEEP 96-d, T2I 200-d): fast-scan with the most even
+# sub-quantizers of >= 8 dims, refinement with the most sub-quantizers <= 32 (128-d:
+# 16 x 4 bit + 32 x 8 bit, as abl_fastscan_h40.py). Points per dataset share one build.
+g_tail = h_tail.replace(
+    "    fs = faiss.IndexIVFPQFastScan(quant, dim, nlist, dim // 8, 4, metric)\n",
+    "    m1 = max(m for m in range(2, dim + 1, 2) if dim % m == 0 and dim // m >= 8)\n"
+    "    m2 = max(m for m in range(1, 33) if dim % m == 0)\n"
+    "    fs = faiss.IndexIVFPQFastScan(quant, dim, nlist, m1, 4, metric)\n",
+).replace("pq2 = faiss.ProductQuantizer(dim, dim // 4, 8)", "pq2 = faiss.ProductQuantizer(dim, m2, 8)")
+assert "m1, 4, metric" in g_tail and "(dim, m2, 8)" in g_tail
+GDOC = HDOC.replace(
+    "dim/8 sub-quantizers = dim/16 bytes per vector", "the most even sub-quantizers of >= 8 dims"
+).replace("plus a dim/4-byte 8-bit PQ", "plus an 8-bit PQ with the most sub-quantizers <= 32")
+assert GDOC != HDOC
+GPTS = {
+    "deep": [(64, 768, 24), (96, 1024, 32), (128, 1024, 40), (128, 1536, 48),
+             (192, 1536, 64), (192, 2048, 80), (256, 2048, 96), (320, 3072, 128)],
+    "t2i": [(128, 1024, 48), (192, 1536, 64), (256, 2048, 96), (320, 3072, 128),
+            (384, 4096, 160), (512, 4096, 192), (640, 6144, 256), (768, 8192, 320)],
+}
+for ds, pts in GPTS.items():
+    gbody = ",\n".join(f'    {{"nprobe": {a}, "shortlist": {b}, "pages": {c}}}' for a, b, c in pts)
+    GHEAD = HEAD.split("SEARCH_POINTS = [")[0] + f"SEARCH_POINTS = [\n{gbody},\n]\n" + HEAD.split("]\n", 1)[1]
+    (d / f"abl_fastscan_g40_{ds}.py").write_text(
+        GDOC + "# search: numba-fused refinement, page choice and scoring\n" + GHEAD + local_order + "\n\n" + build_head + g_tail
+    )
+    print(f"wrote abl_fastscan_g40_{ds}.py")

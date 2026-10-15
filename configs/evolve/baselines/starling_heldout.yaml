@@ -1,0 +1,47 @@
+# Held-out comparison: Starling on DEEP-10M (96-d float32, L2) and T2I-10M (200-d
+# float32, IP), B = 0.32 and 0.40 (32 / 40 B PQ per vector), bracketing the ~35-40 B
+# per vector of tools/evolve/ablation/abl_fastscan_g40_*.py. Otherwise as starling.yaml.
+# Not a frontier config (the frontier is BIGANN-10M): build and measure with
+#   uv run python tools/evolve/e2e/run_baselines_e2e.py configs/evolve/baselines/starling_heldout.yaml --build ...
+name: "heldout-starling"
+data_dir: "/home/isfcr/data"
+results_dir: "./results/evolve/baselines"
+index_dir: "/home/isfcr/evolve_indices/baselines"
+monitor_interval_ms: 100
+resources:
+  memory_limit: "785m"
+  cpu_affinity: "0-7"
+datasets:
+  - name: deep10m-q2k
+    base_path: deep10m-q2k/base.npy
+    query_path: deep10m-q2k/queries.npy
+    ground_truth_path: deep10m-q2k/ground_truth.npy
+    distance_metric: L2
+    dimension: 96
+    point_type: float32
+    base_count: 10000000
+    query_count: 2000
+  - name: t2i10m-q2k
+    base_path: t2i10m-q2k/base.npy
+    query_path: t2i10m-q2k/queries.npy
+    ground_truth_path: t2i10m-q2k/ground_truth.npy
+    distance_metric: IP
+    dimension: 200
+    point_type: float32
+    base_count: 10000000
+    query_count: 2000
+x-search: &search
+  timeout_seconds: 1800
+  k: 10
+  batch_mode: false
+  args: {num_threads: 8, beam_width: 4, mem_L: 10, use_ratio: 1.0, num_nodes_to_cache: 0}
+  sweep: [{Ls: 25}]
+x-build: &build
+  timeout_seconds: 21600
+  memory_limit: none
+  cpu_affinity: none
+algorithms:
+  - {name: Starling-B0.32-deep, x-system: Starling, docker_image: "ann-suite/starling:latest", algorithm_type: disk, datasets: [deep10m-q2k], build: {<<: *build, args: {R: 48, L: 128, B: 0.32, M: 16, num_threads: 24, build_mem_index: true}}, search: *search}
+  - {name: Starling-B0.40-deep, x-system: Starling, docker_image: "ann-suite/starling:latest", algorithm_type: disk, datasets: [deep10m-q2k], build: {<<: *build, args: {R: 48, L: 128, B: 0.40, M: 16, num_threads: 24, build_mem_index: true}}, search: *search}
+  - {name: Starling-B0.32-t2i, x-system: Starling, docker_image: "ann-suite/starling:latest", algorithm_type: disk, datasets: [t2i10m-q2k], build: {<<: *build, args: {R: 48, L: 128, B: 0.32, M: 16, num_threads: 24, build_mem_index: true}}, search: *search}
+  - {name: Starling-B0.40-t2i, x-system: Starling, docker_image: "ann-suite/starling:latest", algorithm_type: disk, datasets: [t2i10m-q2k], build: {<<: *build, args: {R: 48, L: 128, B: 0.40, M: 16, num_threads: 24, build_mem_index: true}}, search: *search}

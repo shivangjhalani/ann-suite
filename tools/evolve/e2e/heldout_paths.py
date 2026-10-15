@@ -1,0 +1,48 @@
+"""Helpers for run_heldout_e2e.sh.
+
+heldout_paths.py index DATASET STAGE DATASET_NAME  cached index dir of abl_fastscan_g40_DATASET.py
+heldout_paths.py points DATASET                    its SEARCH_POINTS as JSON
+heldout_paths.py flush FILE GB                     write+fsync+delete GB of random data, to
+                                                   fold recent writes out of the SSD's SLC cache
+"""
+
+import ast
+import json
+import os
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+
+
+def program(ds: str) -> str:
+    return (HERE.parent / "ablation" / f"abl_fastscan_g40_{ds}.py").read_text()
+
+
+def main() -> None:
+    cmd = sys.argv[1]
+    if cmd == "index":
+        import evolve_bench as eb
+
+        ds, stage, name = sys.argv[2:5]
+        cfg = eb._cfg(eb.REPO / "configs/evolve/bigann10m.yaml")
+        print(Path(cfg["index_dir"]) / "cache" / stage / eb._build_hash(program(ds), stage, name))
+    elif cmd == "points":
+        tree = ast.parse(program(sys.argv[2]))
+        for n in tree.body:
+            if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "SEARCH_POINTS":
+                print(json.dumps(ast.literal_eval(n.value)))
+    elif cmd == "flush":
+        path, gb = sys.argv[2], int(sys.argv[3])
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        blk = os.urandom(64 << 20)
+        for i in range(gb * 16):
+            os.write(fd, blk[i % 7 :] + blk[: i % 7])
+        os.fsync(fd)
+        os.close(fd)
+        os.unlink(path)
+
+
+if __name__ == "__main__":
+    main()
