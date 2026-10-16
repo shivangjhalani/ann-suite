@@ -20,6 +20,7 @@ STAR = {
     "deep": ["Starling-B0.32-deep", "Starling-B0.40-deep"],
     "t2i": ["Starling-B0.32-t2i", "Starling-B0.40-t2i"],
     "t2ihi": ["Starling-B0.32-t2i", "Starling-B0.40-t2i"],
+    "100m": ["Starling-B4.0-100m"],
 }
 
 

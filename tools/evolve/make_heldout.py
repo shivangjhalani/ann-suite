@@ -18,6 +18,9 @@ Usage (ann-suite root):
   uv run python tools/evolve/make_heldout.py deep10m-q2k
   uv run python tools/evolve/make_heldout.py t2i10m-q2k
   uv run python tools/evolve/make_heldout.py bigann10m-hidden
+  uv run python tools/evolve/make_heldout.py bigann100m-q2k
+Scale set (bigann100m-q2k): the 100M BIGANN base (uint8), queries 0-1999 (as
+bigann10m-q2k) and the published 100M ground truth (gt100m.bin), spot-checked.
 """
 
 from __future__ import annotations
@@ -36,6 +39,10 @@ SETS = {
 SPLITS = {
     # name: (set whose base.npy is reused, query .u8bin, published GT .bin, offset)
     "bigann10m-hidden": ("bigann10m-q2k", "bigann/query.u8bin", "bigann/gt10m.bin", 2000),
+}
+SCALE = {
+    # name: (base .u8bin, query .u8bin, published GT .bin), queries from 0
+    "bigann100m-q2k": ("bigann/base100m.u8bin", "bigann/query.u8bin", "bigann/gt100m.bin"),
 }
 
 
@@ -72,6 +79,51 @@ def _link(src: Path, dst: Path) -> None:
     os.link(src, dst)
 
 
+def published_gt(path: Path, off: int, nq: int) -> np.ndarray:
+    n, k = (int(x) for x in np.fromfile(path, dtype=np.uint32, count=2))
+    gt = np.fromfile(path, dtype=np.uint32, offset=8, count=n * k).reshape(n, k)
+    return gt[off : off + nq].astype(np.int32)
+
+
+def spot_check(base: np.ndarray, queries: np.ndarray, gt: np.ndarray) -> None:
+    """Published top-10 distances must equal brute force on 20 random queries."""
+    rng = np.random.default_rng(0)
+    check = np.sort(rng.choice(len(queries), size=20, replace=False))
+    exact = exact_topk(base, queries[check], 10, "L2")
+    q = queries[check].astype(np.float32)
+    for i, j in enumerate(check):  # compare distances: ties may order ids differently
+        d_pub = ((base[gt[j, :10]].astype(np.float32) - q[i]) ** 2).sum(1)
+        d_ref = ((base[exact[i]].astype(np.float32) - q[i]) ** 2).sum(1)
+        if not np.allclose(np.sort(d_pub), np.sort(d_ref)):
+            raise SystemExit(f"published ground truth disagrees with brute force at query {j}")
+
+
+def make_scale(name: str, data_dir: Path, evolve_dir: Path, nq: int) -> None:
+    base_rel, query_rel, gt_rel = SCALE[name]
+    out = data_dir / name
+    out.mkdir(parents=True, exist_ok=True)
+    n, d = (int(x) for x in np.fromfile(data_dir / base_rel, dtype=np.uint32, count=2))
+    src = np.memmap(data_dir / base_rel, dtype=np.uint8, mode="r", offset=8, shape=(n, d))
+    if not (out / "base.npy").exists():
+        arr = np.lib.format.open_memmap(out / "base.npy", mode="w+", dtype=np.uint8, shape=(n, d))
+        for s in range(0, n, 10_000_000):
+            arr[s : s + 10_000_000] = src[s : s + 10_000_000]
+        arr.flush()
+        del arr
+    base = np.load(out / "base.npy", mmap_mode="r")
+    queries = np.fromfile(data_dir / query_rel, dtype=np.uint8, offset=8).reshape(-1, d)[:nq]
+    queries = np.ascontiguousarray(queries)
+    gt = published_gt(data_dir / gt_rel, 0, nq)
+    spot_check(base, queries, gt)
+    np.save(out / "queries.npy", queries)
+    np.save(out / "ground_truth.npy", gt)
+    ev = evolve_dir / name
+    ev.mkdir(parents=True, exist_ok=True)
+    for f in ("base.npy", "queries.npy"):
+        _link(out / f, ev / f)
+    print(f"wrote {out} ({n:,} x {d}, queries 0-{nq - 1}, GT spot-checked 20/20) and {ev}")
+
+
 def make_split(name: str, data_dir: Path, evolve_dir: Path, nq: int) -> None:
     base_set, query_rel, gt_rel, off = SPLITS[name]
     out = data_dir / name
@@ -80,18 +132,8 @@ def make_split(name: str, data_dir: Path, evolve_dir: Path, nq: int) -> None:
     base = np.load(out / "base.npy", mmap_mode="r")
     queries = np.fromfile(data_dir / query_rel, dtype=np.uint8, offset=8).reshape(-1, base.shape[1])
     queries = np.ascontiguousarray(queries[off : off + nq])
-    n, k = (int(x) for x in np.fromfile(data_dir / gt_rel, dtype=np.uint32, count=2))
-    gt = np.fromfile(data_dir / gt_rel, dtype=np.uint32, offset=8, count=n * k).reshape(n, k)
-    gt = gt[off : off + nq].astype(np.int32)
-    rng = np.random.default_rng(0)
-    check = np.sort(rng.choice(nq, size=20, replace=False))
-    exact = exact_topk(base, queries[check], 10, "L2")
-    q = queries[check].astype(np.float32)
-    for i, j in enumerate(check):  # compare distances: ties may order ids differently
-        d_pub = ((base[gt[j, :10]].astype(np.float32) - q[i]) ** 2).sum(1)
-        d_ref = ((base[exact[i]].astype(np.float32) - q[i]) ** 2).sum(1)
-        if not np.allclose(np.sort(d_pub), np.sort(d_ref)):
-            raise SystemExit(f"published ground truth disagrees with brute force at query {j}")
+    gt = published_gt(data_dir / gt_rel, off, nq)
+    spot_check(base, queries, gt)
     np.save(out / "queries.npy", queries)
     np.save(out / "ground_truth.npy", gt)
     ev = evolve_dir / name
@@ -103,13 +145,16 @@ def make_split(name: str, data_dir: Path, evolve_dir: Path, nq: int) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("name", choices=sorted(SETS) + sorted(SPLITS))
+    ap.add_argument("name", choices=sorted(SETS) + sorted(SPLITS) + sorted(SCALE))
     ap.add_argument("--data-dir", type=Path, default=Path("/home/isfcr/data"))
     ap.add_argument("--evolve-data-dir", type=Path, default=Path("/home/isfcr/evolve_data"))
     ap.add_argument("--base-count", type=int, default=10_000_000)
     ap.add_argument("--queries", type=int, default=2000)
     ap.add_argument("--k", type=int, default=100)
     ns = ap.parse_args()
+    if ns.name in SCALE:
+        make_scale(ns.name, ns.data_dir, ns.evolve_data_dir, ns.queries)
+        return
     if ns.name in SPLITS:
         make_split(ns.name, ns.data_dir, ns.evolve_data_dir, ns.queries)
         return

@@ -312,7 +312,7 @@ def _stage_config(
                 "container_user": "root",
                 "network": "none",
                 "datasets": [ds],
-                "memory_limit": cfg["memory_limit"],
+                "memory_limit": st.get("memory_limit", cfg["memory_limit"]),
                 "build": build,
                 "search": {
                     "timeout_seconds": st["search_timeout_s"],
