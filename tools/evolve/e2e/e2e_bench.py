@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import gc
 import itertools
 import json
 import mmap
@@ -203,6 +204,12 @@ def main() -> None:
     ap.add_argument("--metric", default="L2")
     ap.add_argument("--k", type=int, default=10)
     ap.add_argument(
+        "--gc",
+        choices=("on", "freeze", "off"),
+        default="on",
+        help="Python GC during the timed queries (tail-latency study; default unchanged)",
+    )
+    ap.add_argument(
         "--dump", help="directory for per-query arrays (pN.npz: latency ms, cpu ms, pages, recall)"
     )
     a = ap.parse_args()
@@ -226,12 +233,19 @@ def main() -> None:
         searcher.search(np.ascontiguousarray(warm.astype(queries.dtype)), a.k,
                         QueryIO(ctx, readers[0].fetch))  # fmt: skip
 
+        gc.collect()
+        if a.gc == "freeze":
+            gc.freeze()
+        elif a.gc == "off":
+            gc.disable()
         if a.procs:
             res, lat, cpu, npages, nrounds, wall = run_procs(
                 searcher, ctx, fds, queries, a.k, a.procs
             )
         else:
             res, lat, cpu, npages, nrounds, wall = run(searcher, ctx, readers, queries, a.k)
+        gc.enable()
+        gc.unfreeze()
         for rd in readers:
             rd.close()
         nq = len(queries)
@@ -242,7 +256,7 @@ def main() -> None:
             np.savez(Path(a.dump) / f"p{pi}.npz", params=json.dumps(params), lat_ms=lat * 1e3,
                      cpu_ms=cpu * 1e3, pages=npages, recall=rq)  # fmt: skip
         out = {
-            "params": params, "threads": a.threads, "procs": a.procs, "queries": nq, "recall": round(recall, 4),
+            "params": params, "threads": a.threads, "procs": a.procs, "gc": a.gc, "queries": nq, "recall": round(recall, 4),
             "pages": round(float(npages.mean()), 2), "rounds": round(float(nrounds.mean()), 2),
             "qps": round(nq / wall, 1),
             "lat_mean_ms": round(float(lat.mean()) * 1e3, 3),
