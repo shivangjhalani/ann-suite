@@ -16,7 +16,7 @@ from pathlib import Path
 
 D = Path(__file__).resolve().parents[3] / "results/evolve/e2e"
 STAR = {
-    "bigann": ["Starling-B0.40"],
+    "bigann": ["Starling-B0.32", "Starling-B0.40"],
     "deep": ["Starling-B0.32-deep", "Starling-B0.40-deep"],
     "t2i": ["Starling-B0.32-t2i", "Starling-B0.40-t2i"],
     "t2ihi": ["Starling-B0.32-t2i", "Starling-B0.40-t2i"],
@@ -93,9 +93,11 @@ def main() -> None:
         pg = [at(same_params(o2[1], lat_pts), t, "pages")]
         cpu = [at(same_params(o2[1], lat_pts), t, "cpu_ms")]
         rows.append((f"ours v2 {ds}", lat, p99, qps, pg, cpu))
-        for s in STAR[base] if base == ds else []:
+        for s in STAR[base]:  # variant runs may have their own Starling files (v2star-<ds>)
             a = [load(f"v2star-{ds}-t1-r{r}.json", s) for r in (r1, r2)]
             b = [load(f"v2star-{ds}-t8-r{r}.json", s) for r in (r1, r2)]
+            if not any(a + b):
+                continue
             rows.append(
                 (
                     s,

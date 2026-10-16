@@ -202,6 +202,9 @@ def main() -> None:
     ap.add_argument("--procs", type=int, default=0, help="forked workers instead of threads")
     ap.add_argument("--metric", default="L2")
     ap.add_argument("--k", type=int, default=10)
+    ap.add_argument(
+        "--dump", help="directory for per-query arrays (pN.npz: latency ms, cpu ms, pages, recall)"
+    )
     a = ap.parse_args()
 
     idx = Path(a.index)
@@ -212,7 +215,7 @@ def main() -> None:
     prog = load_program(a.program)
     mem0 = mem_mb()
 
-    for params in json.loads(a.points):
+    for pi, params in enumerate(json.loads(a.points)):
         ctx = SearchContext(idx, a.threads, a.metric, pages)
         searcher = prog["Searcher"](ctx, params)
         readers = [AioReader(fds) for _ in range(a.threads)]
@@ -232,7 +235,12 @@ def main() -> None:
         for rd in readers:
             rd.close()
         nq = len(queries)
-        recall = float(np.mean([len(set(res[i]) & set(gt[i])) / a.k for i in range(nq)]))
+        rq = np.array([len(set(res[i]) & set(gt[i])) / a.k for i in range(nq)])
+        recall = float(rq.mean())
+        if a.dump:
+            Path(a.dump).mkdir(parents=True, exist_ok=True)
+            np.savez(Path(a.dump) / f"p{pi}.npz", params=json.dumps(params), lat_ms=lat * 1e3,
+                     cpu_ms=cpu * 1e3, pages=npages, recall=rq)  # fmt: skip
         out = {
             "params": params, "threads": a.threads, "procs": a.procs, "queries": nq, "recall": round(recall, 4),
             "pages": round(float(npages.mean()), 2), "rounds": round(float(nrounds.mean()), 2),
