@@ -44,6 +44,7 @@ uv run ann-suite run --config configs/example.yaml
 - **Fair comparison**: set the top-level `resources:` (memory_limit, cpu_affinity) so every algorithm gets the same budget; results record it in `run_conditions`
 - **Cache reset**: every search point runs in a fresh container after an OS page-cache drop (`drop_caches_before`, default true; set `ANN_SUITE_SUDO_PASSWORD` when sudo needs a password). A failed drop fails the point
 - **One run per index dir**: SPANN/PipeANN runners write scratch files (`queries.bin`, `search-results.txt`) into the index directory, so two concurrent runs on the same index corrupt each other (seen as recall 0.0 reported for a fast "success"). Run sequentially
+- **Device state**: every disk/hybrid point records the index file's probe values (`probe_*`, before and after), its drive, fill level, host writes and file age (`dev_*`). The top-level `device_state:` gate refuses points whose probe is outside the target state's bands; `prepare: true` writes to the drive to reach the state (never on a busy machine)
 - **Data and index links**: `data/links.yaml` declares where datasets and indices really live on this host; `uv run ann-suite links` creates absolute symlinks under `data/` and `indices/` (`--check` verifies, never overwrites real files). The runner bind-mounts each link target at its own path, so links resolve in containers
 - **Error handling**: Return partial `BenchmarkResult` on failure; check `PhaseResult.success`
 

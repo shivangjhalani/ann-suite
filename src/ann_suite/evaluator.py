@@ -19,7 +19,9 @@ import itertools
 import json
 import logging
 import re
+import time
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -36,6 +38,7 @@ from ann_suite.core.schemas import (
     BenchmarkResult,
     CPUMetrics,
     DatasetConfig,
+    DeviceStateTarget,
     DiskIOMetrics,
     LatencyMetrics,
     MemoryMetrics,
@@ -45,7 +48,14 @@ from ann_suite.core.schemas import (
     _flatten_dict,
 )
 from ann_suite.datasets.loader import DatasetLoader
-from ann_suite.monitoring.host_state import drift_warning, host_state, probe_device
+from ann_suite.monitoring.device_state import (
+    drive_record,
+    in_bands,
+    rewrite_files,
+    wait_for_state,
+    write_and_delete,
+)
+from ann_suite.monitoring.host_state import drift_warning, host_state, largest_file, probe_device
 from ann_suite.results.storage import ResultsStorage
 from ann_suite.runners.container_runner import ContainerRunner
 
@@ -336,6 +346,8 @@ class BenchmarkEvaluator:
         self.results_dir = Path(config.results_dir).resolve()
         self._run_id: str = ""  # Set properly when run() is called
         self._previous_state: dict[str, Any] | None = None  # last device probe, for drift checks
+        self._prepares: Counter[Path] = Counter()  # device_state prepare steps per index dir
+        self._smart_at_prepare: dict[Path, float] = {}  # SMART GB written after last prepare
 
         # Ensure directories exist
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -770,12 +782,30 @@ class BenchmarkEvaluator:
 
         Caller must guarantee the build in ``context`` succeeded.
         """
+        gate = self.config.device_state
+        on_disk = algo_config.algorithm_type in (AlgorithmType.DISK, AlgorithmType.HYBRID)
         state: dict[str, Any] = {}
-        if algo_config.search.warmup.probe_device_state:
+        if algo_config.search.warmup.probe_device_state or (on_disk and gate.active):
             state = host_state(algo_config.cpu_affinity)
-            if algo_config.algorithm_type in (AlgorithmType.DISK, AlgorithmType.HYBRID):
-                state.update(probe_device(context.host_index_dir))
+            if on_disk:
+                state.update(self._device_state(context.host_index_dir))
             self._note_state_drift(state)
+
+        if state.get("state_ok") is False and gate.on_fail == "refuse":
+            logger.error(
+                f"[{self._run_id}] Refusing point: index {context.host_index_dir} is not in "
+                f"device state '{gate.target.value}' (bands {gate.bands}; probe "
+                f"{ {k: state.get(k) for k in gate.bands} })"
+            )
+            failed = self._failed_result(
+                algo_config,
+                dataset_config,
+                context.build_params,
+                search_params,
+                build_result=context.build_result,
+            )
+            failed.run_conditions.update(state)
+            return failed
 
         search_result = self._run_search_phase(
             algo_config,
@@ -796,8 +826,83 @@ class BenchmarkEvaluator:
             build_params=context.build_params,
             search_params_override=search_params,
         )
+        if on_disk and "probe_qd1_p50_us" in state:
+            # A point can start in state and leave it (QD64 dips mid-session were seen), so
+            # probe again after the search and flag points whose state did not hold.
+            post = probe_device(context.host_index_dir)
+            state.update({f"post_{k}": v for k, v in post.items() if k != "probe_file"})
+            if gate.active:
+                state["state_ok_post"] = in_bands(post, gate.bands)
         result.run_conditions = {**_run_conditions(algo_config), **state}
         return result
+
+    def _device_state(self, index_dir: Path) -> dict[str, Any]:
+        """Probe the index file, apply the device_state gate, and describe its drive.
+
+        With the gate inactive this is one probe plus the drive record. With it active, a miss
+        is re-probed (transient dips), then prepared (if enabled) and re-probed again. Result
+        keys: probe_*, state_* (gate outcome), dev_* and index_file_age_h (drive record).
+        """
+        gate = self.config.device_state
+        target = largest_file(index_dir)
+        if target is None:
+            return {}
+        key = index_dir.resolve()
+
+        def probe() -> dict[str, Any]:
+            return probe_device(index_dir)
+
+        if not gate.active:
+            rec = probe()
+        else:
+            rec, waits = wait_for_state(probe, gate.bands, gate.max_waits, gate.wait_s)
+            prepared = 0
+            while (
+                not in_bands(rec, gate.bands)
+                and gate.prepare
+                and self._prepares[key] < gate.max_prepares
+            ):
+                self._prepare_device_state(index_dir, target)
+                self._prepares[key] += 1
+                prepared += 1
+                if (smart := drive_record(target).get("dev_smart_written_gb")) is not None:
+                    self._smart_at_prepare[key] = smart
+                rec, more = wait_for_state(probe, gate.bands, gate.max_waits, gate.wait_s)
+                waits += more
+            rec.update(
+                state_target=gate.target.value,
+                state_ok=in_bands(rec, gate.bands),
+                state_waits=waits,
+                state_prepares=prepared,
+            )
+        drive = drive_record(target)
+        if key in self._smart_at_prepare and "dev_smart_written_gb" in drive:
+            drive["dev_written_since_prepare_gb"] = round(
+                drive["dev_smart_written_gb"] - self._smart_at_prepare[key], 1
+            )
+        return {**rec, **drive}
+
+    def _prepare_device_state(self, index_dir: Path, probe_file: Path) -> None:
+        """Try to bring the index's pages into the target flash state (see DeviceStateConfig)."""
+        gate = self.config.device_state
+        if gate.target == DeviceStateTarget.FRESH:
+            logger.info(f"[{self._run_id}] device_state: rewriting {index_dir} to make it fresh")
+            gb = rewrite_files(index_dir, gate.min_free_gb)
+            logger.info(f"[{self._run_id}] device_state: rewrote {gb:.1f} GB")
+        elif gate.target == DeviceStateTarget.FOLDED:
+            assert gate.filler_dir is not None  # enforced by DeviceStateConfig
+            gate.filler_dir.mkdir(parents=True, exist_ok=True)
+            if gate.filler_dir.stat().st_dev != probe_file.stat().st_dev:
+                raise RuntimeError(
+                    f"device_state.filler_dir {gate.filler_dir} is not on the same file "
+                    f"system as {probe_file}; writing there would not fold the index"
+                )
+            logger.info(
+                f"[{self._run_id}] device_state: writing and deleting {gate.folded_write_gb} GB "
+                f"in {gate.filler_dir} to fold {index_dir}"
+            )
+            write_and_delete(gate.filler_dir, gate.folded_write_gb, gate.min_free_gb)
+        time.sleep(gate.settle_s)
 
     def _note_state_drift(self, state: dict[str, Any]) -> None:
         """Warn when the SSD read speed moved versus the previous point of this run."""

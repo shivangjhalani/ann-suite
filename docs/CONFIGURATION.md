@@ -31,6 +31,7 @@ datasets:
 | `monitor_interval_ms` | int | `100` | Resource sampling interval (50-1000) |
 | `include_raw_samples` | bool | `false` | Also include raw samples in results_detailed.json (debug files always stored separately) |
 | `resources` | object | `{}` | Shared resource envelope (see below) |
+| `device_state` | object | `{target: any}` | Flash-state acceptance gate for disk/hybrid points (see below) |
 | `algorithms` | list | `[]` | Algorithm configurations |
 | `datasets` | list | `[]` | Dataset configurations |
 
@@ -52,7 +53,42 @@ value (useful only when the budget itself is the swept variable). Every result
 records the limits it actually ran under in `run_conditions` (`cond_*` CSV columns),
 together with `page_cache_dropped`.
 
-## Algorithm Configuration
+### Device State Gate (`device_state`)
+
+On a QLC SSD the same index file reads 3x faster or slower depending on its flash state
+(docs/METRICS.md, "Device State"). A state is defined by an acceptance check: a
+`[low, high]` band per probe value, measured on the index file right before each
+disk/hybrid point (`null` leaves a side open). Bands are per drive and come from your own
+calibration; there are no defaults.
+
+```yaml
+device_state:
+  target: fresh            # any (default: record only) | fresh | folded
+  states:
+    fresh:  {probe_qd1_p50_us: [20, 40], probe_qd64_kiops: [400, null]}
+    folded: {probe_qd1_p50_us: [75, 110]}
+  max_waits: 4             # re-probes after a miss (dips are often transient)
+  wait_s: 20
+  prepare: false           # on a miss, try to reach the state (see below)
+  max_prepares: 2          # prepare attempts per index dir per run
+  settle_s: 30             # pause after a prepare step
+  folded_write_gb: 100
+  filler_dir: null         # required for prepare + folded; must be on the index's drive
+  min_free_gb: 20          # a prepare step never leaves less free space
+  on_fail: refuse          # refuse: the point fails | record: runs, cond_state_ok=false
+```
+
+Band keys: `probe_qd1_p50_us`, `probe_qd64_kiops`, `probe_qd64_lat_us`. Use QD1 *and* QD64:
+a drive can hold QD1 latency while QD64 throughput collapses during background work.
+
+`prepare` writes to the drive. For `fresh` it rewrites every file of the index in place
+(copy, fsync, rename over the original; same bytes, new flash location), following
+symlinks to where the bytes live and refusing hard-linked files. For `folded` it writes
+and deletes `folded_write_gb` of random data in `filler_dir`. The file system is not
+trimmed afterwards. Either way the point runs only if the re-probe lands in band; the
+procedure alone never defines the state.
+
+
 
 Each entry in `algorithms` defines one containerized algorithm.
 

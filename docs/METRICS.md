@@ -826,6 +826,15 @@ Every disk/hybrid search point therefore records, before the container starts
 | `cond_probe_qd1_p50_us` | Median QD1 read latency on the same file (pure Python, always available). Can move opposite to throughput: the fresh copy had *lower* QD1 latency (51 vs 75 us) yet lower QD64 IOPS and QPS, so QD1 alone is not a predictor |
 | `cond_host_cpu_governor`, `cond_host_cpu_epp`, `cond_host_cpu_mhz_mean` | CPU policy and frequency of the pinned cores at probe time (idle clock, before the load) |
 | `cond_host_nvme_temp_c`, `cond_host_load1` | Thermal state and host load |
+| `cond_post_probe_*` | The same probes repeated right after the search, to catch a state that changed during the point |
+| `cond_dev_name`, `cond_dev_model`, `cond_dev_firmware` | Drive holding the index's largest file (from sysfs) |
+| `cond_dev_fs_used_pct`, `cond_dev_fs_avail_gb` | File-system fill level; the size of a dynamic SLC cache depends on free space |
+| `cond_dev_written_since_boot_gb` | Host writes to the drive since boot (sysfs, no root needed) |
+| `cond_dev_smart_written_gb`, `cond_dev_smart_percent_used`, `cond_dev_smart_temp_c` | NVMe SMART log: lifetime host writes, wear, temperature. Needs root, passwordless `sudo nvme`, or `ANN_SUITE_SUDO_PASSWORD`; omitted otherwise |
+| `cond_dev_temp_c` | Temperature of this drive (the `host_nvme_temp_c` column is the max over all drives) |
+| `cond_index_file_age_h` | Hours since the probed file was last written (mtime) |
+| `cond_state_target`, `cond_state_ok`, `cond_state_waits`, `cond_state_prepares`, `cond_state_ok_post` | `device_state` gate outcome (only when a target is set): whether the pre-point probe was in band, re-probes and prepare steps it took, and whether the post-point probe was still in band |
+| `cond_dev_written_since_prepare_gb` | SMART host writes since the gate last prepared this index (needs SMART) |
 
 The suite logs a warning when either probe value moves >25% between consecutive points.
 **Rules:** compare absolute numbers only between points with matching probe values; measure A/B
@@ -834,6 +843,10 @@ changed probe as device state. Writing and deleting ~100 GB does not give a repr
 after it the drive ran at ~6k IOPS for minutes, then settled at a different level than before.
 `tools/docker_overhead/ssd_state_ab.py` demonstrates the effect by comparing a fresh copy of an
 index with the original over time.
+
+To require a state rather than just record it, set the top-level `device_state` gate
+(docs/CONFIGURATION.md): each point is probed, re-probed after a miss, optionally prepared,
+and refused if it does not land in the state's probe bands.
 
 ---
 

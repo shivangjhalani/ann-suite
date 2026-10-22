@@ -310,8 +310,9 @@ class WarmupConfig(BaseModel):
     probe_device_state: bool = Field(
         default=True,
         description=(
-            "Before each disk-index search point, probe the index files' 4 KiB O_DIRECT "
-            "random-read latency/throughput and record host CPU/NVMe state in run_conditions "
+            "Before and after each disk-index search point, probe the index files' 4 KiB "
+            "O_DIRECT random-read latency/throughput and record drive and host CPU state in "
+            "run_conditions "
             "(cond_* columns). SSD flash state (e.g. SLC-cache residency) can shift absolute "
             "QPS 3-5x with identical code; the probe makes such shifts visible."
         ),
@@ -581,6 +582,100 @@ class ResourceLimits(BaseModel):
     cpu_limit: float | None = Field(default=None, gt=0, description="CPU quota in cores")
 
 
+class DeviceStateTarget(str, Enum):
+    """Flash state the index file must read in before a disk/hybrid search point runs."""
+
+    ANY = "any"  # record the state, never gate on it
+    FRESH = "fresh"  # recently written pages (SLC cache on a QLC drive)
+    FOLDED = "folded"  # pages moved to native NAND
+
+
+PROBE_BAND_KEYS = ("probe_qd1_p50_us", "probe_qd64_kiops", "probe_qd64_lat_us")
+
+
+class DeviceStateConfig(BaseModel):
+    """Device-state acceptance gate for disk/hybrid search points.
+
+    A state is defined by its acceptance check: a [low, high] band per probe value, measured
+    on the index file itself right before the point (``null`` leaves a side open). Bands are
+    per drive and come from calibration; there are no defaults. Example::
+
+        device_state:
+          target: fresh
+          states:
+            fresh:  {probe_qd1_p50_us: [20, 40], probe_qd64_kiops: [300, null]}
+            folded: {probe_qd1_p50_us: [70, 110]}
+          prepare: true
+
+    With ``prepare``, a miss triggers an attempt to reach the state: ``fresh`` rewrites the
+    index files in place (copy, fsync, rename; same bytes), ``folded`` writes and deletes
+    ``folded_write_gb`` in ``filler_dir``. The point runs only if the re-probe lands in band.
+    """
+
+    target: DeviceStateTarget = Field(
+        default=DeviceStateTarget.ANY,
+        description="State each disk/hybrid point must start in; 'any' records without gating",
+    )
+    states: dict[DeviceStateTarget, dict[str, tuple[float | None, float | None]]] = Field(
+        default_factory=dict,
+        description=f"Per-state probe bands, keyed by one of {PROBE_BAND_KEYS}",
+    )
+    max_waits: int = Field(
+        default=4, ge=0, description="Re-probes after a miss before preparing or refusing"
+    )
+    wait_s: float = Field(default=20.0, ge=0, description="Pause between re-probes")
+    prepare: bool = Field(
+        default=False, description="On a miss, try to bring the drive to the target state"
+    )
+    max_prepares: int = Field(
+        default=2, ge=1, description="Prepare attempts per index directory per run"
+    )
+    settle_s: float = Field(default=30.0, ge=0, description="Pause after a prepare step")
+    folded_write_gb: float = Field(
+        default=100.0, gt=0, description="GB written then deleted to reach 'folded'"
+    )
+    filler_dir: Path | None = Field(
+        default=None,
+        description="Where the 'folded' filler is written; must be on the index's drive",
+    )
+    min_free_gb: float = Field(
+        default=20.0, ge=0, description="A prepare step never leaves less free space than this"
+    )
+    on_fail: Literal["refuse", "record"] = Field(
+        default="refuse",
+        description="'refuse': the point fails if the state is not reached; 'record': it runs "
+        "and is flagged with cond_state_ok=false",
+    )
+
+    @model_validator(mode="after")
+    def _validate_target(self) -> DeviceStateConfig:
+        for state, bands in self.states.items():
+            for key, (low, high) in bands.items():
+                if key not in PROBE_BAND_KEYS:
+                    raise ValueError(
+                        f"device_state.states.{state.value}: unknown probe '{key}' "
+                        f"(use one of {PROBE_BAND_KEYS})"
+                    )
+                if low is not None and high is not None and low > high:
+                    raise ValueError(f"device_state.states.{state.value}.{key}: low > high")
+        if self.target != DeviceStateTarget.ANY and not self.states.get(self.target):
+            raise ValueError(
+                f"device_state.target is '{self.target.value}' but states.{self.target.value} "
+                "defines no probe bands"
+            )
+        if self.prepare and self.target == DeviceStateTarget.FOLDED and self.filler_dir is None:
+            raise ValueError("device_state.prepare for 'folded' requires filler_dir")
+        return self
+
+    @property
+    def active(self) -> bool:
+        return self.target != DeviceStateTarget.ANY
+
+    @property
+    def bands(self) -> dict[str, tuple[float | None, float | None]]:
+        return self.states.get(self.target, {})
+
+
 class BenchmarkConfig(BaseModel):
     """Top-level benchmark configuration.
 
@@ -604,6 +699,10 @@ class BenchmarkConfig(BaseModel):
     resources: ResourceLimits = Field(
         default_factory=ResourceLimits,
         description="Resource envelope applied to every algorithm that does not set its own",
+    )
+    device_state: DeviceStateConfig = Field(
+        default_factory=DeviceStateConfig,
+        description="Flash-state acceptance gate for disk/hybrid search points",
     )
 
     @model_validator(mode="after")
@@ -1369,9 +1468,10 @@ class BenchmarkResult(BaseModel):
         default_factory=dict,
         description=(
             "Conditions the search ran under: memory_limit, cpu_affinity, cpu_limit, "
-            "page_cache_dropped, plus probe_* (SSD read speed of the index files) and host_* "
-            "(CPU governor/frequency, NVMe temperature, load) at search time. Results are only "
-            "comparable under equal conditions."
+            "page_cache_dropped, plus probe_*/post_probe_* (SSD read speed of the index files "
+            "before/after the search), dev_* (drive, fill level, host writes, file age), "
+            "state_* (device_state gate outcome) and host_* (CPU governor/frequency, NVMe "
+            "temperature, load). Results are only comparable under equal conditions."
         ),
     )
 

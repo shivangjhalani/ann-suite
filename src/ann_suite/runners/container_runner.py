@@ -28,13 +28,11 @@ from typing import TYPE_CHECKING, Any
 import docker
 from docker.errors import ContainerError, ImageNotFound, NotFound
 
-from ann_suite.core.constants import MAX_LOG_FILES_PER_TYPE
+from ann_suite.core.constants import MAX_LOG_FILES_PER_TYPE, SUDO_PASSWORD_ENV
 from ann_suite.core.schemas import AlgorithmConfig, ResourceSample, ResourceSummary
 from ann_suite.monitoring.base import CollectorResult, CollectorSample, get_system_block_size
 from ann_suite.monitoring.cgroups_collector import CgroupsV2Collector
 from ann_suite.utils.links import symlink_target_mounts
-
-SUDO_PASSWORD_ENV = "ANN_SUITE_SUDO_PASSWORD"
 
 NUMANODE_CPULIST_GLOB = "/sys/devices/system/node/node*/cpulist"
 

@@ -29,7 +29,7 @@ QD1_READS = 2000
 FIO_SECONDS = 4
 
 
-def _largest_file(directory: Path) -> Path | None:
+def largest_file(directory: Path) -> Path | None:
     files = [p for p in directory.rglob("*") if p.is_file()]
     return max(files, key=lambda p: p.stat().st_size, default=None)
 
@@ -74,7 +74,7 @@ def probe_device(index_dir: Path) -> dict[str, Any]:
     The probe reflects the SSD state for exactly the bytes the search will read and costs a few
     seconds. Returns an empty dict when it cannot run.
     """
-    target = _largest_file(index_dir)
+    target = largest_file(index_dir)
     if target is None or target.stat().st_size < PAGE * 1024:
         return {}
     pages = target.stat().st_size // PAGE
