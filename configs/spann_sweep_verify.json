@@ -1,0 +1,61 @@
+{
+  "name": "spann_verify_irn_capacity",
+  "seed": 20261020,
+  "paths": {
+    "spann_root": "/home/isfcr/spann/indexes",
+    "searcher": "/home/isfcr/spann/SPTAG/Release/indexsearcher",
+    "queries": "/home/isfcr/data/bigann/query.u8bin",
+    "truth_dir": "/home/isfcr/spann/data",
+    "results_root": "/home/isfcr/spann/results/sweeps",
+    "run_native": "/home/isfcr/tapeann/engine/bench/run_native.py",
+    "host_state": "src/ann_suite/monitoring/host_state.py"
+  },
+  "n_queries": 10000,
+  "timeout_s": {
+    "1m": 120,
+    "10m": 180,
+    "100m": 300
+  },
+  "repeats": 1,
+  "mem_by_scale": {
+    "1m": "2G",
+    "10m": "2G",
+    "100m": "4G"
+  },
+  "mem_by_index": {
+    "100m/ratio0.1_rep8_ppl4": "8G"
+  },
+  "cpus_by_threads": {
+    "1": "3",
+    "2": "2-3",
+    "4": "0-3",
+    "8": "0-7"
+  },
+  "gate": {
+    "ratio": 0.7,
+    "wait_s": 20,
+    "max_waits": 4,
+    "fio_seconds": 2,
+    "max_retries": 2
+  },
+  "stages": [
+    {
+      "name": "v1_irn_capacity",
+      "description": "IRN 128/256 after raising the AIO capacity in the loaders; 128 is the control that must not change.",
+      "indexes": [
+        "1m/lean_b_ratio0.05_rep8_ppl8",
+        "10m/ratio0.1_rep8_ppl4",
+        "100m/lean_c_ratio0.05_rep8_ppl8"
+      ],
+      "grid": {
+        "irn": [
+          128,
+          256,
+          384,
+          512
+        ]
+      }
+    }
+  ],
+  "loader_irn_capacity": 512
+}

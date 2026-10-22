@@ -1,0 +1,46 @@
+{
+  "name": "spann_explore",
+  "seed": 20261020,
+  "paths": {
+    "spann_root": "/home/isfcr/spann/indexes",
+    "searcher": "/home/isfcr/spann/SPTAG/Release/indexsearcher",
+    "queries": "/home/isfcr/data/bigann/query.u8bin",
+    "truth_dir": "/home/isfcr/spann/data",
+    "results_root": "/home/isfcr/spann/results/sweeps",
+    "run_native": "/home/isfcr/tapeann/engine/bench/run_native.py",
+    "host_state": "src/ann_suite/monitoring/host_state.py"
+  },
+  "n_queries": 10000,
+  "timeout_s": 900,
+  "repeats": 1,
+  "mem_by_scale": {"1m": "2G", "10m": "2G", "100m": "4G"},
+  "mem_by_index": {"100m/ratio0.1_rep8_ppl4": "8G"},
+  "cpus_by_threads": {"1": "3", "2": "2-3", "4": "0-3", "8": "0-7"},
+  "gate": {"ratio": 0.7, "wait_s": 20, "max_waits": 4, "fio_seconds": 2, "max_retries": 2},
+  "stages": [
+    {
+      "name": "x1_max_dist_ratio",
+      "description": "Which MaxDistRatio values prune anything? 10M paper-default, IRN 64.",
+      "indexes": ["10m/ratio0.1_rep8_ppl4"],
+      "grid": {"irn": [64], "mdr": [1.05, 1.1, 1.25, 1.5, 2, 3, 5, null]}
+    },
+    {
+      "name": "x2_head_maxcheck",
+      "description": "Does BuildHead.MaxCheck reach the head search? 10M paper-default, IRN 64.",
+      "indexes": ["10m/ratio0.1_rep8_ppl4"],
+      "grid": {"irn": [64], "maxcheck": [128, 256, 512, 1024, 2048, 4096, 8192]}
+    },
+    {
+      "name": "x3_posting_page_limit",
+      "description": "SearchPostingPageLimit is raised to the build limit at load (max in ExtraStaticSearcher); what is effective? 1M lean_b ppl8 and 10M paper ppl4.",
+      "indexes": ["1m/lean_b_ratio0.05_rep8_ppl8", "10m/ratio0.1_rep8_ppl4"],
+      "grid": {"irn": [64], "ppl": [1, 2, 3, 4, 5, 6, 7, 8]}
+    },
+    {
+      "name": "x4_threads",
+      "description": "Search-thread scaling, 10M paper-default, IRN 64.",
+      "indexes": ["10m/ratio0.1_rep8_ppl4"],
+      "grid": {"irn": [64], "threads": [1, 2, 4, 8]}
+    }
+  ]
+}

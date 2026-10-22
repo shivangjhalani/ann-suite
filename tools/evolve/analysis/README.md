@@ -10,3 +10,4 @@ index and data mounted read-only, never while a build or a timed search is runni
 | `sim_code_split.py INDEX DATA L2\|IP m1:m2:opq ...` | first-stage code variants on the same lists: shortlist coverage, recall at 24/32 pages, fast-scan CPU |
 | `lut_refine_check.py INDEX DATA` | table-form refinement (folded kappa) vs the per-candidate kernel; faiss fast-scan implementations; probe efSearch |
 | `stage_cpu.py PROGRAM INDEX DATA METRIC np,sl,pages ...` | per-stage single-thread CPU of a program's Searcher |
+| `locality_vs_code.py INDEX DATA L2\|IP NPROBE SHORTLIST [nq]` | pages needed with the locality layout vs a cluster-order proxy, for fast-scan-only, refined and exact page order (abl_v2 indexes) |
