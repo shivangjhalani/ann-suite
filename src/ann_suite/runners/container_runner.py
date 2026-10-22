@@ -439,16 +439,19 @@ class ContainerRunner:
 
     def _run_sudo_drop_caches(self, password: str | None) -> bool:
         """Drop caches via sudo, optionally reading the password from stdin (-S)."""
-        command = ["sudo"]
         if password is None:
-            command.append("-n")
+            # `tee` rather than `sh -c` so a narrow sudoers rule is enough:
+            # user ALL=(root) NOPASSWD: /usr/bin/tee /proc/sys/vm/drop_caches
+            os.sync()
+            command = ["sudo", "-n", "tee", "/proc/sys/vm/drop_caches"]
+            stdin = "3\n"
         else:
-            command.append("-S")
-        command.extend(["sh", "-c", "sync; echo 3 > /proc/sys/vm/drop_caches"])
+            command = ["sudo", "-S", "sh", "-c", "sync; echo 3 > /proc/sys/vm/drop_caches"]
+            stdin = f"{password}\n"
         try:
             result = subprocess.run(
                 command,
-                input=f"{password}\n" if password is not None else None,
+                input=stdin,
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -465,7 +468,7 @@ class ContainerRunner:
 
         Attempts, in order:
         1. Direct write to /proc/sys/vm/drop_caches (requires root)
-        2. Passwordless ``sudo -n sh -c '...'``
+        2. Passwordless ``sudo -n tee /proc/sys/vm/drop_caches`` (a narrow sudoers rule suffices)
         3. ``sudo -S`` with a password taken from the ANN_SUITE_SUDO_PASSWORD
            environment variable (never logged, never persisted)
 

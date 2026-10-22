@@ -82,13 +82,16 @@ class TestDropCaches:
         assert any("WARM page cache" in r.message for r in caplog.records)
 
     def test_sudo_invocation_commands(self, runner: ContainerRunner) -> None:
-        """sudo -n runs without stdin; sudo -S feeds the password via stdin."""
-        with patch("ann_suite.runners.container_runner.subprocess.run") as run:
+        """sudo -n pipes '3' into tee; sudo -S feeds the password via stdin."""
+        with (
+            patch("ann_suite.runners.container_runner.subprocess.run") as run,
+            patch("ann_suite.runners.container_runner.os.sync"),
+        ):
             run.return_value = SimpleNamespace(returncode=0)
             assert runner._run_sudo_drop_caches(None) is True
             command = run.call_args.args[0]
-            assert "sudo" in command and "-n" in command
-            assert run.call_args.kwargs["input"] is None
+            assert command == ["sudo", "-n", "tee", "/proc/sys/vm/drop_caches"]
+            assert run.call_args.kwargs["input"] == "3\n"
 
             assert runner._run_sudo_drop_caches("pw") is True
             command = run.call_args.args[0]
