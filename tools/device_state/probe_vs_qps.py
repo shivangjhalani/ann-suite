@@ -2,7 +2,7 @@
 
 Copies a prebuilt DiskANN index's files to a scratch dir, then alternates ann-suite search
 points on the copy and on the untouched original for --duration seconds: copy/original at
-1 thread, then copy/original at --threads threads, repeated. Every point records the B1
+each of --threads in turn, repeated. One algorithm (--algo) at one search point (--params). Every point records the B1
 probes before and after the search, so each row pairs a device state with a QPS. The copy
 drifts through fresh, intermediate and folded states on its own (calibration 2026-10-22);
 the original is the folded control. Repeats --trials times with --gap seconds idle between.
@@ -10,6 +10,10 @@ the original is the folded control. Repeats --trials times with --gap seconds id
 Writes about the size of the index files per trial. Run nothing else on the machine.
 
     uv run python tools/device_state/probe_vs_qps.py --out results/probe_vs_qps/2026-10-22
+    uv run python tools/device_state/probe_vs_qps.py --out results/probe_vs_qps/pipeann \
+        --config configs/evolve/baselines/pipeann.yaml --algo PipeANN-pq32 --files '*' \
+        --original /home/isfcr/evolve_indices/baselines/PipeANN-pq32/bigann10m-q2k/L-128_R-64_... \
+        --params '{"mode": 2, "beam_width": 32, "Ls": 25}'
 """
 
 from __future__ import annotations
@@ -43,13 +47,15 @@ def emit(out: Path, **row: Any) -> None:
     print(json.dumps(row), flush=True)
 
 
-def point(base: Path, index_dir: Path, threads: int, ls: int) -> dict[str, Any]:
+def point(
+    base: Path, algo_name: str | None, index_dir: Path, threads: int, params: dict[str, Any]
+) -> dict[str, Any]:
     config = load_config(base)
     config.name = f"probe-vs-qps-T{threads}"
-    algo = config.algorithms[0]
-    algo.name = f"DiskANN-T{threads}"
+    algo = next(a for a in config.algorithms if algo_name in (None, a.name))
+    algo.name = f"{algo_name or algo.name}-T{threads}"
     algo.build.prebuilt_path = index_dir
-    algo.search.sweep = [{"Ls": ls}]
+    algo.search.sweep = [params]
     algo.search.args["num_threads"] = threads
     config.algorithms = [algo]
     (result,) = BenchmarkEvaluator(config).run()
@@ -67,10 +73,11 @@ def main() -> None:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--config", type=Path, default=Path("configs/docker_overhead_diskann_10m.yaml"))
     ap.add_argument("--original", type=Path, default=Path("/home/isfcr/diskann/datasets/sift10m"))
+    ap.add_argument("--algo", help="algorithm name in --config (default: the first)")
     ap.add_argument("--files", default="disk_index_*", help="glob of index files to copy")
     ap.add_argument("--scratch", type=Path, default=Path("indices/_probe_vs_qps_scratch"))
-    ap.add_argument("--threads", type=int, default=8)
-    ap.add_argument("--ls", type=int, default=50)
+    ap.add_argument("--threads", default="1,8", help="thread counts, run in this order")
+    ap.add_argument("--params", default='{"Ls": 50}', help="search point, JSON")
     ap.add_argument("--trials", type=int, default=3)
     ap.add_argument("--duration", type=float, default=1800)
     ap.add_argument("--gap", type=float, default=600)
@@ -80,9 +87,17 @@ def main() -> None:
     args.out.mkdir(parents=True, exist_ok=True)
     out = args.out / "probe_vs_qps.jsonl"
     scratch = args.scratch.resolve()
+    threads_list = [int(t) for t in args.threads.split(",")]
+    params = json.loads(args.params)
+
+    def run(index_dir: Path, threads: int) -> dict[str, Any]:
+        return point(args.config, args.algo, index_dir, threads, params)
+
+    emit(out, phase="start", config=str(args.config), algo=args.algo, params=params,
+         threads=threads_list, original=str(args.original))  # fmt: skip
     if args.no_copy:
-        for threads in (1, args.threads):
-            row = point(args.config, args.original, threads, args.ls)
+        for threads in threads_list:
+            row = run(args.original, threads)
             emit(out, phase="smoke", arm="original", threads=threads, **row)
         return
 
@@ -91,7 +106,8 @@ def main() -> None:
         scratch.mkdir(parents=True)
         t0 = time.monotonic()
         for f in sorted(args.original.glob(args.files)):
-            shutil.copyfile(f, scratch / f.name)
+            if f.is_file() and not f.is_symlink():
+                shutil.copyfile(f, scratch / f.name)
         os.sync()
         emit(out, phase="copied", trial=trial, copy_s=round(time.monotonic() - t0, 1))
         t0 = time.monotonic()
@@ -99,10 +115,10 @@ def main() -> None:
         try:
             while time.monotonic() - t0 < args.duration:
                 rnd += 1
-                for threads in (1, args.threads):
+                for threads in threads_list:
                     for arm, d in (("copy", scratch), ("original", args.original)):
                         t_s = round(time.monotonic() - t0, 1)
-                        row = point(args.config, d, threads, args.ls)
+                        row = run(d, threads)
                         emit(out, phase="point", trial=trial, round=rnd, arm=arm,
                              threads=threads, t_s=t_s, **row)  # fmt: skip
         finally:

@@ -152,6 +152,31 @@ class TestDeviceStateConfig:
         cfg = DeviceStateConfig(target="fresh", states={"fresh": FRESH})
         assert cfg.active and cfg.bands == FRESH
 
+    def test_size_classes_pick_bands_by_file_size(self) -> None:
+        small = {"probe_qd1_p50_us": (70.0, 85.0)}
+        mid = {"probe_qd1_p50_us": (85.0, 100.0)}
+        cfg = DeviceStateConfig(
+            target="folded",
+            states={"folded": mid},
+            size_classes=[
+                {"max_gb": 2.5, "states": {"folded": small}},
+                {"max_gb": 20, "states": {"fresh": FRESH}},
+            ],
+        )
+        assert cfg.bands_for(1.6) == small
+        assert cfg.bands_for(5.9) == mid  # covering class lacks folded: fall back to states
+        assert cfg.bands_for(340) == mid
+        only_classes = DeviceStateConfig(
+            target="folded", size_classes=[{"max_gb": 2.5, "states": {"folded": small}}]
+        )
+        assert only_classes.bands_for(5.9) == {}
+
+    def test_size_classes_validated(self) -> None:
+        with pytest.raises(ValidationError, match="ascending"):
+            DeviceStateConfig(size_classes=[{"max_gb": 20}, {"max_gb": 2}])
+        with pytest.raises(ValidationError, match=r"size_classes\[0\].*unknown probe"):
+            DeviceStateConfig(size_classes=[{"max_gb": 2, "states": {"fresh": {"qps": (1, 2)}}}])
+
 
 class TestEvaluatorGate:
     def _setup(
@@ -223,3 +248,18 @@ class TestEvaluatorGate:
         evaluator._run_search_phase.assert_not_called()
         assert result.run_conditions["state_ok"] is False
         assert result.run_conditions["probe_qd1_p50_us"] == 90.0
+
+    def test_size_class_bands_apply_and_uncovered_file_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        evaluator, idx, _ = self._setup(tmp_path, monkeypatch, [80.0, 80.0], max_waits=0)
+        big = {"probe_qd1_p50_us": (70.0, 85.0)}
+        evaluator.config.device_state = DeviceStateConfig(
+            target="folded", wait_s=0, size_classes=[{"max_gb": 1, "states": {"folded": big}}]
+        )
+        assert evaluator._device_state(idx)["state_ok"]  # 4 KiB file: the 1 GB class
+        evaluator.config.device_state = DeviceStateConfig(
+            target="folded", wait_s=0, size_classes=[{"max_gb": 1e-9, "states": {"folded": big}}]
+        )
+        state = evaluator._device_state(idx)
+        assert state["state_ok"] is False and state["probe_qd1_p50_us"] == 80.0

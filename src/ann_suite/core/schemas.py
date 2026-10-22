@@ -592,6 +592,33 @@ class DeviceStateTarget(str, Enum):
 
 PROBE_BAND_KEYS = ("probe_qd1_p50_us", "probe_qd64_kiops", "probe_qd64_lat_us")
 
+ProbeBands = dict[str, tuple[float | None, float | None]]
+
+
+def _check_bands(where: str, states: dict[DeviceStateTarget, ProbeBands]) -> None:
+    for state, bands in states.items():
+        for key, (low, high) in bands.items():
+            if key not in PROBE_BAND_KEYS:
+                raise ValueError(
+                    f"{where}.{state.value}: unknown probe '{key}' (use one of {PROBE_BAND_KEYS})"
+                )
+            if low is not None and high is not None and low > high:
+                raise ValueError(f"{where}.{state.value}.{key}: low > high")
+
+
+class DeviceSizeClass(BaseModel):
+    """Probe bands for index files up to ``max_gb``.
+
+    The folded read level of one drive grows with the size of the file probed (calibration on
+    a DRAM-less QLC drive: ~77 us at 1-2 GB, ~92 us at 3-16 GB, 126-161 us at >= 58 GB), so a
+    band fitted on one size class rejects or admits the wrong files of another.
+    """
+
+    max_gb: float = Field(gt=0, description="Largest index file (GB) this class covers")
+    states: dict[DeviceStateTarget, ProbeBands] = Field(
+        default_factory=dict, description="Per-state probe bands for this class"
+    )
+
 
 class DeviceStateConfig(BaseModel):
     """Device-state acceptance gate for disk/hybrid search points.
@@ -610,15 +637,23 @@ class DeviceStateConfig(BaseModel):
     With ``prepare``, a miss triggers an attempt to reach the state: ``fresh`` rewrites the
     index files in place (copy, fsync, rename; same bytes), ``folded`` writes and deletes
     ``folded_write_gb`` in ``filler_dir``. The point runs only if the re-probe lands in band.
+
+    ``size_classes`` (ascending ``max_gb``) override ``states`` by the size of the index's
+    largest file: the first class with ``max_gb`` >= that size applies if it defines the
+    target, else ``states`` does. A file that no band covers fails the gate.
     """
 
     target: DeviceStateTarget = Field(
         default=DeviceStateTarget.ANY,
         description="State each disk/hybrid point must start in; 'any' records without gating",
     )
-    states: dict[DeviceStateTarget, dict[str, tuple[float | None, float | None]]] = Field(
+    states: dict[DeviceStateTarget, ProbeBands] = Field(
         default_factory=dict,
         description=f"Per-state probe bands, keyed by one of {PROBE_BAND_KEYS}",
+    )
+    size_classes: list[DeviceSizeClass] = Field(
+        default_factory=list,
+        description="Bands per index file size class, ascending max_gb; override 'states'",
     )
     max_waits: int = Field(
         default=4, ge=0, description="Re-probes after a miss before preparing or refusing"
@@ -649,16 +684,16 @@ class DeviceStateConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_target(self) -> DeviceStateConfig:
-        for state, bands in self.states.items():
-            for key, (low, high) in bands.items():
-                if key not in PROBE_BAND_KEYS:
-                    raise ValueError(
-                        f"device_state.states.{state.value}: unknown probe '{key}' "
-                        f"(use one of {PROBE_BAND_KEYS})"
-                    )
-                if low is not None and high is not None and low > high:
-                    raise ValueError(f"device_state.states.{state.value}.{key}: low > high")
-        if self.target != DeviceStateTarget.ANY and not self.states.get(self.target):
+        _check_bands("device_state.states", self.states)
+        for i, cls in enumerate(self.size_classes):
+            _check_bands(f"device_state.size_classes[{i}].states", cls.states)
+        limits = [cls.max_gb for cls in self.size_classes]
+        if limits != sorted(set(limits)):
+            raise ValueError("device_state.size_classes: max_gb must be strictly ascending")
+        if self.target != DeviceStateTarget.ANY and not (
+            self.states.get(self.target)
+            or any(cls.states.get(self.target) for cls in self.size_classes)
+        ):
             raise ValueError(
                 f"device_state.target is '{self.target.value}' but states.{self.target.value} "
                 "defines no probe bands"
@@ -672,8 +707,16 @@ class DeviceStateConfig(BaseModel):
         return self.target != DeviceStateTarget.ANY
 
     @property
-    def bands(self) -> dict[str, tuple[float | None, float | None]]:
+    def bands(self) -> ProbeBands:
+        """Target bands without size classes."""
         return self.states.get(self.target, {})
+
+    def bands_for(self, file_gb: float) -> ProbeBands:
+        """Target bands for an index whose largest file is ``file_gb``; empty if none apply."""
+        cls = next((c for c in self.size_classes if file_gb <= c.max_gb), None)
+        if cls is not None and self.target in cls.states:
+            return cls.states[self.target]
+        return self.bands
 
 
 class BenchmarkConfig(BaseModel):

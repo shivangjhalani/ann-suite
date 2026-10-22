@@ -81,6 +81,25 @@ device_state:
 Band keys: `probe_qd1_p50_us`, `probe_qd64_kiops`, `probe_qd64_lat_us`. Use QD1 *and* QD64:
 a drive can hold QD1 latency while QD64 throughput collapses during background work.
 
+The folded read level also depends on how many bytes the probe spans. On a DRAM-less QLC
+drive (WD SN5100), random reads within 1 GiB of an old file took ~77 us QD1, within 2-16 GiB
+~92 us, 32 GiB 101-125 us and 64 GiB or more 125-160 us, for the same file whatever its age
+(`tools/device_state/span_probe.py`). The index file size sets that span. Give each
+size class its own bands with `size_classes` (ascending `max_gb`, the size of the index's
+largest file in GB). The first class that covers the file applies if it defines the target
+state, else `states` does; a file no band covers fails the gate.
+
+```yaml
+device_state:
+  target: folded
+  states:
+    folded: {probe_qd1_p50_us: [120, 165]}         # default: files above the last class
+  size_classes:                                    # SN5100 calibration, 2026-10-22
+    - {max_gb: 1.8, states: {folded: {probe_qd1_p50_us: [70, 90]}}}
+    - {max_gb: 20,  states: {folded: {probe_qd1_p50_us: [85, 100]}}}
+    - {max_gb: 40,  states: {folded: {probe_qd1_p50_us: [95, 130]}}}
+```
+
 `prepare` writes to the drive. For `fresh` it rewrites every file of the index in place
 (copy, fsync, rename over the original; same bytes, new flash location), following
 symlinks to where the bytes live and refusing hard-linked files. For `folded` it writes

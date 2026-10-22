@@ -31,6 +31,7 @@ import numpy as np
 
 from ann_suite.core.constants import STANDARD_PAGE_SIZE
 from ann_suite.core.schemas import (
+    PROBE_BAND_KEYS,
     AlgorithmConfig,
     AlgorithmStats,
     AlgorithmType,
@@ -43,6 +44,7 @@ from ann_suite.core.schemas import (
     LatencyMetrics,
     MemoryMetrics,
     PhaseResult,
+    ProbeBands,
     ResourceSummary,
     TimeBases,
     _flatten_dict,
@@ -792,10 +794,11 @@ class BenchmarkEvaluator:
             self._note_state_drift(state)
 
         if state.get("state_ok") is False and gate.on_fail == "refuse":
+            bands = self._gate_bands(context.host_index_dir)
             logger.error(
                 f"[{self._run_id}] Refusing point: index {context.host_index_dir} is not in "
-                f"device state '{gate.target.value}' (bands {gate.bands}; probe "
-                f"{ {k: state.get(k) for k in gate.bands} })"
+                f"device state '{gate.target.value}' (bands {bands or 'none for its size'}; "
+                f"probe { {k: state.get(k) for k in bands or PROBE_BAND_KEYS} })"
             )
             failed = self._failed_result(
                 algo_config,
@@ -832,9 +835,17 @@ class BenchmarkEvaluator:
             post = probe_device(context.host_index_dir)
             state.update({f"post_{k}": v for k, v in post.items() if k != "probe_file"})
             if gate.active:
-                state["state_ok_post"] = in_bands(post, gate.bands)
+                bands = self._gate_bands(context.host_index_dir)
+                state["state_ok_post"] = bool(bands) and in_bands(post, bands)
         result.run_conditions = {**_run_conditions(algo_config), **state}
         return result
+
+    def _gate_bands(self, index_dir: Path) -> ProbeBands:
+        """The device_state target bands for this index, chosen by its largest file's size."""
+        target = largest_file(index_dir)
+        if target is None:
+            return {}
+        return self.config.device_state.bands_for(target.stat().st_size / 1e9)
 
     def _device_state(self, index_dir: Path) -> dict[str, Any]:
         """Probe the index file, apply the device_state gate, and describe its drive.
@@ -854,11 +865,15 @@ class BenchmarkEvaluator:
 
         if not gate.active:
             rec = probe()
+        elif not (bands := self._gate_bands(index_dir)):
+            rec = probe()
+            rec.update(state_target=gate.target.value, state_ok=False, state_waits=0,
+                       state_prepares=0)  # fmt: skip
         else:
-            rec, waits = wait_for_state(probe, gate.bands, gate.max_waits, gate.wait_s)
+            rec, waits = wait_for_state(probe, bands, gate.max_waits, gate.wait_s)
             prepared = 0
             while (
-                not in_bands(rec, gate.bands)
+                not in_bands(rec, bands)
                 and gate.prepare
                 and self._prepares[key] < gate.max_prepares
             ):
@@ -867,11 +882,11 @@ class BenchmarkEvaluator:
                 prepared += 1
                 if (smart := drive_record(target).get("dev_smart_written_gb")) is not None:
                     self._smart_at_prepare[key] = smart
-                rec, more = wait_for_state(probe, gate.bands, gate.max_waits, gate.wait_s)
+                rec, more = wait_for_state(probe, bands, gate.max_waits, gate.wait_s)
                 waits += more
             rec.update(
                 state_target=gate.target.value,
-                state_ok=in_bands(rec, gate.bands),
+                state_ok=in_bands(rec, bands),
                 state_waits=waits,
                 state_prepares=prepared,
             )
