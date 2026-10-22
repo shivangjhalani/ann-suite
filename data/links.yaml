@@ -1,0 +1,48 @@
+# Symlink manifest: gives ann-suite one entry point to data and indices stored
+# elsewhere on this host (isfcr). Apply with `uv run ann-suite links`, verify with
+# `uv run ann-suite links --check`.
+#
+# Each key is a link directory inside the repo; each value lists absolute targets.
+# A target may be a glob; a trailing slash matches directories only. Every target
+# becomes a symlink named after its basename. Links are absolute, and the container
+# runner bind-mounts their real targets at the same path, so they resolve inside
+# containers too. The tool never deletes or overwrites real files.
+#
+# Inventory and known traps: ai-researcher vault, analysis-paper/04-Testbed.md.
+
+links:
+  # Datasets and query sets (~/data). Native big-ann files plus npy dataset dirs.
+  # Traps: t2i-10m headers overstate row counts (use file size); the sift100m-*
+  # ground truths except -qa/-qb are zero-filled placeholders (no recall);
+  # sift100m/ is a 10K-row stub, not the 100M base.
+  data:
+    - /home/isfcr/data/bigann
+    - /home/isfcr/data/deep
+    - /home/isfcr/data/t2i-10m
+    - /home/isfcr/data/dbpedia-openai3-1536-1m
+    - /home/isfcr/data/beir-nq
+    - /home/isfcr/data/beir-quora
+    - /home/isfcr/data/gist-960-euclidean
+    - /home/isfcr/data/sift1m
+    - /home/isfcr/data/sift-10k
+    - /home/isfcr/data/sift1m-prebuilt
+    - /home/isfcr/data/sift10m
+    - /home/isfcr/data/sift100m
+    - /home/isfcr/data/sift100m-*/
+    - /home/isfcr/data/*-q2k/
+    - /home/isfcr/data/bigann1m-q1k
+    - /home/isfcr/data/bigann10m-full
+    - /home/isfcr/data/bigann10m-hidden
+
+  # Indices, grouped by the system that built them.
+  indices/starling:
+    - /home/isfcr/starling/indices/*/
+  indices/spann:
+    - /home/isfcr/spann/indexes/*/
+  indices/diskann:
+    - /home/isfcr/diskann/datasets/*/
+    - /home/isfcr/data/idx/*/
+  indices/tapeann:
+    - /home/isfcr/tapeann/engine/indexes/*/
+  indices/evolve:
+    - /home/isfcr/evolve_indices/*/

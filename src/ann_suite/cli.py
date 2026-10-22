@@ -22,6 +22,7 @@ from ann_suite.datasets import list_datasets as list_registered_datasets
 from ann_suite.evaluator import BenchmarkEvaluator, detect_sweep_anomalies
 from ann_suite.results.storage import ResultsStorage
 from ann_suite.runners.container_runner import ContainerRunner
+from ann_suite.utils.links import DEFAULT_MANIFEST, apply_links
 from ann_suite.utils.logging import setup_logging
 
 app = typer.Typer(
@@ -284,6 +285,37 @@ def download(
     except Exception as e:
         console.print(f"[bold red]Error:[/] {e}")
         raise typer.Exit(1) from None
+
+
+@app.command()
+def links(
+    manifest: Path = typer.Option(
+        DEFAULT_MANIFEST, "--manifest", "-m", help="Symlink manifest (YAML)"
+    ),
+    check: bool = typer.Option(False, "--check", help="Only verify; create nothing"),
+) -> None:
+    """Create or verify the data/index symlinks declared in the manifest."""
+    try:
+        report = apply_links(manifest, Path.cwd(), check_only=check)
+    except (OSError, ValueError) as e:
+        console.print(f"[bold red]Error:[/] {e}")
+        raise typer.Exit(1) from e
+
+    console.print(f"ok {len(report.ok)}, created {len(report.created)}")
+    for link in report.created:
+        console.print(f"  [green]created[/] {link}")
+    for link in report.missing:
+        console.print(f"  [yellow]missing[/] {link}")
+    for link, current in report.wrong:
+        console.print(f"  [red]points elsewhere[/] {link} -> {current}")
+    for link in report.blocked:
+        console.print(f"  [red]real file in the way[/] {link}")
+    for pattern in report.unmatched:
+        console.print(f"  [red]no target matches[/] {pattern}")
+    for link in report.dangling:
+        console.print(f"  [red]dangling[/] {link}")
+    if report.problems:
+        raise typer.Exit(1)
 
 
 @app.command()

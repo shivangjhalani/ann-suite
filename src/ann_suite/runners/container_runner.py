@@ -26,12 +26,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import docker
-from ann_suite.core.constants import MAX_LOG_FILES_PER_TYPE
-from ann_suite.monitoring.base import CollectorResult, CollectorSample, get_system_block_size
-from ann_suite.monitoring.cgroups_collector import CgroupsV2Collector
 from docker.errors import ContainerError, ImageNotFound, NotFound
 
+from ann_suite.core.constants import MAX_LOG_FILES_PER_TYPE
 from ann_suite.core.schemas import AlgorithmConfig, ResourceSample, ResourceSummary
+from ann_suite.monitoring.base import CollectorResult, CollectorSample, get_system_block_size
+from ann_suite.monitoring.cgroups_collector import CgroupsV2Collector
+from ann_suite.utils.links import symlink_target_mounts
 
 SUDO_PASSWORD_ENV = "ANN_SUITE_SUDO_PASSWORD"
 
@@ -872,6 +873,10 @@ class ContainerRunner:
             str(self.results_dir): {"bind": "/results", "mode": "rw"},
             # Mount logs dir as well if needed, but we write from host side
         }
+        # Absolute symlinks under the data/index dirs (see utils/links.py) point outside
+        # these mounts; bind each real target at its own path so they resolve in-container.
+        for target in symlink_target_mounts([self.data_dir, self.index_dir]):
+            volumes.setdefault(str(target), {"bind": str(target), "mode": "rw"})
         if additional_volumes:
             volumes.update(additional_volumes)
         return volumes
