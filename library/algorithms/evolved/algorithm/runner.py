@@ -50,6 +50,7 @@ from typing import Any
 import numpy as np
 
 from algorithm import wire
+from algorithm.aio import AioReader
 from algorithm.harness import PAGE, page_buffer
 
 NOBODY = 65534
@@ -82,7 +83,7 @@ class CandidateError(Exception):
 class Sandbox:
     """The candidate's process: `nobody`, no inherited fds except the ones given."""
 
-    def __init__(self, pass_fds: tuple[int, ...], threads: int | None) -> None:
+    def __init__(self, pass_fds: tuple[int, ...], threads: int | None, aio: bool = False) -> None:
         if os.geteuid() != 0:
             raise RuntimeError(
                 "the evolved runner must start as root to sandbox candidate code "
@@ -122,6 +123,7 @@ class Sandbox:
         os.close(to_child_r)
         os.close(from_child_w)
         self._buf = None
+        self._aio = AioReader() if aio else None
 
     def send_json(self, obj: Any) -> None:
         wire.send_json(self._w, obj)
@@ -173,6 +175,9 @@ class Sandbox:
         if ids.size and (ids[0] < 0 or ids[-1] >= num_pages):
             raise CandidateError(f"page id out of range for {name} ({num_pages} pages)")
         need = ids.size * PAGE
+        if self._aio is not None:
+            wire.send(self._w, b"P", self._aio.read(fd, ids))
+            return int(ids.size)
         if self._buf is None or len(self._buf) < need:
             if self._buf is not None:
                 self._buf.close()
@@ -191,6 +196,9 @@ class Sandbox:
         return ticks / os.sysconf("SC_CLK_TCK")
 
     def close(self) -> None:
+        if self._aio is not None:
+            self._aio.close()
+            self._aio = None
         with contextlib.suppress(OSError):
             wire.send(self._w, b"X")
         with contextlib.suppress(OSError):
@@ -398,7 +406,10 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
         for f in disk_dir.glob("*.pages"):
             fd = os.open(f, os.O_RDONLY | os.O_DIRECT)
             disk_fds[f.stem] = (fd, os.fstat(fd).st_size // PAGE)
-        sandbox = Sandbox((index_fd,), threads=threads)
+        # search_args.aio: serve each io.read() round with concurrent AIO reads, so the
+        # per-query wall-clock latency is a real one (evolve run 3 scores it).
+        aio = bool(args.get("aio", False))
+        sandbox = Sandbox((index_fd,), threads=threads, aio=aio)
         sandbox.send_json(
             {
                 "cmd": "search",
@@ -528,6 +539,7 @@ def run_search(config: dict[str, Any]) -> dict[str, Any]:
                     (rbytes1 - rbytes0) / 4096 / nq if rbytes0 >= 0 and rbytes1 >= 0 else None
                 ),
                 "cpu_ms_per_query": cpu_s * 1000.0 / nq,
+                "aio": aio,
                 "program_sha256": hashlib.sha256(source.encode()).hexdigest(),
                 "build_program_sha256": meta["program_sha256"],
                 "integrity": integrity,
