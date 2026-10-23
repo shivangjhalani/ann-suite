@@ -48,9 +48,7 @@ def main() -> None:
     ap.add_argument("dir", type=Path)
     ap.add_argument("--recall", type=float, default=0.95)
     a = ap.parse_args()
-    rows = [
-        json.loads(x) for x in (a.dir / "rank_by_state.jsonl").read_text().splitlines()
-    ]
+    rows = [json.loads(x) for x in (a.dir / "rank_by_state.jsonl").read_text().splitlines()]
     pts = [r for r in rows if r.get("phase") == "point"]
     fresh_ok = [
         (r["probe_qd1_p50_us"] or 1e9) <= 33 and (r["probe_qd64_kiops"] or 0) >= 500
@@ -79,9 +77,7 @@ def main() -> None:
         for rnd in rounds:
             for arm in ("fresh", "folded"):
                 d = by[arm, rnd]
-                order = " < ".join(
-                    f"{s}({abs(d[s]):.3g})" for s in sorted(d, key=d.get)
-                )
+                order = " < ".join(f"{s}({abs(d[s]):.3g})" for s in sorted(d, key=d.get))
                 print(f"  r{rnd} {arm:6}: {order}")
         cross = [swaps(by["fresh", r], by["folded", r]) for r in rounds]
         ctrl = [

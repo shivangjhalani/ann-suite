@@ -7,17 +7,22 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 export PATH=$HOME/.local/bin:$PATH
 log=logs/reference_points.log
-if pgrep -f "tools/device_state/|ann-suite run|evolve_bench" >/dev/null \
+if pgrep -f "python.*(tools/device_state/|evolve_bench)|ann-suite run" >/dev/null \
   || [ -n "$(docker ps --format '{{.Names}}' | grep -v monitoring || true)" ] \
   || tmux ls 2>/dev/null | grep -qE '^(recheck|pvq|a2|span|rank|probe)'; then
   echo "$(date -Is) skipped: machine busy" >>"$log"
   exit 0
 fi
 out=results/reference_points/$(date +%F_%H%M)
-pipeann=$(ls -d /home/isfcr/evolve_indices/baselines/PipeANN-pq32/bigann10m-q2k/*/ | head -1)
+base=/home/isfcr/evolve_indices/baselines
+diskann=$(ls -d $base/DiskANN-B0.32/bigann10m-q2k/*/ | head -1)
+pipeann=$(ls -d $base/PipeANN-pq32/bigann10m-q2k/*/ | head -1)
 echo "$(date -Is) start $out" >>"$log"
-uv run python tools/device_state/probe_vs_qps.py --no-copy --out "$out" --params '{"Ls": 250}' >>"$log" 2>&1
+# Both at recall ~0.95 on BIGANN-10M (2,000 queries), under the evolve baselines' 785 MB cap.
 uv run python tools/device_state/probe_vs_qps.py --no-copy --out "$out" \
-  --config configs/evolve/baselines/pipeann.yaml --algo PipeANN-pq32 --original "$pipeann" \
-  --params '{"mode": 2, "beam_width": 32, "Ls": 25}' >>"$log" 2>&1
+  --config configs/evolve/baselines/diskann.yaml --algo DiskANN-B0.32 --files '*' --original "$diskann" \
+  --params '{"Ls": 40}' >>"$log" 2>&1
+uv run python tools/device_state/probe_vs_qps.py --no-copy --out "$out" \
+  --config configs/evolve/baselines/pipeann.yaml --algo PipeANN-pq32 --files '*' --original "$pipeann" \
+  --params '{"mode": 2, "beam_width": 32, "Ls": 40}' >>"$log" 2>&1
 echo "$(date -Is) done $out" >>"$log"

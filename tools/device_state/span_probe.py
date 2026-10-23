@@ -75,8 +75,10 @@ def main() -> None:
     rng = random.Random(args.seed)
     jobs = []
     for d in args.index_dirs:
-        f = largest_file(d)
-        assert f is not None, d
+        f = largest_file(d) if d.exists() else None
+        if f is None:
+            print(f"skipping {d}: no files (deleted?)", flush=True)
+            continue
         size = f.stat().st_size // PAGE * PAGE
         spans = [int(float(s) * GIB) for s in args.spans.split(",")]
         for span in [s for s in spans if s < size] + [size]:

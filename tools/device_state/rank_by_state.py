@@ -55,6 +55,10 @@ def point(system: dict, index_dir: Path, threads: int, params: dict) -> dict[str
     algo.build.prebuilt_path = index_dir
     algo.search.sweep = [params]
     algo.search.args["num_threads"] = threads
+    if threads > 1:
+        # In serial mode the DiskANN and HNSW runners ignore num_threads (queries run one at
+        # a time), so multi-thread throughput needs batch mode; other runners ignore the flag.
+        algo.search.batch_mode = True
     config.algorithms = [algo]
     (result,) = BenchmarkEvaluator(config).run()
     cond = result.run_conditions
@@ -62,6 +66,7 @@ def point(system: dict, index_dir: Path, threads: int, params: dict) -> dict[str
         "qps": result.qps,
         "recall": result.recall,
         "mean_latency_ms": result.latency.mean_ms,
+        "batch_mode": algo.search.batch_mode,
         **{k: cond.get(k) for k in COND_KEYS},
     }
 

@@ -57,6 +57,10 @@ def point(
     algo.build.prebuilt_path = index_dir
     algo.search.sweep = [params]
     algo.search.args["num_threads"] = threads
+    if threads > 1:
+        # In serial mode the DiskANN and HNSW runners ignore num_threads (queries run one at
+        # a time), so multi-thread throughput needs batch mode; other runners ignore the flag.
+        algo.search.batch_mode = True
     config.algorithms = [algo]
     (result,) = BenchmarkEvaluator(config).run()
     cond = result.run_conditions
@@ -64,6 +68,7 @@ def point(
         "qps": result.qps,
         "recall": result.recall,
         "mean_latency_ms": result.latency.mean_ms,
+        "batch_mode": algo.search.batch_mode,
         **{k: cond.get(k) for k in COND_KEYS},
     }
 
@@ -82,7 +87,12 @@ def main() -> None:
     ap.add_argument("--duration", type=float, default=1800)
     ap.add_argument("--gap", type=float, default=600)
     ap.add_argument("--no-copy", action="store_true", help="smoke test: original only, 1 round")
+    ap.add_argument(
+        "--max-failures", type=int, default=3, help="stop after this many failed points in a row"
+    )
     args = ap.parse_args()
+    if not [f for f in args.original.glob(args.files) if f.is_file()]:
+        raise SystemExit(f"no index files matching {args.files!r} in {args.original}")
 
     args.out.mkdir(parents=True, exist_ok=True)
     out = args.out / "probe_vs_qps.jsonl"
@@ -90,8 +100,16 @@ def main() -> None:
     threads_list = [int(t) for t in args.threads.split(",")]
     params = json.loads(args.params)
 
+    failures = 0
+
     def run(index_dir: Path, threads: int) -> dict[str, Any]:
-        return point(args.config, args.algo, index_dir, threads, params)
+        nonlocal failures
+        row = point(args.config, args.algo, index_dir, threads, params)
+        failures = 0 if row["qps"] else failures + 1
+        if failures >= args.max_failures:
+            emit(out, phase="aborted", reason=f"{failures} failed points in a row", **row)
+            raise SystemExit(f"{failures} failed points in a row; last on {index_dir}")
+        return row
 
     emit(out, phase="start", config=str(args.config), algo=args.algo, params=params,
          threads=threads_list, original=str(args.original))  # fmt: skip
