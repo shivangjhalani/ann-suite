@@ -95,11 +95,15 @@ def main() -> None:
         default=45,
         help="seconds between a copy and its first point",
     )
-    ap.add_argument(
-        "--scratch", type=Path, default=Path("indices/_rank_by_state_scratch")
-    )
+    ap.add_argument("--scratch", type=Path, default=Path("indices/_rank_by_state_scratch"))
     ap.add_argument("--seed", type=int, default=20261023)
     ap.add_argument("--only", nargs="*", help="system names to keep (smoke test)")
+    ap.add_argument(
+        "--fresh-max-us",
+        type=float,
+        help="redo the fresh copy until the first point's QD1 probe is at most this (see --attempts)",
+    )
+    ap.add_argument("--attempts", type=int, default=3)
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     out = args.out / "rank_by_state.jsonl"
@@ -127,22 +131,23 @@ def main() -> None:
             arms = rng.sample(["fresh", "folded"], 2)
             for arm in arms:
                 if arm == "fresh":
-                    secs = copy_index(s["index_path"], scratch)
-                    emit(
-                        out,
-                        phase="copied",
-                        round=rnd,
-                        system=s["name"],
-                        copy_s=round(secs, 1),
-                    )
-                    time.sleep(args.settle)
+                    for attempt in range(1, args.attempts + 1):
+                        secs = copy_index(s["index_path"], scratch)
+                        emit(out, phase="copied", round=rnd, system=s["name"],
+                             copy_s=round(secs, 1), attempt=attempt)  # fmt: skip
+                        time.sleep(args.settle)
+                        if args.fresh_max_us is None or attempt == args.attempts:
+                            break
+                        row = point(s, scratch, threads[0], s["params"][0])
+                        emit(out, phase="gate_check", round=rnd, system=s["name"],
+                             attempt=attempt, **row)  # fmt: skip
+                        if (row["probe_qd1_p50_us"] or 1e9) <= args.fresh_max_us:
+                            break
                     run_arm(s, "fresh", scratch, rnd)
                     shutil.rmtree(scratch, ignore_errors=True)
                 else:
                     run_arm(s, "folded", s["index_path"], rnd)
-            time.sleep(
-                args.settle
-            )  # let the drive recover from the copy before the next system
+            time.sleep(args.settle)  # let the drive recover from the copy before the next system
     emit(out, phase="done")
 
 
