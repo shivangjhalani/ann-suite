@@ -49,7 +49,8 @@ def main() -> None:
     ap.add_argument("--recall", type=float, default=0.95)
     a = ap.parse_args()
     rows = [json.loads(x) for x in (a.dir / "rank_by_state.jsonl").read_text().splitlines()]
-    pts = [r for r in rows if r.get("phase") == "point"]
+    # with --copy-per-point only the last attempt of each fresh point counts
+    pts = [r for r in rows if r.get("phase") == "point" and r.get("final", True)]
     fresh_ok = [
         (r["probe_qd1_p50_us"] or 1e9) <= 33 and (r["probe_qd64_kiops"] or 0) >= 500
         for r in pts

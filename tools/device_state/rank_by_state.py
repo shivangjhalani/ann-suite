@@ -5,9 +5,12 @@ for each of --rounds rounds, in a random order drawn per round (RMIT, Abedi & Br
   * "fresh" arm: the index's large files are copied to a scratch dir (small files hard-linked),
     --settle seconds pass, then every (search point, thread count) is run on the copy;
   * "folded" arm: the same points on the untouched original.
+With --copy-per-point the fresh arm re-copies the index before every point instead, and with
+--fresh-max-us a point counts as fresh ("gated") only if both its probes read at most that QD1;
+a point that misses is re-copied and re-run, up to --attempts times. Every attempt is recorded.
 The arm order is random per system and round. Every point goes through ann-suite (fresh container,
 page cache dropped) and records the B1 device probes before and after, so each row pairs a QPS
-with the drive state it ran in. Nothing is gated here; analyse with analyze_rank_by_state.py.
+with the drive state it ran in. Analyse with analyze_rank_by_state.py.
 Run nothing else on the machine.
   uv run python tools/device_state/rank_by_state.py --spec configs/device_state/rank_10m.json \
       --out results/rank_by_state/2026-10-23 --rounds 6
@@ -106,9 +109,15 @@ def main() -> None:
     ap.add_argument(
         "--fresh-max-us",
         type=float,
-        help="redo the fresh copy until the first point's QD1 probe is at most this (see --attempts)",
+        help="fresh copy must read at most this QD1 (us): first point's pre-probe, or with "
+        "--copy-per-point both probes of every point (see --attempts)",
     )
     ap.add_argument("--attempts", type=int, default=3)
+    ap.add_argument(
+        "--copy-per-point",
+        action="store_true",
+        help="fresh arm: copy before every point, gate each point on its own probes",
+    )
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     out = args.out / "rank_by_state.jsonl"
@@ -121,7 +130,9 @@ def main() -> None:
     rng = random.Random(args.seed)
     scratch = args.scratch.resolve()
     emit(out, phase="start", spec=str(args.spec), rounds=args.rounds, threads=threads,
-         seed=args.seed, systems=[s["name"] for s in systems])  # fmt: skip
+         seed=args.seed, systems=[s["name"] for s in systems], settle=args.settle,
+         fresh_max_us=args.fresh_max_us, attempts=args.attempts,
+         copy_per_point=args.copy_per_point)  # fmt: skip
 
     def run_arm(s: dict, arm: str, d: Path, rnd: int) -> None:
         for th in threads:
@@ -130,12 +141,36 @@ def main() -> None:
                 emit(out, phase="point", round=rnd, system=s["name"], arm=arm, threads=th,
                      params=params, **row)  # fmt: skip
 
+    def gated(row: dict) -> bool:
+        qd1 = (row["probe_qd1_p50_us"], row["post_probe_qd1_p50_us"])
+        return all(v is not None and v <= args.fresh_max_us for v in qd1)
+
+    def run_fresh_per_point(s: dict, rnd: int) -> None:
+        for th in threads:
+            for params in s["params"]:
+                for attempt in range(1, args.attempts + 1):
+                    secs = copy_index(s["index_path"], scratch)
+                    emit(out, phase="copied", round=rnd, system=s["name"],
+                         copy_s=round(secs, 1), attempt=attempt)  # fmt: skip
+                    time.sleep(args.settle)
+                    row = point(s, scratch, th, params)
+                    ok = args.fresh_max_us is not None and gated(row)
+                    final = ok or args.fresh_max_us is None or attempt == args.attempts
+                    emit(out, phase="point", round=rnd, system=s["name"], arm="fresh",
+                         threads=th, params=params, attempt=attempt, gated=ok, final=final,
+                         **row)  # fmt: skip
+                    if final:
+                        break
+        shutil.rmtree(scratch, ignore_errors=True)
+
     for rnd in range(1, args.rounds + 1):
         order = rng.sample(systems, len(systems))
         for s in order:
             arms = rng.sample(["fresh", "folded"], 2)
             for arm in arms:
-                if arm == "fresh":
+                if arm == "fresh" and args.copy_per_point:
+                    run_fresh_per_point(s, rnd)
+                elif arm == "fresh":
                     for attempt in range(1, args.attempts + 1):
                         secs = copy_index(s["index_path"], scratch)
                         emit(out, phase="copied", round=rnd, system=s["name"],
