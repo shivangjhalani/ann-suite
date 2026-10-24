@@ -9,7 +9,8 @@ for each of --rounds rounds, in a random order drawn per round (RMIT, Abedi & Br
 With --copy-per-point the fresh arm re-copies the index before every point instead, and with
 --fresh-max-us a point counts as fresh ("gated") only if both its probes read at most that QD1;
 a point that misses is re-copied and re-run, up to --attempts times. Every attempt is recorded.
-A spec system may set "threads" to run only those thread counts. --max-written-gb stops the run
+A spec system may set "threads" to run only those thread counts ("fresh_threads": in the fresh
+arm), and "memory_limit" / "cpu_affinity" to override its config. --max-written-gb stops the run
 before any copy once the drive's SMART host writes since the start exceed that many GB.
 The arm order is random per system and round. Every point goes through ann-suite (fresh container,
 page cache dropped) and records the B1 device probes before and after, so each row pairs a QPS
@@ -66,6 +67,8 @@ def point(system: dict, index_dir: Path, threads: int, params: dict) -> dict[str
     algo.search.args["num_threads"] = threads
     if "memory_limit" in system:  # spec override, e.g. a cap that fits every system compared
         algo.memory_limit = system["memory_limit"]
+    if "cpu_affinity" in system:  # e.g. all cores for a thread sweep
+        algo.cpu_affinity = system["cpu_affinity"]
     if threads > 1:
         # In serial mode the DiskANN and HNSW runners ignore num_threads (queries run one at
         # a time), so multi-thread throughput needs batch mode; other runners ignore the flag.
@@ -78,6 +81,13 @@ def point(system: dict, index_dir: Path, threads: int, params: dict) -> dict[str
         "recall": result.recall,
         "mean_latency_ms": result.latency.mean_ms,
         "batch_mode": algo.search.batch_mode,
+        "reads_per_query": result.disk_io.search_reads_per_query,
+        "bytes_read_per_query": result.disk_io.search_bytes_read_per_query,
+        "bytes_per_read_op": result.disk_io.search_avg_bytes_per_read_op,
+        "device_read_iops": result.disk_io.search_device_read_iops,
+        "avg_queue_depth": result.disk_io.search_avg_queue_depth,
+        "cpu_time_per_query_ms": result.cpu.search_cpu_time_per_query_ms,
+        "avg_cpu_percent": result.cpu.search_avg_cpu_percent,
         **{k: cond.get(k) for k in COND_KEYS},
     }
 
@@ -184,7 +194,7 @@ def main() -> None:
         return all(v is not None and v <= args.fresh_max_us for v in qd1)
 
     def run_fresh_per_point(s: dict, rnd: int) -> None:
-        for th in s.get("threads", threads):
+        for th in s.get("fresh_threads", s.get("threads", threads)):
             for params in s["params"]:
                 for attempt in range(1, args.attempts + 1):
                     copy(s, rnd, attempt)

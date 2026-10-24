@@ -1,0 +1,11 @@
+{
+  "note": "AP-E-P3: thread sweep (I/O-bound vs CPU-bound). DiskANN-B0.32 Ls25 (recall 0.911) and PipeANN-pq32 mode 2 bw32 Ls25 (0.914), BIGANN-10M, 2000 queries, 785 MB cap (PipeANN T32 OOMs at this cap, so the sweep stops at 24 = core count), all 24 cores (8 P + 16 E). Folded: 1-24 threads; fresh: 16 and 24 only.",
+  "systems": [
+    {"name": "DiskANN-B0.32", "config": "configs/evolve/baselines/diskann.yaml", "algo": "DiskANN-B0.32",
+     "index": "/home/isfcr/evolve_indices/baselines/DiskANN-B0.32/bigann10m-q2k/*",
+     "params": [{"Ls": 25}], "threads": [1, 2, 4, 8, 16, 24], "fresh_threads": [16, 24], "cpu_affinity": "0-23"},
+    {"name": "PipeANN-pq32", "config": "configs/evolve/baselines/pipeann.yaml", "algo": "PipeANN-pq32",
+     "index": "/home/isfcr/evolve_indices/baselines/PipeANN-pq32/bigann10m-q2k/*",
+     "params": [{"mode": 2, "beam_width": 32, "Ls": 25}], "threads": [1, 2, 4, 8, 16, 24], "fresh_threads": [16, 24], "cpu_affinity": "0-23"}
+  ]
+}
