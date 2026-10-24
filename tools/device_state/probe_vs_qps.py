@@ -30,6 +30,7 @@ from ann_suite.core.config import load_config
 from ann_suite.evaluator import BenchmarkEvaluator
 
 COND_KEYS = (
+    "probe_file",
     "probe_qd1_p50_us",
     "probe_qd64_kiops",
     "post_probe_qd1_p50_us",

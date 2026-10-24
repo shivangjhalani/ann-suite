@@ -8,6 +8,7 @@ from ann_suite.monitoring.host_state import (
     _cpu_list,
     drift_warning,
     host_state,
+    largest_file,
     probe_device,
 )
 
@@ -42,3 +43,12 @@ class TestDriftWarning:
         assert drift_warning(base, {"probe_qd1_p50_us": 110.0, "probe_qd64_kiops": 390.0}) is None
         assert drift_warning(base, {"probe_qd1_p50_us": 250.0, "probe_qd64_kiops": 390.0})
         assert drift_warning(base, {"probe_qd1_p50_us": 100.0, "probe_qd64_kiops": 150.0})
+
+
+def test_largest_file_pattern_picks_the_searched_file(tmp_path: Path) -> None:
+    # LAANN keeps an unsorted index of the same size next to the *_fsort.index it searches.
+    (tmp_path / "x_LAANN.index").write_bytes(b"a" * 4096)
+    (tmp_path / "x_LAANN_fsort.index").write_bytes(b"b" * 4096)
+    (tmp_path / "small.bin").write_bytes(b"c")
+    assert largest_file(tmp_path, "*_fsort.index") == tmp_path / "x_LAANN_fsort.index"
+    assert largest_file(tmp_path, "*.nothing") is None

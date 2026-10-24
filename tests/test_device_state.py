@@ -196,7 +196,7 @@ class TestEvaluatorGate:
         values = iter(qd1)
         monkeypatch.setattr(
             "ann_suite.evaluator.probe_device",
-            lambda d: {"probe_file": "graph.bin", "probe_qd1_p50_us": next(values)},
+            lambda d, pattern="*": {"probe_file": "graph.bin", "probe_qd1_p50_us": next(values)},
         )
         monkeypatch.setattr("ann_suite.evaluator.drive_record", lambda f: {"dev_name": "x"})
         rewrite = MagicMock(return_value=0.0)

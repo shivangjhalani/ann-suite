@@ -29,8 +29,9 @@ QD1_READS = 2000
 FIO_SECONDS = 4
 
 
-def largest_file(directory: Path) -> Path | None:
-    files = [p for p in directory.rglob("*") if p.is_file()]
+def largest_file(directory: Path, pattern: str = "*") -> Path | None:
+    """The largest file under ``directory`` matching ``pattern`` (a glob, searched recursively)."""
+    files = [p for p in directory.rglob(pattern) if p.is_file()]
     return max(files, key=lambda p: p.stat().st_size, default=None)
 
 
@@ -67,14 +68,17 @@ def _fio_qd64(target: Path) -> dict[str, Any]:
     }
 
 
-def probe_device(index_dir: Path) -> dict[str, Any]:
+def probe_device(index_dir: Path, pattern: str = "*") -> dict[str, Any]:
     """Measure 4 KiB random-read speed on the index's largest file (O_DIRECT, no page cache).
+
+    ``pattern`` narrows the candidates to the file the search reads, for index directories
+    that also hold a large file the search never opens (build.probe_file in the config).
 
     Reports QD1 median latency (pure Python) and, when fio is installed, QD64 IOPS and latency.
     The probe reflects the SSD state for exactly the bytes the search will read and costs a few
     seconds. Returns an empty dict when it cannot run.
     """
-    target = largest_file(index_dir)
+    target = largest_file(index_dir, pattern)
     if target is None or target.stat().st_size < PAGE * 1024:
         return {}
     pages = target.stat().st_size // PAGE

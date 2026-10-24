@@ -242,6 +242,15 @@ class BuildConfig(BaseModel):
             "practice (see ai-researcher vault, Experiments/cache-fraction-cost-model-sift10m)."
         ),
     )
+    probe_file: str | None = Field(
+        default=None,
+        description=(
+            "Glob (relative to the index directory) for the file the device-state probes read "
+            "and the size-class bands use. Default: the largest file. Set it when the directory "
+            "also holds a large file the search never reads, e.g. LAANN keeps the unsorted "
+            "index next to the '*_fsort.index' it searches."
+        ),
+    )
     args: dict[str, Any] = Field(default_factory=dict, description="Algorithm-specific build args")
     memory_limit: str | None = Field(
         default=None,

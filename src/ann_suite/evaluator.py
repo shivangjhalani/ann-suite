@@ -786,15 +786,16 @@ class BenchmarkEvaluator:
         """
         gate = self.config.device_state
         on_disk = algo_config.algorithm_type in (AlgorithmType.DISK, AlgorithmType.HYBRID)
+        pattern = algo_config.build.probe_file or "*"
         state: dict[str, Any] = {}
         if algo_config.search.warmup.probe_device_state or (on_disk and gate.active):
             state = host_state(algo_config.cpu_affinity)
             if on_disk:
-                state.update(self._device_state(context.host_index_dir))
+                state.update(self._device_state(context.host_index_dir, pattern))
             self._note_state_drift(state)
 
         if state.get("state_ok") is False and gate.on_fail == "refuse":
-            bands = self._gate_bands(context.host_index_dir)
+            bands = self._gate_bands(context.host_index_dir, pattern)
             logger.error(
                 f"[{self._run_id}] Refusing point: index {context.host_index_dir} is not in "
                 f"device state '{gate.target.value}' (bands {bands or 'none for its size'}; "
@@ -832,22 +833,22 @@ class BenchmarkEvaluator:
         if on_disk and "probe_qd1_p50_us" in state:
             # A point can start in state and leave it (QD64 dips mid-session were seen), so
             # probe again after the search and flag points whose state did not hold.
-            post = probe_device(context.host_index_dir)
+            post = probe_device(context.host_index_dir, pattern)
             state.update({f"post_{k}": v for k, v in post.items() if k != "probe_file"})
             if gate.active:
-                bands = self._gate_bands(context.host_index_dir)
+                bands = self._gate_bands(context.host_index_dir, pattern)
                 state["state_ok_post"] = bool(bands) and in_bands(post, bands)
         result.run_conditions = {**_run_conditions(algo_config), **state}
         return result
 
-    def _gate_bands(self, index_dir: Path) -> ProbeBands:
-        """The device_state target bands for this index, chosen by its largest file's size."""
-        target = largest_file(index_dir)
+    def _gate_bands(self, index_dir: Path, pattern: str = "*") -> ProbeBands:
+        """The device_state target bands for this index, chosen by its probed file's size."""
+        target = largest_file(index_dir, pattern)
         if target is None:
             return {}
         return self.config.device_state.bands_for(target.stat().st_size / 1e9)
 
-    def _device_state(self, index_dir: Path) -> dict[str, Any]:
+    def _device_state(self, index_dir: Path, pattern: str = "*") -> dict[str, Any]:
         """Probe the index file, apply the device_state gate, and describe its drive.
 
         With the gate inactive this is one probe plus the drive record. With it active, a miss
@@ -855,17 +856,17 @@ class BenchmarkEvaluator:
         keys: probe_*, state_* (gate outcome), dev_* and index_file_age_h (drive record).
         """
         gate = self.config.device_state
-        target = largest_file(index_dir)
+        target = largest_file(index_dir, pattern)
         if target is None:
             return {}
         key = index_dir.resolve()
 
         def probe() -> dict[str, Any]:
-            return probe_device(index_dir)
+            return probe_device(index_dir, pattern)
 
         if not gate.active:
             rec = probe()
-        elif not (bands := self._gate_bands(index_dir)):
+        elif not (bands := self._gate_bands(index_dir, pattern)):
             rec = probe()
             rec.update(state_target=gate.target.value, state_ok=False, state_waits=0,
                        state_prepares=0)  # fmt: skip

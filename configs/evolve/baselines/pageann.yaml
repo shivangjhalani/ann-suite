@@ -85,6 +85,7 @@ algorithms:
       timeout_seconds: 21600
       memory_limit: none
       cpu_affinity: none   # pin searches only; builds use all cores
+      probe_file: "*_fsort.index"   # the unsorted .index next to it is never searched
       args: {variant: laann, R: 48, L: 128, B: 0.1, M: 16, num_threads: 12}
     search: *laann_search
   - name: LAANN-B0.32
@@ -96,5 +97,6 @@ algorithms:
       timeout_seconds: 21600
       memory_limit: none
       cpu_affinity: none   # pin searches only; builds use all cores
+      probe_file: "*_fsort.index"   # the unsorted .index next to it is never searched
       args: {variant: laann, R: 48, L: 128, B: 0.32, M: 16, num_threads: 12}
     search: *laann_search
