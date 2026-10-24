@@ -1,0 +1,17 @@
+{
+  "note": "AP-E-A2d: DiskANN-LAANN pair redone with the fixed LAANN probe (fsort file), plus the PipeANN-Starling T8 flip re-test. One search point per system near recall 0.96 (folded recalls: DiskANN Ls40 0.958, LAANN Ls30 0.9625, PipeANN Ls40 0.9575, Starling Ls30 0.959). Pair 1 at T8 only (its T1 predictions were supported in A2c). BIGANN-10M, 2000 queries, 785 MB cap of the evolve baselines.",
+  "systems": [
+    {"name": "Starling-B0.32", "config": "configs/evolve/baselines/starling.yaml", "algo": "Starling-B0.32",
+     "index": "/home/isfcr/evolve_indices/baselines/Starling-B0.32/bigann10m-q2k/*",
+     "params": [{"Ls": 30}], "threads": [8]},
+    {"name": "PipeANN-pq32", "config": "configs/evolve/baselines/pipeann.yaml", "algo": "PipeANN-pq32",
+     "index": "/home/isfcr/evolve_indices/baselines/PipeANN-pq32/bigann10m-q2k/*",
+     "params": [{"mode": 2, "beam_width": 32, "Ls": 40}], "threads": [8]},
+    {"name": "DiskANN-B0.32", "config": "configs/evolve/baselines/diskann.yaml", "algo": "DiskANN-B0.32",
+     "index": "/home/isfcr/evolve_indices/baselines/DiskANN-B0.32/bigann10m-q2k/*",
+     "params": [{"Ls": 40}]},
+    {"name": "LAANN-B0.32", "config": "configs/evolve/baselines/pageann.yaml", "algo": "LAANN-B0.32",
+     "index": "/home/isfcr/evolve_indices/baselines/LAANN-B0.32/bigann10m-q2k/*",
+     "params": [{"Ls": 30, "cache_ratio": 0.0}]}
+  ]
+}
