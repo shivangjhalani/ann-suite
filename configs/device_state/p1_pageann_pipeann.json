@@ -1,0 +1,11 @@
+{
+  "note": "P1 (analysis-paper ledger): PageANN-B0.32 vs PipeANN-pq32, BIGANN-10M, 2000 queries, 1 thread. Both under a 2 GB cgroup cap, which fits PageANN (853 MB anon, 1.68 GB with page cache at a 4 GB cap) and PipeANN (754 MB anon). Two points per system bracket recall 0.95.",
+  "systems": [
+    {"name": "PageANN-B0.32", "config": "configs/evolve/baselines/pageann.yaml", "algo": "PageANN-B0.32",
+     "index": "/home/isfcr/evolve_indices/baselines/PageANN-B0.32/bigann10m-q2k/*", "memory_limit": "2g",
+     "params": [{"Ls": 25, "cache_ratio": 0.0}, {"Ls": 40, "cache_ratio": 0.0}]},
+    {"name": "PipeANN-pq32", "config": "configs/evolve/baselines/pipeann.yaml", "algo": "PipeANN-pq32",
+     "index": "/home/isfcr/evolve_indices/baselines/PipeANN-pq32/bigann10m-q2k/*", "memory_limit": "2g",
+     "params": [{"mode": 2, "beam_width": 32, "Ls": 25}, {"mode": 2, "beam_width": 32, "Ls": 40}]}
+  ]
+}

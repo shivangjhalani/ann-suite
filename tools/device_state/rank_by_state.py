@@ -59,6 +59,8 @@ def point(system: dict, index_dir: Path, threads: int, params: dict) -> dict[str
     algo.build.prebuilt_path = index_dir
     algo.search.sweep = [params]
     algo.search.args["num_threads"] = threads
+    if "memory_limit" in system:  # spec override, e.g. a cap that fits every system compared
+        algo.memory_limit = system["memory_limit"]
     if threads > 1:
         # In serial mode the DiskANN and HNSW runners ignore num_threads (queries run one at
         # a time), so multi-thread throughput needs batch mode; other runners ignore the flag.
