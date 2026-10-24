@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 export PATH=$HOME/.local/bin:$PATH
 log=logs/reference_points.log
-if pgrep -f "python.*(tools/device_state/|evolve_bench)|ann-suite run" >/dev/null \
+if pgrep -f "python.*(tools/device_state/|tools/evolve/e2e/|evolve_bench)|ann-suite run" >/dev/null \
   || [ -n "$(docker ps --format '{{.Names}}' | grep -v monitoring || true)" ] \
   || tmux ls 2>/dev/null | grep -qE '^(recheck|pvq|a2|span|rank|probe)'; then
   echo "$(date -Is) skipped: machine busy" >>"$log"
