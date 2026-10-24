@@ -89,6 +89,8 @@ class DiskIODict(TypedDict):
     pages_per_query: float | None
     reads_per_query: float | None
     bytes_read_per_query: float | None
+    steady_reads_per_query: float | None
+    steady_bytes_read_per_query: float | None
     # Queue depth (system-wide in-flight I/O, sampled per interval)
     avg_queue_depth: float | None
     max_queue_depth: int | None
@@ -872,6 +874,16 @@ class ResourceSummary(BaseModel):
     peak_anon_bytes: int = Field(
         default=0, ge=0, description="Peak anonymous memory bytes (memory.stat anon)"
     )
+    steady_read_bytes_per_second: float | None = Field(
+        default=None,
+        ge=0,
+        description="Read bytes/s over the samples strictly inside the query window (no edges)",
+    )
+    steady_read_ops_per_second: float | None = Field(
+        default=None,
+        ge=0,
+        description="Read ops/s over the samples strictly inside the query window (no edges)",
+    )
     nr_throttled_delta: int = Field(default=0, ge=0, description="CPU throttle count (delta)")
     throttled_usec_delta: int = Field(
         default=0, ge=0, description="CPU throttled time (microseconds)"
@@ -1151,6 +1163,19 @@ class DiskIOMetrics(BaseModel):
         default=None,
         ge=0,
         description="Average bytes read from block devices per query (search phase only)",
+    )
+    search_steady_reads_per_query: float | None = Field(
+        default=None,
+        ge=0,
+        description="Read ops per query from the interior of the query window. The window "
+        "totals above include up to one sampling interval of the adjacent phases per edge, "
+        "which dominates when the query loop lasts only a few intervals.",
+    )
+    search_steady_bytes_read_per_query: float | None = Field(
+        default=None,
+        ge=0,
+        description="Bytes read per query from the interior of the query window "
+        "(see search_steady_reads_per_query)",
     )
 
     # Queue depth (system-wide in-flight I/O, sampled per interval)
@@ -1645,6 +1670,8 @@ class BenchmarkResult(BaseModel):
             pages_per_query=self.disk_io.search_pages_per_query,
             reads_per_query=self.disk_io.search_reads_per_query,
             bytes_read_per_query=self.disk_io.search_bytes_read_per_query,
+            steady_reads_per_query=self.disk_io.search_steady_reads_per_query,
+            steady_bytes_read_per_query=self.disk_io.search_steady_bytes_read_per_query,
             avg_queue_depth=self.disk_io.search_avg_queue_depth,
             max_queue_depth=self.disk_io.search_max_queue_depth,
             p95_queue_depth=self.disk_io.search_p95_queue_depth,

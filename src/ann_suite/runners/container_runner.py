@@ -741,6 +741,11 @@ class ContainerRunner:
                         run_id=run_id,
                         persist_debug=False,
                     )
+                    if rates := self._cgroups_collector.steady_read_rates(start_dt, end_dt):
+                        (
+                            resources.steady_read_bytes_per_second,
+                            resources.steady_read_ops_per_second,
+                        ) = rates
                     logger.info(
                         f"{log_prefix}Refined metrics: cpu={resources.avg_cpu_percent:.1f}%, "
                         f"read_iops={resources.avg_read_iops:.1f}, "

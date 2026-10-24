@@ -5,7 +5,11 @@ from datetime import datetime, timedelta
 import pytest
 
 from ann_suite.monitoring.base import CollectorSample, DeviceIOStat
-from ann_suite.monitoring.cgroups_collector import CgroupsV2Collector
+from ann_suite.monitoring.cgroups_collector import (
+    CgroupsV2Collector,
+    steady_read_rates,
+    window_samples,
+)
 
 
 class TestCgroupsV2Collector:
@@ -230,6 +234,60 @@ class TestCgroupsV2Collector:
         summary = collector._aggregate_samples()
         assert summary.io_pressure_some_total_usec == 0
         assert summary.psi_available is False
+
+
+class TestSteadyReadRates:
+    """Interior-of-window read rates (B13): edges of a short query window must not leak."""
+
+    @staticmethod
+    def _samples(t0: datetime) -> list[CollectorSample]:
+        # 0.0-0.1 s: index load at 3 GB/s; 0.1-0.7 s: query loop at 100 MB/s, 1,000 ops/s.
+        out, rb, ro = [], 0, 0
+        for i in range(9):
+            out.append(
+                CollectorSample(
+                    timestamp=t0 + timedelta(seconds=i / 10),
+                    cpu_time_ns=i,
+                    blkio_read_bytes=rb,
+                    blkio_read_ops=ro,
+                )
+            )
+            rb += 300_000_000 if i == 0 else 10_000_000
+            ro += 100
+        return out
+
+    def test_interior_rate_excludes_load_edge(self) -> None:
+        t0 = datetime(2026, 10, 24)
+        samples = self._samples(t0)
+        start, end = t0 + timedelta(seconds=0.05), t0 + timedelta(seconds=0.75)
+        bps, ops = steady_read_rates(samples, start, end)  # type: ignore[misc]
+        assert bps == pytest.approx(100e6)
+        assert ops == pytest.approx(1000)
+        widened = window_samples(samples, start, end)
+        assert widened[-1].blkio_read_bytes - widened[0].blkio_read_bytes > 300_000_000
+
+    def test_none_with_fewer_than_three_interior_samples(self) -> None:
+        t0 = datetime(2026, 10, 24)
+        samples = self._samples(t0)
+        assert (
+            steady_read_rates(samples, t0 + timedelta(seconds=0.12), t0 + timedelta(seconds=0.29))
+            is None
+        )
+
+    def test_per_query_refuses_window_wider_than_loop(self) -> None:
+        from ann_suite.evaluator import _per_query
+
+        assert _per_query(1e9, 0.6, 2000, 2000 / 0.6) == pytest.approx(3e5)
+        assert _per_query(1e9, 0.59, 2000, 24000) is None  # 83 ms loop in a 0.59 s window
+        assert _per_query(None, 0.6, 2000, 3000) is None
+
+    def test_none_when_counters_reset(self) -> None:
+        t0 = datetime(2026, 10, 24)
+        samples = self._samples(t0)
+        samples[-1] = CollectorSample(timestamp=samples[-1].timestamp)
+        assert (
+            steady_read_rates(samples, t0 + timedelta(seconds=0.05), samples[-1].timestamp) is None
+        )
 
 
 class TestIOStatParsing:

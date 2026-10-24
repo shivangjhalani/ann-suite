@@ -300,6 +300,23 @@ def _run_conditions(algo_config: AlgorithmConfig) -> dict[str, Any]:
     }
 
 
+def _per_query(
+    rate: float | None, duration_s: float, num_queries: int, qps: float | None
+) -> float | None:
+    """A steady per-second rate over the query window, as a per-query amount.
+
+    None unless the window is the query loop: its length must match num_queries / qps
+    within 20%. Some runners time a wider span than the loop their QPS comes from (PipeANN:
+    a 0.59 s window around an 83 ms loop at 24 threads), and then the window's rate is not
+    the loop's.
+    """
+    if rate is None or duration_s <= 0 or num_queries <= 0 or not qps:
+        return None
+    if abs(num_queries / qps - duration_s) > 0.2 * duration_s:
+        return None
+    return rate * duration_s / num_queries
+
+
 def _empty_resource_summary() -> ResourceSummary:
     """Return explicit zero metrics for an index supplied before the run."""
     return ResourceSummary(
@@ -1455,6 +1472,18 @@ class BenchmarkEvaluator:
             ),
             search_bytes_read_per_query=(
                 search_total_read_bytes / num_queries if num_queries > 0 else None
+            ),
+            search_steady_reads_per_query=_per_query(
+                search_res.steady_read_ops_per_second,
+                query_duration,
+                num_queries,
+                search_output.get("qps"),
+            ),
+            search_steady_bytes_read_per_query=_per_query(
+                search_res.steady_read_bytes_per_second,
+                query_duration,
+                num_queries,
+                search_output.get("qps"),
             ),
             # Queue depth (system-wide gauge sampled per monitor interval)
             search_avg_queue_depth=search_res.avg_queue_depth,

@@ -83,6 +83,8 @@ def point(system: dict, index_dir: Path, threads: int, params: dict) -> dict[str
         "batch_mode": algo.search.batch_mode,
         "reads_per_query": result.disk_io.search_reads_per_query,
         "bytes_read_per_query": result.disk_io.search_bytes_read_per_query,
+        "steady_reads_per_query": result.disk_io.search_steady_reads_per_query,
+        "steady_bytes_read_per_query": result.disk_io.search_steady_bytes_read_per_query,
         "bytes_per_read_op": result.disk_io.search_avg_bytes_per_read_op,
         "device_read_iops": result.disk_io.search_device_read_iops,
         "avg_queue_depth": result.disk_io.search_avg_queue_depth,

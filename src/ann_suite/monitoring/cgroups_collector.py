@@ -163,6 +163,34 @@ def window_samples(
     return out
 
 
+def steady_read_rates(
+    samples: list[CollectorSample], start: datetime, end: datetime
+) -> tuple[float, float] | None:
+    """Read bytes/s and ops/s over the samples strictly inside [start, end].
+
+    window_samples widens each edge by up to one interval, so on a query phase only a few
+    intervals long the adjacent phases (index load at full disk rate) dominate its totals:
+    0.1 s of a 3 GB/s load on a 0.6 s query loop. The interior rate leaves both edges out;
+    times the phase duration it estimates the phase's own I/O, provided the phase runs at a
+    steady rate. None if fewer than three interior samples (two intervals) or the counters
+    reset between them.
+    `samples` must be sorted by timestamp.
+    """
+    inner = [s for s in samples if start <= s.timestamp <= end]
+    if len(inner) < 3 or _counters_reset(inner[0], inner[-1]):
+        return None
+    a, b = inner[0], inner[-1]
+    if a.monotonic_time and b.monotonic_time:
+        span = b.monotonic_time - a.monotonic_time
+    else:
+        span = (b.timestamp - a.timestamp).total_seconds()
+    if span <= 0:
+        return None
+    return (b.blkio_read_bytes - a.blkio_read_bytes) / span, (
+        b.blkio_read_ops - a.blkio_read_ops
+    ) / span
+
+
 class CgroupsV2Collector(BaseCollector):
     """Collector that reads metrics directly from cgroups v2 filesystem.
 
@@ -653,6 +681,14 @@ class CgroupsV2Collector(BaseCollector):
 
         # Filtering preserves order so samples remain sorted
         return self._aggregate_samples(samples, already_sorted=True)
+
+    def steady_read_rates(
+        self, start_timestamp: datetime, end_timestamp: datetime
+    ) -> tuple[float, float] | None:
+        """Interior read rates of a window; see the module-level steady_read_rates."""
+        with self._lock:
+            samples = sorted(self._samples, key=lambda s: s.timestamp)
+        return steady_read_rates(samples, start_timestamp, end_timestamp)
 
     def _find_bracketing_samples(
         self,
