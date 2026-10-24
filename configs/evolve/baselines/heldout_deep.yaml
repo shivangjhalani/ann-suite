@@ -31,7 +31,7 @@ algorithms:
     docker_image: ann-suite/diskann:latest
     algorithm_type: disk
     datasets: [deep10m-q2k]
-    build: {<<: *build, args: {R: 64, L: 128, search_memory_maximum: 0.32, build_memory_maximum: 16, num_threads: 24}}
+    build: {<<: *build, probe_file: "*_disk.index", args: {R: 64, L: 128, search_memory_maximum: 0.32, build_memory_maximum: 16, num_threads: 24}}
     search:
       timeout_seconds: 1800
       k: 10
@@ -43,7 +43,7 @@ algorithms:
     docker_image: ann-suite/pipeann:latest
     algorithm_type: disk
     datasets: [deep10m-q2k]
-    build: {<<: *build, args: {index_prefix: pipeann, R: 64, L: 128, pq_bytes: 32, build_memory_gb: 16, num_threads: 24, nbr_type: pq, build_mem_index: true}}
+    build: {<<: *build, probe_file: "*_disk.index", args: {index_prefix: pipeann, R: 64, L: 128, pq_bytes: 32, build_memory_gb: 16, num_threads: 24, nbr_type: pq, build_mem_index: true}}
     search:
       timeout_seconds: 1800
       k: 10

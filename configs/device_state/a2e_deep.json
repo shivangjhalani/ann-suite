@@ -1,0 +1,17 @@
+{
+  "note": "AP-E-A2e: A2d replicated on DEEP-10M (96-d float32, L2), 2000 queries. One search point per system near recall 0.96 (DiskANN Ls60 0.9608, LAANN Ls45 0.9600, PipeANN Ls60 0.9602, Starling Ls45 0.9593). Pair 1 at T8 only, pair 2 at T1 and T8. Cap 1 GB for every system: PipeANN-deep needs ~788 MB of anonymous memory and is OOM-killed at the 785 MB cap used on BIGANN. Fresh copies write only the searched index file for DiskANN, PipeANN (probe_file *_disk.index) and LAANN (*_fsort.index); Starling copies all large files, as on BIGANN.",
+  "systems": [
+    {"name": "Starling-B0.32-deep", "config": "configs/evolve/baselines/starling_heldout.yaml", "algo": "Starling-B0.32-deep",
+     "index": "/home/isfcr/evolve_indices/baselines/Starling-B0.32-deep/deep10m-q2k/*",
+     "params": [{"Ls": 45}], "threads": [8], "memory_limit": "1g"},
+    {"name": "PipeANN-pq32-deep", "config": "configs/evolve/baselines/heldout_deep.yaml", "algo": "PipeANN-pq32-deep",
+     "index": "/home/isfcr/evolve_indices/baselines/PipeANN-pq32-deep/deep10m-q2k/*",
+     "params": [{"mode": 2, "beam_width": 32, "Ls": 60}], "threads": [8], "memory_limit": "1g"},
+    {"name": "DiskANN-B0.32-deep", "config": "configs/evolve/baselines/heldout_deep.yaml", "algo": "DiskANN-B0.32-deep",
+     "index": "/home/isfcr/evolve_indices/baselines/DiskANN-B0.32-deep/deep10m-q2k/*",
+     "params": [{"Ls": 60}], "memory_limit": "1g"},
+    {"name": "LAANN-B0.32-deep", "config": "configs/evolve/baselines/heldout_deep.yaml", "algo": "LAANN-B0.32-deep",
+     "index": "/home/isfcr/evolve_indices/baselines/LAANN-B0.32-deep/deep10m-q2k/*",
+     "params": [{"Ls": 45, "cache_ratio": 0.0}], "memory_limit": "1g"}
+  ]
+}
